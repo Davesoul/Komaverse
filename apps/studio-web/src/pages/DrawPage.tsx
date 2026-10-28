@@ -1,0 +1,1197 @@
+import { useCallback, useEffect, useRef, useState } from "react";
+import { api, mediaUrl, type DrawFrame, type Page, type Project } from "../api";
+import {
+  Btn,
+  ChapterHeader,
+  EmptyState,
+  Notice,
+  PrimaryBtn,
+  SectionTitle,
+  SelectInput,
+  Spinner,
+  StatusBar,
+  TextInput,
+} from "../components/ui";
+import {
+  BLEND_MODES,
+  DrawEngine,
+  type EngineLayerInfo,
+  type SerializedLayer,
+  type ToolId,
+} from "../lib/draw/engine";
+import { setCurrentProject } from "../lib/studio";
+import { BRUSH_PRESETS } from "../lib/draw/brushes";
+
+const TOOLS: { id: ToolId; label: string; key: string }[] = [
+  { id: "brush", label: "Brush", key: "B" },
+  { id: "eraser", label: "Eraser", key: "E" },
+  { id: "line", label: "Line", key: "L" },
+  { id: "rect", label: "Rect", key: "R" },
+  { id: "ellipse", label: "Ellipse", key: "O" },
+  { id: "fill", label: "Fill", key: "G" },
+  { id: "eyedropper", label: "Pick", key: "I" },
+  { id: "text", label: "Text", key: "T" },
+  { id: "pan", label: "Pan", key: "H" },
+];
+
+const INKS = ["#111111", "#3a3a3a", "#6b6b6b", "#a3a098", "#f4efe4", "#c1121f", "#4a6fa5", "#6fa373"];
+const GRAYS = ["#000000", "#2b2b2b", "#555555", "#808080", "#ababab", "#d4d4d4", "#ffffff"];
+const RECENT_KEY = "komaverse.recentColors";
+const AUTOSAVE_MS = 1500;
+
+interface LiveSettings {
+  tool: ToolId;
+  color: string;
+  presetId: string;
+  size: number;
+  opacity: number; // 0..100 UI; engine takes 0..1
+  thinning: number;
+  smoothing: number;
+  streamline: number;
+  tilt: number;
+  stabilizer: number;
+  taperStart: boolean;
+  taperEnd: boolean;
+  fillTolerance: number;
+  shapeFill: boolean;
+}
+
+const PEN = BRUSH_PRESETS[0];
+const DEFAULT_LIVE: LiveSettings = {
+  tool: "brush",
+  color: "#111111",
+  presetId: PEN.id,
+  size: PEN.size,
+  opacity: Math.round(PEN.opacity * 100),
+  thinning: Math.round(PEN.thinning * 100),
+  smoothing: Math.round(PEN.smoothing * 100),
+  streamline: Math.round(PEN.streamline * 100),
+  tilt: Math.round(PEN.tiltEffect * 100),
+  stabilizer: 35,
+  taperStart: PEN.taperStart,
+  taperEnd: PEN.taperEnd,
+  fillTolerance: 24,
+  shapeFill: false,
+};
+
+function applyLive(engine: DrawEngine, s: LiveSettings) {
+  engine.tool = s.tool;
+  engine.color = s.color;
+  engine.brush = {
+    size: s.size,
+    opacity: s.opacity / 100,
+    thinning: s.thinning / 100,
+    smoothing: s.smoothing / 100,
+    streamline: s.streamline / 100,
+    taperStart: s.taperStart,
+    taperEnd: s.taperEnd,
+    tiltEffect: s.tilt / 100,
+  };
+  engine.stabilizer = s.stabilizer / 100;
+  engine.fillTolerance = s.fillTolerance;
+  engine.shapeFill = s.shapeFill;
+}
+
+const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v));
+
+function loadRecents(): string[] {
+  try {
+    const raw = localStorage.getItem(RECENT_KEY);
+    const arr = raw ? (JSON.parse(raw) as unknown) : [];
+    return Array.isArray(arr) ? arr.filter((c): c is string => typeof c === "string").slice(0, 10) : [];
+  } catch {
+    return [];
+  }
+}
+
+function Slider({
+  label,
+  min,
+  max,
+  value,
+  onChange,
+}: {
+  label: string;
+  min: number;
+  max: number;
+  value: number;
+  onChange: (v: number) => void;
+}) {
+  return (
+    <label style={{ fontSize: 13, display: "flex", alignItems: "center", gap: 8 }}>
+      <span style={{ width: 78, color: "var(--kv-muted)" }}>{label}</span>
+      <input
+        type="range"
+        min={min}
+        max={max}
+        value={value}
+        onChange={(e) => onChange(Number(e.target.value))}
+        style={{ flex: 1, minWidth: 0 }}
+        aria-label={label}
+      />
+      <span className="kv-nums" style={{ width: 34, textAlign: "right" }}>{value}</span>
+    </label>
+  );
+}
+
+export default function DrawPage() {
+  const [projects, setProjects] = useState<Project[]>([]);
+  const [projectId, setProjectId] = useState("");
+  const [frames, setFrames] = useState<DrawFrame[]>([]);
+  const [frameId, setFrameId] = useState("");
+  const [layers, setLayers] = useState<EngineLayerInfo[]>([]);
+  const [live, setLive] = useState<LiveSettings>(DEFAULT_LIVE);
+  const [notice, setNotice] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [dirty, setDirty] = useState(false);
+  const [zoom, setZoom] = useState(1);
+  const [undoDepth, setUndoDepth] = useState(0);
+  const [redoDepth, setRedoDepth] = useState(0);
+  const [renaming, setRenaming] = useState("");
+  const [renameValue, setRenameValue] = useState("");
+  const [textValue, setTextValue] = useState("");
+  const [textSize, setTextSize] = useState(48);
+  const [textFont, setTextFont] = useState("sans-serif");
+  const [recents, setRecents] = useState<string[]>(loadRecents);
+  const [thumbBust, setThumbBust] = useState(0);
+  const [spaceDown, setSpaceDown] = useState(false);
+  const [panning, setPanning] = useState(false);
+  const [placePages, setPlacePages] = useState<Page[]>([]);
+  const [placePageId, setPlacePageId] = useState("");
+  const [placeFit, setPlaceFit] = useState<"fit" | "fill">("fit");
+
+  const placeFileRef = useRef<HTMLInputElement>(null);
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const viewportRef = useRef<HTMLDivElement>(null);
+  const engineRef = useRef<DrawEngine | null>(null);
+  const openedRef = useRef<string>("");
+  const liveRef = useRef(live);
+  liveRef.current = live;
+  const frameIdRef = useRef(frameId);
+  frameIdRef.current = frameId;
+  const zoomRef = useRef(zoom);
+  zoomRef.current = zoom;
+  const stashRef = useRef(new Map<string, SerializedLayer[]>());
+  const saveTimerRef = useRef(0);
+  const saveStateRef = useRef({ dirty: false, saving: false, queued: false });
+  const panRef = useRef<{ x: number; y: number; sl: number; st: number } | null>(null);
+  const pinchRef = useRef(new Map<number, { x: number; y: number }>());
+  const pinchStartRef = useRef<{ dist: number; zoom: number } | null>(null);
+  const spaceRef = useRef(false);
+
+  const updateLive = useCallback((patch: Partial<LiveSettings>) => {
+    const next = { ...liveRef.current, ...patch };
+    liveRef.current = next;
+    setLive(next);
+    const engine = engineRef.current;
+    if (engine) applyLive(engine, next);
+  }, []);
+
+  const refreshLayers = useCallback(() => {
+    const engine = engineRef.current;
+    if (!engine) return;
+    setLayers(engine.getLayers());
+    setUndoDepth(engine.undoDepth());
+    setRedoDepth(engine.redoDepth());
+  }, []);
+
+  const doUndo = useCallback(() => {
+    engineRef.current?.undo();
+    refreshLayers();
+  }, [refreshLayers]);
+
+  const doRedo = useCallback(() => {
+    engineRef.current?.redo();
+    refreshLayers();
+  }, [refreshLayers]);
+
+  const save = useCallback(async (silent = false) => {
+    const engine = engineRef.current;
+    const id = frameIdRef.current;
+    if (!engine || !id) return;
+    if (saveStateRef.current.saving) {
+      saveStateRef.current.queued = true;
+      return;
+    }
+    saveStateRef.current.saving = true;
+    setBusy(true);
+    try {
+      const res = await api.putFrame(id, { layers: engine.serialize() });
+      stashRef.current.delete(id);
+      setFrames((prev) => prev.map((f) => (f.id === res.id ? res : f)));
+      saveStateRef.current.dirty = false;
+      setDirty(false);
+      setThumbBust((n) => n + 1);
+      if (!silent) setNotice("Saved.");
+    } catch (e) {
+      setNotice(`Save failed: ${(e as Error).message}`);
+    } finally {
+      saveStateRef.current.saving = false;
+      setBusy(false);
+      if (saveStateRef.current.queued) {
+        saveStateRef.current.queued = false;
+        void save(true);
+      }
+    }
+  }, []);
+
+  const markDirty = useCallback(() => {
+    saveStateRef.current.dirty = true;
+    setDirty(true);
+    if (saveTimerRef.current) window.clearTimeout(saveTimerRef.current);
+    saveTimerRef.current = window.setTimeout(() => {
+      if (saveStateRef.current.dirty && !document.hidden) void save(true);
+    }, AUTOSAVE_MS);
+  }, [save]);
+
+  const pushRecent = useCallback((color: string) => {
+    setRecents((prev) => {
+      const next = [color, ...prev.filter((c) => c !== color)].slice(0, 10);
+      try {
+        localStorage.setItem(RECENT_KEY, JSON.stringify(next));
+      } catch {
+        // Private mode: recents simply don't persist.
+      }
+      return next;
+    });
+  }, []);
+
+  const fitZoom = useCallback(() => {
+    const el = viewportRef.current;
+    const engine = engineRef.current;
+    if (!el || !engine) return;
+    const pad = 24;
+    const z = Math.min(
+      (el.clientWidth - pad) / engine.width,
+      (el.clientHeight - pad) / engine.height,
+    );
+    const nz = clamp(z > 0 && isFinite(z) ? z : 1, 0.1, 4);
+    zoomRef.current = nz;
+    setZoom(nz);
+  }, []);
+
+  useEffect(() => {
+    api.listProjects().then(setProjects).catch((e) => setNotice(`API offline: ${e.message}`));
+  }, []);
+
+  useEffect(() => {
+    setCurrentProject(projectId || null);
+    if (!projectId) return;
+    api.listFrames(projectId).then(setFrames).catch((e) => setNotice(e.message));
+  }, [projectId]);
+
+  // Engine init per frame; prefers the unsaved stash over server layers.
+  useEffect(() => {
+    const target = frames.find((f) => f.id === frameId);
+    const canvas = canvasRef.current;
+    if (!target || !canvas || openedRef.current === frameId) return;
+    openedRef.current = frameId;
+    const engine = new DrawEngine(
+      canvas,
+      target.width,
+      target.height,
+      Math.min(2, window.devicePixelRatio || 1),
+    );
+    applyLive(engine, liveRef.current);
+    engine.onChange = () => markDirty();
+    const layers = stashRef.current.get(frameId) ?? target.layers;
+    engine
+      .load(layers)
+      .catch((e) => setNotice(`Some layers failed to load: ${(e as Error).message}`))
+      .finally(() => {
+        engineRef.current = engine;
+        saveStateRef.current.dirty = stashRef.current.has(frameId);
+        setDirty(stashRef.current.has(frameId));
+        setLayers(engine.getLayers());
+        setUndoDepth(0);
+        setRedoDepth(0);
+        window.setTimeout(() => fitZoom(), 60);
+      });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [frameId, frames]);
+
+  // Warn on close only when an autosave hasn't landed yet.
+  useEffect(() => {
+    const onUnload = (e: BeforeUnloadEvent) => {
+      if (saveStateRef.current.dirty) e.preventDefault();
+    };
+    window.addEventListener("beforeunload", onUnload);
+    return () => window.removeEventListener("beforeunload", onUnload);
+  }, []);
+
+  // Wheel zoom to cursor (native listener: React's wheel is passive).
+  useEffect(() => {
+    const el = viewportRef.current;
+    if (!el || !frameId) return;
+    const onWheel = (e: WheelEvent) => {
+      if (!engineRef.current) return;
+      e.preventDefault();
+      const z = zoomRef.current;
+      const nz = clamp(z * Math.pow(1.0015, -e.deltaY), 0.1, 8);
+      const rect = el.getBoundingClientRect();
+      const cx = e.clientX - rect.left;
+      const cy = e.clientY - rect.top;
+      zoomRef.current = nz;
+      setZoom(nz);
+      el.scrollLeft = (el.scrollLeft + cx) * (nz / z) - cx;
+      el.scrollTop = (el.scrollTop + cy) * (nz / z) - cy;
+    };
+    el.addEventListener("wheel", onWheel, { passive: false });
+    return () => el.removeEventListener("wheel", onWheel);
+  }, [frameId]);
+
+  // Shortcuts: tool letters, history, [ ] size, Ctrl+S save, Space pan.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const tag = (e.target as HTMLElement)?.tagName;
+      const typing = tag === "INPUT" || tag === "SELECT" || tag === "TEXTAREA";
+      if (e.code === "Space" && !typing && tag !== "BUTTON") {
+        e.preventDefault();
+        if (!e.repeat) {
+          spaceRef.current = true;
+          setSpaceDown(true);
+        }
+        return;
+      }
+      if (typing) return;
+      const k = e.key.toLowerCase();
+      if ((e.ctrlKey || e.metaKey) && k === "z") {
+        e.preventDefault();
+        if (e.shiftKey) doRedo();
+        else doUndo();
+      } else if ((e.ctrlKey || e.metaKey) && k === "y") {
+        e.preventDefault();
+        doRedo();
+      } else if ((e.ctrlKey || e.metaKey) && k === "s") {
+        e.preventDefault();
+        void save(false);
+      } else if (!e.ctrlKey && !e.metaKey && !e.altKey) {
+        const t = TOOLS.find((t) => t.key.toLowerCase() === k);
+        if (t) {
+          updateLive({ tool: t.id });
+        } else if (e.key === "[") {
+          const s = liveRef.current.size;
+          updateLive({ size: clamp(s - 1, 1, 128), presetId: "custom" });
+        } else if (e.key === "]") {
+          const s = liveRef.current.size;
+          updateLive({ size: clamp(s + 1, 1, 128), presetId: "custom" });
+        }
+      }
+    };
+    const onKeyUp = (e: KeyboardEvent) => {
+      if (e.code === "Space") {
+        spaceRef.current = false;
+        setSpaceDown(false);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    window.addEventListener("keyup", onKeyUp);
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      window.removeEventListener("keyup", onKeyUp);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const handleDownResult = (res: { picked?: string; reason?: string }) => {
+    if (res.picked) {
+      updateLive({ color: res.picked });
+      pushRecent(res.picked);
+    } else if (res.reason === "locked") {
+      setNotice("Active layer is locked.");
+    } else if (res.reason === "transparent") {
+      setNotice("Transparent — nothing to pick.");
+    } else if (res.reason === "no-layer") {
+      setNotice("Add a layer first.");
+    }
+  };
+
+  const pinchDist = () => {
+    const [a, b] = [...pinchRef.current.values()];
+    return a && b ? Math.hypot(a.x - b.x, a.y - b.y) : 0;
+  };
+
+  const onPointerDown = (e: React.PointerEvent<HTMLCanvasElement>) => {
+    const engine = engineRef.current;
+    const el = viewportRef.current;
+    if (!engine || !el) return;
+    pinchRef.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (pinchRef.current.size === 2) {
+      engine.pointerCancel();
+      pinchStartRef.current = { dist: pinchDist(), zoom: zoomRef.current };
+      return;
+    }
+    if (spaceRef.current || engine.tool === "pan") {
+      panRef.current = { x: e.clientX, y: e.clientY, sl: el.scrollLeft, st: el.scrollTop };
+      setPanning(true);
+      try {
+        e.currentTarget.setPointerCapture(e.pointerId);
+      } catch {
+        // Harmless.
+      }
+      return;
+    }
+    if (e.altKey) {
+      const p = engine.toLogical(e.nativeEvent);
+      const picked = engine.sampleColor(p.x, p.y);
+      if (picked) {
+        updateLive({ color: picked });
+        pushRecent(picked);
+      } else {
+        setNotice("Transparent — nothing to pick.");
+      }
+      return;
+    }
+    if (engine.tool === "text") {
+      if (!textValue.trim()) {
+        setNotice("Type your text first, then click the canvas.");
+        return;
+      }
+      const p = engine.toLogical(e.nativeEvent);
+      const r = engine.stampText(p.x, p.y, textValue, textSize, textFont);
+      if (r === "locked") setNotice("Active layer is locked.");
+      refreshLayers();
+      return;
+    }
+    handleDownResult(engine.pointerDown(e.nativeEvent));
+    refreshLayers();
+  };
+
+  const onPointerMove = (e: React.PointerEvent<HTMLCanvasElement>) => {
+    const engine = engineRef.current;
+    const el = viewportRef.current;
+    if (pinchRef.current.has(e.pointerId)) {
+      pinchRef.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    }
+    if (pinchRef.current.size === 2 && pinchStartRef.current && el) {
+      const start = pinchStartRef.current;
+      if (start.dist > 0) {
+        const nz = clamp((start.zoom * pinchDist()) / start.dist, 0.1, 8);
+        zoomRef.current = nz;
+        setZoom(nz);
+      }
+      return;
+    }
+    if (panRef.current && el) {
+      el.scrollLeft = panRef.current.sl - (e.clientX - panRef.current.x);
+      el.scrollTop = panRef.current.st - (e.clientY - panRef.current.y);
+      return;
+    }
+    engine?.pointerMove(e.nativeEvent);
+  };
+
+  const endPointer = (e: React.PointerEvent<HTMLCanvasElement>, cancel: boolean) => {
+    pinchRef.current.delete(e.pointerId);
+    if (pinchRef.current.size < 2) pinchStartRef.current = null;
+    if (panRef.current) {
+      panRef.current = null;
+      setPanning(false);
+      return;
+    }
+    if (cancel) engineRef.current?.pointerCancel(e.nativeEvent);
+    else {
+      engineRef.current?.pointerUp(e.nativeEvent);
+      refreshLayers();
+    }
+  };
+
+  const openFrame = (id: string) => {
+    if (id === frameIdRef.current) return;
+    const engine = engineRef.current;
+    const prev = frameIdRef.current;
+    if (engine && prev && saveStateRef.current.dirty) {
+      stashRef.current.set(prev, engine.serialize());
+    }
+    setNotice("");
+    setFrameId(id);
+  };
+
+  const newFrame = async () => {
+    if (!projectId) return;
+    const frame = await api.createFrame(projectId, {
+      name: `Frame ${frames.length + 1}`,
+      width: 960,
+      height: 540,
+    });
+    setFrames((prev) => [...prev, frame]);
+    setFrameId(frame.id);
+  };
+
+  const removeFrame = async () => {
+    const f = frames.find((x) => x.id === frameId);
+    if (!f) return;
+    if (!window.confirm(`Delete frame "${f.name || "Untitled"}"? This can't be undone.`)) return;
+    try {
+      await api.deleteFrame(f.id);
+      stashRef.current.delete(f.id);
+      setFrames((prev) => prev.filter((x) => x.id !== f.id));
+      setFrameId("");
+      engineRef.current = null;
+      openedRef.current = "";
+      setLayers([]);
+      setDirty(false);
+      saveStateRef.current.dirty = false;
+      setNotice("Frame deleted.");
+    } catch (e) {
+      const msg = (e as Error).message;
+      setNotice(
+        msg.includes("409")
+          ? "Frame is on the timeline — remove its clips first."
+          : `Delete failed: ${msg}`,
+      );
+    }
+  };
+
+  const duplicateFrame = async () => {
+    const f = frames.find((x) => x.id === frameId);
+    if (!f) return;
+    try {
+      const copy = await api.duplicateFrame(f.id);
+      setFrames((prev) => [...prev, copy]);
+      setFrameId(copy.id);
+      setNotice(`Duplicated as "${copy.name}".`);
+    } catch (e) {
+      setNotice(`Duplicate failed: ${(e as Error).message}`);
+    }
+  };
+
+  const downloadPNG = () => {
+    const engine = engineRef.current;
+    const f = frames.find((x) => x.id === frameId);
+    if (!engine || !f) return;
+    const a = document.createElement("a");
+    a.href = engine.exportPNG(true);
+    a.download = `${f.name || "frame"}.png`;
+    a.click();
+  };
+
+  const applyPreset = (id: string) => {
+    const p = BRUSH_PRESETS.find((p) => p.id === id);
+    if (!p) return;
+    updateLive({
+      presetId: p.id,
+      size: p.size,
+      opacity: Math.round(p.opacity * 100),
+      thinning: Math.round(p.thinning * 100),
+      smoothing: Math.round(p.smoothing * 100),
+      streamline: Math.round(p.streamline * 100),
+      tilt: Math.round(p.tiltEffect * 100),
+      taperStart: p.taperStart,
+      taperEnd: p.taperEnd,
+    });
+  };
+
+  const customBrush = (patch: Partial<LiveSettings>) =>
+    updateLive({ ...patch, presetId: "custom" });
+
+  const frame = frames.find((f) => f.id === frameId);
+  const activeLayer = layers.find((l) => l.id === engineRef.current?.activeId);
+  const cursor =
+    panning || spaceDown || live.tool === "pan"
+      ? panning
+        ? "grabbing"
+        : "grab"
+      : live.tool === "text"
+        ? "text"
+        : "crosshair";
+  const tone = /fail|offline|locked|transparent|timeline|can't/i.test(notice) ? "warn" : "info";
+
+  const commitRename = () => {
+    if (renaming && renameValue.trim()) {
+      engineRef.current?.setName(renaming, renameValue);
+      refreshLayers();
+    }
+    setRenaming("");
+  };
+
+  useEffect(() => {
+    if (!projectId) {
+      setPlacePages([]);
+      setPlacePageId("");
+      return;
+    }
+    api
+      .getProject(projectId)
+      .then((p) => {
+        setPlacePages(p.pages);
+        setPlacePageId(p.pages[0]?.id ?? "");
+      })
+      .catch(() => {});
+  }, [projectId]);
+
+  const placeBlob = async (blob: Blob, label: string) => {
+    const engine = engineRef.current;
+    if (!engine || !frameId) return;
+    try {
+      const bmp = await createImageBitmap(blob);
+      const res = engine.placeBitmap(bmp, placeFit);
+      bmp.close();
+      refreshLayers();
+      if (res === "locked") setNotice("Active layer is locked.");
+      else if (res === "no-layer") setNotice("Add a layer first.");
+      else setNotice(`Placed ${label} on the active layer (Ctrl+Z undoes).`);
+    } catch (e) {
+      setNotice(`Place failed: ${(e as Error).message}`);
+    }
+  };
+
+  const placePage = async () => {
+    const pg = placePages.find((p) => p.id === placePageId);
+    if (!pg) return;
+    try {
+      const res = await fetch(mediaUrl(pg.image_url), { credentials: "include" });
+      if (!res.ok) throw new Error(`image ${res.status}`);
+      await placeBlob(await res.blob(), `page ${placePages.indexOf(pg) + 1}`);
+    } catch (e) {
+      setNotice(`Place failed: ${(e as Error).message}`);
+    }
+  };
+
+  return (
+    <>
+      <ChapterHeader no="02" title="Draw" hint="Layered canvas for the frames only you can draw." kanji="描" />
+      <div className="kv-grid">
+      <div className="kv-side" style={{ width: 264, display: "flex", flexDirection: "column", gap: 16, order: 2 }}>
+        <div>
+          <SectionTitle>Project</SectionTitle>
+          <SelectInput
+            style={{ width: "100%" }}
+            value={projectId}
+            onChange={(e) => {
+              setProjectId(e.target.value);
+              setFrameId("");
+              engineRef.current = null;
+              openedRef.current = "";
+            }}
+          >
+            <option value="">Select…</option>
+            {projects.map((p) => (
+              <option key={p.id} value={p.id}>{p.name}</option>
+            ))}
+          </SelectInput>
+        </div>
+
+        {projectId && (
+          <div>
+            <SectionTitle>Frames ({frames.length})</SectionTitle>
+            <div style={{ display: "flex", flexDirection: "column", gap: 4, marginBottom: 8 }}>
+              {frames.map((f, i) => (
+                <Btn
+                  key={f.id}
+                  active={f.id === frameId}
+                  style={{ textAlign: "left", display: "flex", alignItems: "center", gap: 8, width: "100%", padding: 4 }}
+                  onClick={() => openFrame(f.id)}
+                >
+                  <img
+                    crossOrigin="use-credentials"
+                    src={`${api.frameThumbnailUrl(f.id)}?v=${thumbBust}`}
+                    alt=""
+                    width={52}
+                    height={30}
+                    style={{ borderRadius: 4, objectFit: "cover", flexShrink: 0, background: "#f6f1e8" }}
+                    loading="lazy"
+                  />
+                  <span className="kv-nums">FR {String(i + 1).padStart(2, "0")}</span>
+                  <span style={{ overflow: "hidden", textOverflow: "ellipsis" }}>
+                    {f.name || "Untitled"}
+                  </span>
+                  <span className="kv-nums" style={{ marginLeft: "auto", opacity: 0.6 }}>
+                    {f.width}×{f.height}
+                  </span>
+                </Btn>
+              ))}
+            </div>
+            <div style={{ display: "flex", gap: 6 }}>
+              <Btn small onClick={newFrame}>New</Btn>
+              <Btn small disabled={!frame} onClick={duplicateFrame}>Duplicate</Btn>
+              <Btn small danger disabled={!frame} onClick={removeFrame}>Delete</Btn>
+            </div>
+          </div>
+        )}
+
+        {frame && (
+          <div>
+            <SectionTitle>Canvas</SectionTitle>
+            <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 8 }}>
+              <Btn small disabled={undoDepth === 0} onClick={doUndo} title="Undo (Ctrl+Z)">Undo</Btn>
+              <Btn small disabled={redoDepth === 0} onClick={doRedo} title="Redo (Ctrl+Shift+Z)">Redo</Btn>
+              <PrimaryBtn small onClick={() => save(false)} disabled={busy}>
+                {busy ? "Saving…" : dirty ? "● Save" : "Save"}
+              </PrimaryBtn>
+              <Btn small onClick={downloadPNG} title="Download the composite as PNG">PNG</Btn>
+            </div>
+            <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+              <Btn small onClick={() => { const nz = clamp(zoomRef.current / 1.25, 0.1, 8); zoomRef.current = nz; setZoom(nz); }} title="Zoom out">−</Btn>
+              <span className="kv-nums" style={{ minWidth: 48, textAlign: "center", fontSize: 13 }}>
+                {Math.round(zoom * 100)}%
+              </span>
+              <Btn small onClick={() => { const nz = clamp(zoomRef.current * 1.25, 0.1, 8); zoomRef.current = nz; setZoom(nz); }} title="Zoom in">+</Btn>
+              <Btn small onClick={fitZoom} title="Fit to view">Fit</Btn>
+              <Btn small onClick={() => { zoomRef.current = 1; setZoom(1); }} title="Actual size">1:1</Btn>
+            </div>
+          </div>
+        )}
+
+        {frame && (
+          <div>
+            <SectionTitle>Layers ({layers.length})</SectionTitle>
+            <div style={{ display: "flex", flexDirection: "column", gap: 4, marginBottom: 8 }}>
+              {layers.map((l) => (
+                <div key={l.id} style={{ display: "flex", gap: 4, alignItems: "center" }}>
+                  {renaming === l.id ? (
+                    <TextInput
+                      autoFocus
+                      value={renameValue}
+                      style={{ flex: 1, minWidth: 0 }}
+                      onChange={(e) => setRenameValue(e.target.value)}
+                      onBlur={commitRename}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") commitRename();
+                        if (e.key === "Escape") setRenaming("");
+                      }}
+                    />
+                  ) : (
+                    <Btn
+                      small
+                      active={engineRef.current?.activeId === l.id}
+                      style={{ flex: 1, textAlign: "left", minWidth: 0, overflow: "hidden", textOverflow: "ellipsis" }}
+                      title="Double-click to rename"
+                      onClick={() => {
+                        engineRef.current?.setActive(l.id);
+                        refreshLayers();
+                      }}
+                      onDoubleClick={() => {
+                        setRenaming(l.id);
+                        setRenameValue(l.name);
+                      }}
+                    >
+                      {l.visible ? "◉" : "○"} {l.locked ? "[locked] " : ""}{l.name}
+                    </Btn>
+                  )}
+                  <Btn
+                    small
+                    title="Toggle visibility"
+                    onClick={() => {
+                      engineRef.current?.setVisible(l.id, !l.visible);
+                      refreshLayers();
+                    }}
+                  >
+                    {l.visible ? "Hide" : "Show"}
+                  </Btn>
+                </div>
+              ))}
+            </div>
+            {activeLayer && (
+              <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 8 }}>
+                <Slider
+                  label="Opacity"
+                  min={0}
+                  max={100}
+                  value={activeLayer.opacity}
+                  onChange={(v) => {
+                    engineRef.current?.setOpacity(activeLayer.id, v);
+                    refreshLayers();
+                  }}
+                />
+                <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                  <SelectInput
+                    value={activeLayer.blend}
+                    onChange={(e) => {
+                      engineRef.current?.setBlend(activeLayer.id, e.target.value);
+                      refreshLayers();
+                    }}
+                    title="Blend mode"
+                    aria-label="Blend mode"
+                    style={{ flex: 1, minWidth: 0 }}
+                  >
+                    {BLEND_MODES.map((b) => (
+                      <option key={b} value={b}>{b}</option>
+                    ))}
+                  </SelectInput>
+                  <Btn
+                    small
+                    active={activeLayer.locked}
+                    title="Lock layer"
+                    onClick={() => {
+                      engineRef.current?.setLocked(activeLayer.id, !activeLayer.locked);
+                      refreshLayers();
+                    }}
+                  >
+                    {activeLayer.locked ? "Unlock" : "Lock"}
+                  </Btn>
+                </div>
+              </div>
+            )}
+            <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+              <Btn
+                small
+                onClick={() => {
+                  engineRef.current?.addLayer(`Layer ${layers.length + 1}`);
+                  refreshLayers();
+                }}
+              >
+                Add
+              </Btn>
+              <Btn
+                small
+                disabled={!activeLayer}
+                onClick={() => {
+                  if (activeLayer) engineRef.current?.duplicateLayer(activeLayer.id);
+                  refreshLayers();
+                }}
+              >
+                Dup
+              </Btn>
+              <Btn
+                small
+                disabled={!activeLayer}
+                title="Merge into the layer below"
+                onClick={() => {
+                  if (activeLayer) engineRef.current?.mergeDown(activeLayer.id);
+                  refreshLayers();
+                }}
+              >
+                Merge↓
+              </Btn>
+              <Btn
+                small
+                disabled={!activeLayer}
+                onClick={() => {
+                  const id = engineRef.current?.activeId;
+                  if (id && window.confirm("Clear this layer's paint? This can't be undone.")) {
+                    engineRef.current?.clearLayer(id);
+                  }
+                  refreshLayers();
+                }}
+              >
+                Clear
+              </Btn>
+              <Btn
+                small
+                disabled={!activeLayer}
+                title="Move up"
+                onClick={() => {
+                  if (activeLayer) engineRef.current?.moveLayer(activeLayer.id, 1);
+                  refreshLayers();
+                }}
+              >
+                ↑
+              </Btn>
+              <Btn
+                small
+                disabled={!activeLayer}
+                title="Move down"
+                onClick={() => {
+                  if (activeLayer) engineRef.current?.moveLayer(activeLayer.id, -1);
+                  refreshLayers();
+                }}
+              >
+                ↓
+              </Btn>
+              <Btn
+                small
+                danger
+                disabled={!activeLayer || layers.length <= 1}
+                onClick={() => {
+                  const id = engineRef.current?.activeId;
+                  if (id && window.confirm("Delete this layer? This can't be undone.")) {
+                    engineRef.current?.removeLayer(id);
+                  }
+                  refreshLayers();
+                }}
+              >
+                Delete
+              </Btn>
+            </div>
+          </div>
+        )}
+
+        {frame && (
+          <div>
+            <SectionTitle>Place image</SectionTitle>
+            <div style={{ display: "flex", gap: 6, marginBottom: 6 }}>
+              <SelectInput
+                value={placePageId}
+                onChange={(e) => setPlacePageId(e.target.value)}
+                aria-label="Scan page to place"
+                style={{ flex: 1, minWidth: 0 }}
+              >
+                {placePages.length === 0 && <option value="">No scans</option>}
+                {placePages.map((p, i) => (
+                  <option key={p.id} value={p.id}>
+                    Page {i + 1} ({p.width}×{p.height})
+                  </option>
+                ))}
+              </SelectInput>
+              <Btn small disabled={!placePageId} onClick={placePage} title="Draw the scan onto the active layer">
+                Place
+              </Btn>
+            </div>
+            <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+              <Btn
+                small
+                active={placeFit === "fit"}
+                onClick={() => setPlaceFit("fit")}
+                title="Scale to fit inside the canvas"
+              >
+                Fit
+              </Btn>
+              <Btn
+                small
+                active={placeFit === "fill"}
+                onClick={() => setPlaceFit("fill")}
+                title="Scale to cover the canvas (crops)"
+              >
+                Fill
+              </Btn>
+              <input
+                ref={placeFileRef}
+                type="file"
+                accept="image/*"
+                style={{ display: "none" }}
+                onChange={(e) => {
+                  const f = e.target.files?.[0];
+                  if (f) void placeBlob(f, f.name);
+                  e.target.value = "";
+                }}
+              />
+              <Btn
+                small
+                onClick={() => placeFileRef.current?.click()}
+                title="Place a local image file onto the active layer"
+                style={{ marginLeft: "auto" }}
+              >
+                Place file…
+              </Btn>
+            </div>
+          </div>
+        )}
+
+        {frame && (
+          <div>
+            <SectionTitle>Brush{live.presetId === "custom" ? " — custom" : ""}</SectionTitle>
+            <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 8 }}>
+              {BRUSH_PRESETS.map((p) => (
+                <Btn
+                  key={p.id}
+                  small
+                  active={live.presetId === p.id}
+                  title={p.hint}
+                  onClick={() => applyPreset(p.id)}
+                >
+                  {p.name}
+                </Btn>
+              ))}
+            </div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+              <Slider label="Size" min={1} max={128} value={live.size} onChange={(v) => customBrush({ size: v })} />
+              <Slider label="Opacity" min={1} max={100} value={live.opacity} onChange={(v) => customBrush({ opacity: v })} />
+              <Slider label="Pressure" min={0} max={100} value={live.thinning} onChange={(v) => customBrush({ thinning: v })} />
+              <Slider label="Smoothing" min={0} max={100} value={live.smoothing} onChange={(v) => customBrush({ smoothing: v })} />
+              <Slider label="Tilt FX" min={0} max={100} value={live.tilt} onChange={(v) => customBrush({ tilt: v })} />
+              <Slider label="Stabilizer" min={0} max={100} value={live.stabilizer} onChange={(v) => updateLive({ stabilizer: v })} />
+              <div style={{ display: "flex", gap: 6 }}>
+                <Btn small active={live.taperStart} title="Taper the stroke start" onClick={() => customBrush({ taperStart: !live.taperStart })}>
+                  Taper⤴
+                </Btn>
+                <Btn small active={live.taperEnd} title="Taper the stroke end" onClick={() => customBrush({ taperEnd: !live.taperEnd })}>
+                  Taper⤵
+                </Btn>
+              </div>
+              {(live.tool === "rect" || live.tool === "ellipse") && (
+                <Btn small active={live.shapeFill} onClick={() => updateLive({ shapeFill: !live.shapeFill })}>
+                  {live.shapeFill ? "■ Filled shapes" : "□ Outline shapes"}
+                </Btn>
+              )}
+              {live.tool === "fill" && (
+                <Slider label="Tolerance" min={0} max={128} value={live.fillTolerance} onChange={(v) => updateLive({ fillTolerance: v })} />
+              )}
+              {live.tool === "text" && (
+                <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                  <TextInput
+                    value={textValue}
+                    placeholder="Text to stamp…"
+                    onChange={(e) => setTextValue(e.target.value)}
+                    aria-label="Text to stamp"
+                  />
+                  <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                    <SelectInput value={textFont} onChange={(e) => setTextFont(e.target.value)} aria-label="Text font" style={{ flex: 1 }}>
+                      <option value="sans-serif">Sans</option>
+                      <option value="serif">Serif</option>
+                      <option value="monospace">Mono</option>
+                    </SelectInput>
+                    <span className="kv-nums" style={{ fontSize: 13 }}>{textSize}px</span>
+                  </div>
+                  <Slider label="Text size" min={8} max={160} value={textSize} onChange={setTextSize} />
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
+        {frame && (
+          <div>
+            <SectionTitle>Ink</SectionTitle>
+            <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 8 }}>
+              <input
+                type="color"
+                value={live.color}
+                onChange={(e) => updateLive({ color: e.target.value })}
+                title="Custom color"
+                aria-label="Brush color"
+              />
+              <span className="kv-nums" style={{ fontSize: 13 }}>{live.color}</span>
+              <Btn small title="Stash the current color" onClick={() => pushRecent(live.color)}>+ Keep</Btn>
+            </div>
+            <div style={{ display: "flex", gap: 4, flexWrap: "wrap", marginBottom: 6 }}>
+              {INKS.map((c) => (
+                <button
+                  key={c}
+                  type="button"
+                  title={c}
+                  aria-label={`Ink ${c}`}
+                  onClick={() => updateLive({ color: c })}
+                  style={{
+                    width: 24,
+                    height: 24,
+                    borderRadius: 6,
+                    background: c,
+                    border: live.color === c ? "2px solid var(--kv-accent)" : "1px solid var(--kv-border-strong)",
+                    cursor: "pointer",
+                    padding: 0,
+                  }}
+                />
+              ))}
+            </div>
+            <div style={{ display: "flex", gap: 4, flexWrap: "wrap", marginBottom: recents.length > 0 ? 6 : 0 }}>
+              {GRAYS.map((c) => (
+                <button
+                  key={c}
+                  type="button"
+                  title={c}
+                  aria-label={`Gray ${c}`}
+                  onClick={() => updateLive({ color: c })}
+                  style={{
+                    width: 24,
+                    height: 24,
+                    borderRadius: 6,
+                    background: c,
+                    border: live.color === c ? "2px solid var(--kv-accent)" : "1px solid var(--kv-border-strong)",
+                    cursor: "pointer",
+                    padding: 0,
+                  }}
+                />
+              ))}
+            </div>
+            {recents.length > 0 && (
+              <div style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
+                {recents.map((c) => (
+                  <button
+                    key={c}
+                    type="button"
+                    title={`Recent ${c}`}
+                    aria-label={`Recent ${c}`}
+                    onClick={() => updateLive({ color: c })}
+                    style={{
+                      width: 24,
+                      height: 24,
+                      borderRadius: 999,
+                      background: c,
+                      border: live.color === c ? "2px solid var(--kv-accent)" : "1px solid var(--kv-border-strong)",
+                      cursor: "pointer",
+                      padding: 0,
+                    }}
+                  />
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+
+      <div style={{ flex: 1, minWidth: 0, order: 1 }}>
+        {!projectId ? (
+          <EmptyState title="No project selected" hint="Pick a project, then open or create a frame to draw." />
+        ) : !frame ? (
+          <EmptyState title="No frame open" hint="Frames are drawings you can drop onto the timeline as clips.">
+            <Btn onClick={newFrame}>New frame</Btn>
+          </EmptyState>
+        ) : (
+          <>
+            {notice && (
+              <div style={{ marginBottom: 12 }}>
+                <Notice tone={tone}>
+                  {busy && <Spinner />} {notice}
+                </Notice>
+              </div>
+            )}
+
+            <div
+              style={{
+                position: "relative",
+                background: "var(--kv-inset)",
+                border: "1px solid var(--kv-border)",
+                borderRadius: "var(--kv-radius)",
+                padding: 16,
+                boxShadow: "var(--kv-shadow-hard)",
+              }}
+            >
+              <div className="kv-floatbar" role="toolbar" aria-label="Drawing tools">
+                {TOOLS.map((t) => (
+                  <Btn
+                    key={t.id}
+                    small
+                    active={live.tool === t.id}
+                    onClick={() => updateLive({ tool: t.id })}
+                    title={`${t.label} (${t.key})`}
+                  >
+                    {t.label}
+                  </Btn>
+                ))}
+              </div>
+              <div
+                ref={viewportRef}
+                style={{
+                  overflow: "auto",
+                  maxHeight: "70vh",
+                  borderRadius: 4,
+                  marginTop: 76,
+                  cursor,
+                  background: "#000",
+                }}
+              >
+                <canvas
+                  ref={canvasRef}
+                  style={{
+                    width: frame.width * zoom,
+                    height: frame.height * zoom,
+                    display: "block",
+                    touchAction: "none",
+                    cursor,
+                  }}
+                  onPointerDown={onPointerDown}
+                  onPointerMove={onPointerMove}
+                  onPointerUp={(e) => endPointer(e, false)}
+                  onPointerCancel={(e) => endPointer(e, true)}
+                  onPointerLeave={() => engineRef.current?.pointerUp()}
+                  onContextMenu={(e) => e.preventDefault()}
+                />
+              </div>
+            </div>
+            <StatusBar
+              items={[
+                `${frame.width}×${frame.height}`,
+                `tool: ${live.tool}`,
+                `brush: ${live.presetId} ${live.size}px`,
+                `zoom: ${Math.round(zoom * 100)}%`,
+                `layer: ${activeLayer?.name ?? "–"} (${layers.length})`,
+                busy ? "saving…" : dirty ? "● unsaved" : "saved",
+              ]}
+            />
+          </>
+        )}
+      </div>
+    </div>
+    </>
+  );
+}

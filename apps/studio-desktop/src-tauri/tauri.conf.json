@@ -1,0 +1,24 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Komaverse",
+  "version": "0.1.0",
+  "identifier": "com.komaverse.studio",
+  "build": {
+    "frontendDist": "../../studio-web/dist",
+    "devUrl": "http://localhost:5173",
+    "beforeDevCommand": "npm run dev --workspace studio-web",
+    "beforeBuildCommand": "npm run build --workspace studio-web"
+  },
+  "app": {
+    "windows": [{ "label": "main", "title": "Komaverse", "width": 1280, "height": 800 }]
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "shortDescription": "AI anime studio: scan manga, draw, animate, generate.",
+    "macOS": {
+      "infoPlist": "Info.plist",
+      "entitlements": "Entitlements.plist"
+    }
+  }
+}
