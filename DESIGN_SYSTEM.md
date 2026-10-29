@@ -97,7 +97,8 @@ SectionTitle, Chip, Kbd, EmptyState (what + why + next action + button),
 Notice (info/warn/error, `role=status/alert`), Spinner (delayed 350ms),
 Skeleton, StatusBar (mono meta row), ChapterHeader, ImpactBurst, SfxBtn
 (skewed ink-stamp button for the loudest actions only), Kanji (decorative
-watermark), ImpactFlash, Magnet, PenViewer (lazy 3D instrument).
+watermark), ImpactFlash, Magnet, ScrollCompanion (traveling 3D
+instrument), Backdrop, ShowcaseReels.
 States live in the primitive.
 
 ## 7. Patterns
@@ -106,12 +107,65 @@ States live in the primitive.
 - Layouts differ per surface: Scan = left rail + canvas; Draw = canvas +
   right rail + floating glass toolbar; Cut = stacked command deck, filmstrip
   timeline, clip rows; Home = dashboard.
-- Showcase: tight masonry (`columns`, 8px gutters) of named mixed-ratio
-  works, hover-play, overlay captions, one Studio Pick — never a uniform
-  grid, never unnamed reels.
+- Landing backdrop: one full-bleed reel at a time, crossfading to the
+  next every 4.5s; hidden reels pause so only one decodes. Playback
+  always runs (content, not chrome motion).
+- Landing nav: full-bleed sticky bar with blur backdrop, always
+  complete over the video.
+- Showcase: irregular 12-column mosaic (7+5, 4+4+4, full-width
+  cinema strip; varied cell ratios, 4px gutters, rounded `--kv-radius-lg`
+  boxes) with quiet always-on captions; spotlight plays the reels one by
+  one (3s turns, hover takes over). Never unnamed reels.
+- Scroll companion: one fixed 3D drawing tool traveling the whole
+  landing page (scroll progress drives drift, two full turns, and model
+  swaps per third with hysteresis) and gliding into the black instrument
+  panel when it is on screen — pointer-transparent while traveling,
+  draggable while docked, with a Traveling badge in the empty dock.
+  Slow geometry glide plus a breathe-down handoff keep every switch and
+  docking smooth, including without a frame loop (short settle-and-park
+  bursts). Travel layer sits behind content, dock layer above the panel.
+  Micron pieces stand upright in a tight vertical lineup; graphite
+  fineliner fallback (never red). Deferred three.js start and idle
+  render-skip keep first load and idle cheap. All three models
+  pre-parse off the scroll path (staggered warm after first paint), and
+  the per-frame loop is layout-free (cached page/dock geometry,
+  transform positioning, skipped no-op writes) so fast scrolls stay
+  clean.
+  Authored PBR textures (color/roughness/metal; normals skipped by
+  design; the micron set binds roughness/metal explicitly since FBX
+  ignores those slots, and its scattered pieces are laid out in a row).
+  Frustum-fit scaling per model and aspect so nothing clips a frame.
+  No visible model names — cosmetic, not a catalog. Hidden under 720px.
+- Motion policy: entrance effects (reveals, kinetic headlines, hero
+  stagger) and Lenis smooth scroll run for everyone; only splash
+  takeover, magnetic pull, idle sheen, and autonomous 3D drift rest
+  under reduced motion. Scroll/drag-driven 3D motion always works.
+- Perf: sticky nav uses a flat translucent bg (no backdrop blur over
+  video); ambient WebGL capped at 1.5x pixel ratio. Backdrop and
+  showcase own their rotation/spotlight state, so cycling never
+  re-renders the page. Showcase reels idle-pre-roll their first
+  frames once, so fast scrolls never pay first-play decode.
+- Media budget: reels re-encoded (720–960p, no audio, faststart; 13.8MB
+  → 4.8MB), logo ships at 256px (41KB). Originals kept in `.media-orig/`
+  (never shipped). Only the visible backdrop reel preloads fully; the
+  next reel warms while it plays, showcase cells start at metadata.
+- Buttons: everyday Btns lift with a growing hard shadow on hover and
+  sink on press (pure CSS `:hover`/`:active`, shared by mouse, touch,
+  and keyboard — no JS press state); SfxBtn adds a click punch on top
+  of its idle sheen, restartable so rapid presses slam every time, and
+  its sheen sweeps fast while hovered. Keyboard focus keeps the hard
+  stamp shadow and adds a paper ring (the global focus glow would
+  flatten the stamp).
+- Kinetic headlines: section titles rise word by word on first reveal
+  (fade only when motion is reduced).
+- SfxBtn idle sheen: a light sweep every ~4s keeps the loudest action
+  alive; off under reduced motion.
+- Reveal: `.is-visible` always unclips `kv-reveal-media`, even when the
+  armed start state was skipped (reduced motion / no IO) — otherwise reels
+  stay cropped and captions eaten.
 - SFX buttons + Magnet on: landing hero/final CTAs, featured plan, Export.
   Everything else stays quiet.
-- Instrument section: copy grid + lazy PenViewer, exactly one 3D moment.
+- Instrument section: copy grid + companion dock, exactly one 3D moment.
 - Landing sections never share a composition with their neighbor.
 - Destructive actions: `window.confirm` with the action in the title
   ("Delete panel 3? …") until a dialog primitive exists.

@@ -21,7 +21,7 @@ export function useRevealScope<T extends HTMLElement>(
     const root = ref.current;
     if (!root) return;
     const els = Array.from(root.querySelectorAll("[data-reveal]"));
-    if (prefersReducedMotion() || !("IntersectionObserver" in window)) {
+    if (!("IntersectionObserver" in window)) {
       els.forEach((el) => el.classList.add("is-visible"));
       return;
     }

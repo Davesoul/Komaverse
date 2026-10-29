@@ -1,5 +1,11 @@
 import { useEffect, useRef, useState } from "react";
-import { api, mediaUrl, type AgentReply } from "../api";
+import {
+  api,
+  mediaUrl,
+  parseAgentRefs,
+  type AgentRef,
+  type AgentReply,
+} from "../api";
 import { getCurrentProject } from "../lib/studio";
 import { Btn, PrimaryBtn, Spinner, TextInput } from "./ui";
 import { prefersReducedMotion } from "./Reveal";
@@ -9,6 +15,22 @@ interface Msg {
   text: string;
   actions?: AgentReply["actions"];
 }
+
+interface MentionItem {
+  kind: AgentRef["kind"];
+  id: string;
+  label: string;
+  sub: string;
+}
+
+const KIND_LABEL: Record<AgentRef["kind"], string> = {
+  frame: "Frames",
+  panel: "Panels",
+  take: "Takes",
+  gen: "Generations",
+};
+
+const REF_TOKEN = /(@(?:frame|panel|take|gen):[A-Za-z0-9_-]+)/g;
 
 const CHIPS = [
   "Project status",
@@ -23,7 +45,7 @@ const GREETING: Msg = {
   text: "I operate the studio. Ask for status, detection, directing, export, or image generation.",
 };
 
-/** Render reply text with clickable http(s), /media, and /api URLs. */
+/** Render text with clickable URLs and highlighted @kind:id mention tokens. */
 function linked(text: string) {
   const parts = text.split(/(https?:\/\/\S+|\/(?:media|api)\/\S+)/g);
   return parts.map((p, i) =>
@@ -37,7 +59,28 @@ function linked(text: string) {
         {p.length > 48 ? `${p.slice(0, 47)}…` : p}
       </a>
     ) : (
-      <span key={i}>{p}</span>
+      <span key={i}>
+        {p.split(REF_TOKEN).map((q, j) =>
+          j % 2 === 1 ? (
+            <code
+              key={j}
+              title="Referenced studio item"
+              style={{
+                fontFamily: "var(--kv-mono)",
+                fontSize: 11,
+                background: "var(--kv-accent)",
+                color: "var(--kv-accent-ink)",
+                borderRadius: 4,
+                padding: "1px 5px",
+              }}
+            >
+              {q}
+            </code>
+          ) : (
+            <span key={j}>{q}</span>
+          ),
+        )}
+      </span>
     ),
   );
 }
@@ -117,10 +160,138 @@ export default function AgentDock() {
       .catch(() => {});
   }, [open]);
 
+  // @-mention picker: type @ in the composer to reference a specific
+  // frame, detected panel, voice take, or generation. Tokens go out both
+  // as message text and as structured refs the server resolves scoped.
+  const [mention, setMention] = useState<{
+    query: string;
+    items: MentionItem[];
+    hi: number;
+    loading: boolean;
+  } | null>(null);
+  const mentionFor = useRef<string | null>(null);
+
+  const loadMentions = async (projectId: string) => {
+    if (mentionFor.current === projectId) return;
+    mentionFor.current = projectId;
+    setMention((m) => (m ? { ...m, loading: true } : m));
+    try {
+      const [frames, proj, takes, jobs] = await Promise.all([
+        api.listFrames(projectId).catch(() => []),
+        api.getProject(projectId).catch(() => null),
+        api.listTakes(projectId).catch(() => []),
+        api.listJobs().catch(() => []),
+      ]);
+      const items: MentionItem[] = [];
+      frames.forEach((f, i) =>
+        items.push({
+          kind: "frame",
+          id: f.id,
+          label: `FR ${String(i + 1).padStart(2, "0")} ${f.name || "Untitled"}`,
+          sub: `${f.width}×${f.height} · ${f.layers.length} layers`,
+        }),
+      );
+      (proj?.pages ?? []).forEach((pg, pi) =>
+        pg.panels.forEach((p, qi) =>
+          items.push({
+            kind: "panel",
+            id: p.id,
+            label: `PG ${pi + 1} · Panel ${qi + 1}`,
+            sub: `box ${Math.round(p.x)},${Math.round(p.y)} ${Math.round(p.w)}×${Math.round(p.h)}`,
+          }),
+        ),
+      );
+      takes.forEach((t) =>
+        items.push({
+          kind: "take",
+          id: t.id,
+          label: t.name || "Untitled take",
+          sub: `${t.duration_sec > 0 ? `${t.duration_sec.toFixed(1)}s` : "live"}`,
+        }),
+      );
+      jobs
+        .filter((j) => j.kind === "image" && j.project_id === projectId)
+        .forEach((j) =>
+          items.push({
+            kind: "gen",
+            id: j.id,
+            label: j.prompt ? j.prompt.slice(0, 42) : `Generation ${j.id}`,
+            sub: j.status,
+          }),
+        );
+      setMention((m) => (m ? { ...m, items, loading: false } : m));
+    } catch {
+      setMention((m) => (m ? { ...m, loading: false } : m));
+    }
+  };
+
+  const onComposerChange = (value: string) => {
+    setInput(value);
+    const at = value.match(/(^|\s)@([A-Za-z0-9_-]*)$/);
+    if (!at) {
+      setMention(null);
+      return;
+    }
+    const pid = getCurrentProject();
+    if (!pid) {
+      setMention(null);
+      return;
+    }
+    setMention((m) => ({
+      query: at[2],
+      items: m && mentionFor.current === pid ? m.items : [],
+      hi: 0,
+      loading: !(m && mentionFor.current === pid),
+    }));
+    void loadMentions(pid);
+  };
+
+  const mentionShown = mention
+    ? mention.items
+        .filter(
+          (it) =>
+            mention.query === "" ||
+            `${it.label} ${it.sub} ${it.kind}`.toLowerCase().includes(mention.query.toLowerCase()),
+        )
+        .slice(0, 30)
+    : [];
+
+  const insertMention = (item: MentionItem) => {
+    const token = `@${item.kind}:${item.id} `;
+    setInput((v) => v.replace(/(^|\s)@[A-Za-z0-9_-]*$/, `$1${token}`));
+    setMention(null);
+    inputRef.current?.focus();
+  };
+
+  const onComposerKey = (e: React.KeyboardEvent) => {
+    if (mention && mentionShown.length > 0) {
+      if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+        e.preventDefault();
+        const d = e.key === "ArrowDown" ? 1 : -1;
+        setMention({
+          ...mention,
+          hi: (mention.hi + d + mentionShown.length) % mentionShown.length,
+        });
+        return;
+      }
+      if (e.key === "Enter" || e.key === "Tab") {
+        e.preventDefault();
+        insertMention(mentionShown[mention.hi] ?? mentionShown[0]);
+        return;
+      }
+      if (e.key === "Escape") {
+        setMention(null);
+        return;
+      }
+    }
+    if (e.key === "Enter") send(input);
+  };
+
   const send = async (text: string) => {
     const message = text.trim();
     if (!message || busy) return;
     setInput("");
+    setMention(null);
     setMessages((prev) => [...prev, { role: "user", text: message }]);
     setBusy(true);
     const ctl = new AbortController();
@@ -130,6 +301,7 @@ export default function AgentDock() {
         getCurrentProject() ?? null,
         message,
         ctl.signal,
+        parseAgentRefs(message),
       );
       setMessages((prev) => [
         ...prev,
@@ -301,15 +473,102 @@ export default function AgentDock() {
             Generate image…
           </Btn>
         </div>
-        <div style={{ display: "flex", gap: 6 }}>
+        <div style={{ display: "flex", gap: 6, position: "relative" }}>
+          {mention && (
+            <div
+              role="listbox"
+              aria-label="Mention a studio item"
+              style={{
+                position: "absolute",
+                bottom: "100%",
+                left: 0,
+                right: 0,
+                marginBottom: 6,
+                maxHeight: 220,
+                overflowY: "auto",
+                background: "var(--kv-surface)",
+                border: "1px solid var(--kv-border-strong)",
+                borderRadius: "var(--kv-radius-sm)",
+                boxShadow: "var(--kv-shadow-md)",
+                zIndex: 5,
+              }}
+            >
+              {mention.loading && mention.items.length === 0 ? (
+                <div style={{ padding: "8px 10px", fontSize: 12, color: "var(--kv-muted)" }}>
+                  Loading studio items…
+                </div>
+              ) : mentionShown.length === 0 ? (
+                <div style={{ padding: "8px 10px", fontSize: 12, color: "var(--kv-muted)" }}>
+                  No matches — open a project with frames, panels, takes, or generations first.
+                </div>
+              ) : (
+                <>
+                  {(["frame", "panel", "take", "gen"] as const).map((k) => {
+                    const group = mentionShown.filter((it) => it.kind === k);
+                    if (group.length === 0) return null;
+                    return (
+                      <div key={k}>
+                        <div
+                          style={{
+                            padding: "6px 10px 2px",
+                            fontSize: 10,
+                            fontWeight: 800,
+                            letterSpacing: "0.08em",
+                            color: "var(--kv-faint)",
+                          }}
+                        >
+                          {KIND_LABEL[k].toUpperCase()}
+                        </div>
+                        {group.map((it) => {
+                          const gi = mentionShown.indexOf(it);
+                          return (
+                            <button
+                              key={`${it.kind}:${it.id}`}
+                              type="button"
+                              role="option"
+                              aria-selected={gi === mention.hi}
+                              onMouseDown={(e) => {
+                                e.preventDefault();
+                                insertMention(it);
+                              }}
+                              onMouseEnter={() => setMention({ ...mention, hi: gi })}
+                              style={{
+                                display: "block",
+                                width: "100%",
+                                textAlign: "left",
+                                padding: "6px 10px",
+                                fontSize: 12,
+                                background: gi === mention.hi ? "var(--kv-raised)" : "none",
+                                border: "none",
+                                cursor: "pointer",
+                                color: "var(--kv-text)",
+                              }}
+                            >
+                              <span style={{ fontFamily: "var(--kv-mono)" }}>@{it.kind}:{it.id}</span>
+                              <span style={{ color: "var(--kv-muted)" }}> — {it.label}</span>
+                              <span className="kv-nums" style={{ color: "var(--kv-faint)", fontSize: 11 }}>
+                                {" "}· {it.sub}
+                              </span>
+                            </button>
+                          );
+                        })}
+                      </div>
+                    );
+                  })}
+                </>
+              )}
+            </div>
+          )}
           <TextInput
             ref={inputRef}
-            placeholder="Ask the studio…"
+            placeholder="Ask the studio… (@ to reference a frame, panel, take, generation)"
             value={input}
-            onChange={(e) => setInput(e.target.value)}
-            onKeyDown={(e) => e.key === "Enter" && send(input)}
+            onChange={(e) => onComposerChange(e.target.value)}
+            onKeyDown={onComposerKey}
             style={{ flex: 1 }}
             aria-label="Agent message"
+            aria-expanded={mention !== null}
+            aria-autocomplete="list"
           />
           {busy ? (
             <Btn small danger onClick={() => abortRef.current?.abort()}>

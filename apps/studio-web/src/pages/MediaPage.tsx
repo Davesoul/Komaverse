@@ -3,13 +3,14 @@ import {
   api,
   mediaUrl,
   type AudioTake,
+  type DrawFrame,
   type ExportReport,
   type Job,
   type Page,
   type Project,
   type StorageUsage,
 } from "../api";
-import { getCurrentProject, setCurrentProject } from "../lib/studio";
+import { getCurrentProject, gotoTab, setCurrentProject } from "../lib/studio";
 import {
   Btn,
   ChapterHeader,
@@ -19,6 +20,7 @@ import {
   SelectInput,
   Spinner,
   StatusBar,
+  TextInput,
 } from "../components/ui";
 
 const fmtBytes = (n: number) =>
@@ -28,15 +30,29 @@ const fmtBytes = (n: number) =>
       ? `${(n / 1024).toFixed(1)} KB`
       : `${(n / 1024 / 1024).toFixed(1)} MB`;
 
-/** Credentialed page thumbnail (blob URL, works on remote-URL desktop). */
-function PageThumb({ page }: { page: Page }) {
+/** Credentialed image (blob URL, works on remote-URL desktop). */
+function BlobImg({
+  url,
+  alt,
+  style,
+  eager,
+}: {
+  url: string;
+  alt: string;
+  style?: React.CSSProperties;
+  eager?: boolean;
+}) {
   const [href, setHref] = useState("");
   useEffect(() => {
     let live = true;
     let objectUrl = "";
-    fetch(mediaUrl(page.image_url), { credentials: "include" })
+    fetch(mediaUrl(url), { credentials: "include" })
       .then((r) => {
         if (!r.ok) throw new Error(`image ${r.status}`);
+        // Same guard as the Scan viewer: a misrouted /media answers HTML
+        // 200, which must never become an image blob.
+        const ct = r.headers.get("content-type") || "";
+        if (!ct.startsWith("image/")) throw new Error(`not an image (${ct || "unknown type"})`);
         return r.blob();
       })
       .then((b) => {
@@ -49,28 +65,92 @@ function PageThumb({ page }: { page: Page }) {
       live = false;
       if (objectUrl) URL.revokeObjectURL(objectUrl);
     };
-  }, [page.image_url]);
+  }, [url]);
   return href ? (
-    <img
-      src={href}
-      alt=""
-      loading="lazy"
-      style={{ width: "100%", aspectRatio: "3 / 4", objectFit: "cover", display: "block" }}
-    />
+    <img src={href} alt={alt} loading={eager ? undefined : "lazy"} style={style} />
   ) : (
-    <div style={{ width: "100%", aspectRatio: "3 / 4", background: "var(--kv-inset)" }} />
+    <div style={{ ...style, background: "var(--kv-inset)" }} />
   );
 }
+
+/** Credentialed page thumbnail (blob URL, works on remote-URL desktop). */
+function PageThumb({ page }: { page: Page }) {
+  return (
+    <BlobImg
+      url={page.image_url}
+      alt=""
+      style={{ width: "100%", aspectRatio: "3 / 4", objectFit: "cover", display: "block" }}
+    />
+  );
+}
+
+/** Fullscreen viewer for a page scan or a generation. Esc/backdrop closes. */
+function Lightbox({
+  title,
+  meta,
+  onClose,
+  children,
+}: {
+  title: string;
+  meta: string;
+  onClose: () => void;
+  children: React.ReactNode;
+}) {
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+  return (
+    <div
+      className="kv-lightbox"
+      role="dialog"
+      aria-modal="true"
+      aria-label={title}
+      onClick={onClose}
+    >
+      <div className="kv-lightbox-frame" onClick={(e) => e.stopPropagation()}>
+        <div className="kv-lightbox-head">
+          <div>
+            <div style={{ fontWeight: 700 }}>{title}</div>
+            <div className="kv-nums" style={{ fontSize: 12, color: "var(--kv-muted)" }}>
+              {meta}
+            </div>
+          </div>
+          <Btn small onClick={onClose} aria-label="Close viewer">
+            ✕
+          </Btn>
+        </div>
+        {children}
+      </div>
+    </div>
+  );
+}
+
+type LightboxState =
+  | { kind: "page"; page: Page; index: number }
+  | { kind: "gen"; job: Job }
+  | null;
 
 export default function MediaPage() {
   const [projects, setProjects] = useState<Project[]>([]);
   const [project, setProject] = useState<Project | null>(null);
   const [takes, setTakes] = useState<AudioTake[]>([]);
   const [jobs, setJobs] = useState<Job[]>([]);
+  const [frames, setFrames] = useState<DrawFrame[]>([]);
   const [usage, setUsage] = useState<StorageUsage | null>(null);
   const [report, setReport] = useState<ExportReport | null>(null);
   const [busy, setBusy] = useState("");
   const [notice, setNotice] = useState("");
+  // Library research: one search across every section, a status filter for
+  // generations, newest-first takes. All client-side — the listings are
+  // already in memory and small.
+  const [query, setQuery] = useState("");
+  const [genStatus, setGenStatus] = useState<"all" | "done" | "active" | "failed">("all");
+  const [takeSort, setTakeSort] = useState<"new" | "old" | "name">("new");
+  const [lightbox, setLightbox] = useState<LightboxState>(null);
 
   const refresh = useCallback(async (id: string | null) => {
     const ps = await api.listProjects();
@@ -81,16 +161,19 @@ export default function MediaPage() {
     if (!chosen) {
       setTakes([]);
       setJobs([]);
+      setFrames([]);
       setUsage(null);
       return;
     }
-    const [tk, allJobs, st] = await Promise.all([
+    const [tk, allJobs, fr, st] = await Promise.all([
       api.listTakes(chosen.id),
       api.listJobs(),
+      api.listFrames(chosen.id).catch(() => [] as DrawFrame[]),
       api.projectStorage(chosen.id),
     ]);
     setTakes(tk);
     setJobs(allJobs.filter((j) => j.project_id === chosen.id));
+    setFrames(fr);
     setUsage(st);
   }, []);
 
@@ -166,7 +249,33 @@ export default function MediaPage() {
     }
   };
 
+  const q = query.trim().toLowerCase();
+  const matches = (...hay: (string | number | null | undefined)[]) =>
+    q === "" || hay.some((h) => String(h ?? "").toLowerCase().includes(q));
+
+  // { pg, i } pairs so PG numbers stay stable while filtering.
+  const pages = (project?.pages ?? [])
+    .map((pg, i) => ({ pg, i }))
+    .filter(({ pg, i }) =>
+      matches(`pg ${i + 1}`, `page ${i + 1}`, `${pg.width}x${pg.height}`, `${pg.panels.length} panels`, pg.id),
+    );
+  const takesShown = takes
+    .filter((t) => matches(t.name, t.mime, t.id))
+    .sort((a, b) => {
+      if (takeSort === "name") return a.name.localeCompare(b.name);
+      const at = a.created_at ?? "";
+      const bt = b.created_at ?? "";
+      return takeSort === "new" ? bt.localeCompare(at) : at.localeCompare(bt);
+    });
   const aiJobs = jobs.filter((j) => j.kind === "image");
+  const gensShown = aiJobs.filter(
+    (j) =>
+      (genStatus === "all" ||
+        (genStatus === "active"
+          ? j.status === "queued" || j.status === "running"
+          : j.status === genStatus)) &&
+      matches(j.prompt, j.id, j.status),
+  );
   const exports = jobs.filter((j) => j.kind === "export");
   const quotaPct =
     usage && usage.quota_bytes > 0 ? (usage.bytes_used / usage.quota_bytes) * 100 : 0;
@@ -213,6 +322,31 @@ export default function MediaPage() {
             Delete project…
           </Btn>
         )}
+        <TextInput
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          placeholder="Search pages, takes, generations…"
+          aria-label="Search library"
+          style={{ minWidth: 200, flex: 1 }}
+        />
+      </div>
+      <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 12, flexWrap: "wrap" }}>
+        <span style={{ fontSize: 12, color: "var(--kv-muted)" }}>Generations:</span>
+        {(["all", "done", "active", "failed"] as const).map((s) => (
+          <Btn key={s} small active={genStatus === s} onClick={() => setGenStatus(s)}>
+            {s === "all" ? "All" : s === "active" ? "Running" : s === "done" ? "Done" : "Failed"}
+          </Btn>
+        ))}
+        <span style={{ fontSize: 12, color: "var(--kv-muted)", marginLeft: 8 }}>Takes:</span>
+        <SelectInput
+          value={takeSort}
+          onChange={(e) => setTakeSort(e.target.value as "new" | "old" | "name")}
+          aria-label="Sort takes"
+        >
+          <option value="new">Newest first</option>
+          <option value="old">Oldest first</option>
+          <option value="name">By name</option>
+        </SelectInput>
       </div>
 
       {(busy || notice) && (
@@ -235,39 +369,49 @@ export default function MediaPage() {
         <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
           <section>
             <SectionTitle>
-              Scanned pages ({project.pages.length})
+              Scanned pages ({pages.length}{pages.length !== project.pages.length ? ` of ${project.pages.length}` : ""})
             </SectionTitle>
             {project.pages.length === 0 ? (
               <EmptyState title="No pages" hint="Upload scans from the Scan tab." />
+            ) : pages.length === 0 ? (
+              <EmptyState title="No matches" hint="Nothing matches the current search." />
             ) : (
               <div
                 style={{
                   display: "grid",
-                  gridTemplateColumns: "repeat(auto-fill, minmax(120px, 1fr))",
-                  gap: 8,
+                  gridTemplateColumns: "repeat(auto-fill, minmax(150px, 1fr))",
+                  gap: 10,
                 }}
               >
-                {project.pages.map((pg, i) => (
-                  <div
-                    key={pg.id}
-                    style={{
-                      border: "1px solid var(--kv-border)",
-                      borderRadius: 6,
-                      overflow: "hidden",
-                      background: "var(--kv-panel)",
-                    }}
-                  >
-                    <PageThumb page={pg} />
-                    <div style={{ padding: 6, fontSize: 12 }}>
+                {pages.map(({ pg, i }) => (
+                  <div key={pg.id} className="kv-media-card">
+                    <button
+                      type="button"
+                      onClick={() => setLightbox({ kind: "page", page: pg, index: i })}
+                      title={`View PG ${i + 1} full size`}
+                      style={{
+                        display: "block",
+                        width: "100%",
+                        padding: 0,
+                        border: "none",
+                        background: "none",
+                        cursor: "zoom-in",
+                      }}
+                    >
+                      <PageThumb page={pg} />
+                    </button>
+                    <div style={{ padding: 8, fontSize: 12 }}>
+                      <div className="kv-nums" style={{ color: "var(--kv-text)", fontWeight: 700 }}>
+                        PG {String(i + 1).padStart(2, "0")}
+                      </div>
                       <div className="kv-nums" style={{ color: "var(--kv-muted)" }}>
-                        PG {String(i + 1).padStart(2, "0")} · {pg.width}×{pg.height}
+                        {pg.width}×{pg.height} · {pg.panels.length} panel{pg.panels.length === 1 ? "" : "s"}
                       </div>
-                      <div className="kv-nums" style={{ color: "var(--kv-muted)", marginBottom: 4 }}>
-                        {pg.panels.length} panels
+                      <div style={{ marginTop: 6 }}>
+                        <Btn small danger onClick={() => doDeletePage(pg, i)}>
+                          Delete
+                        </Btn>
                       </div>
-                      <Btn small danger onClick={() => doDeletePage(pg, i)}>
-                        Delete
-                      </Btn>
                     </div>
                   </div>
                 ))}
@@ -276,12 +420,14 @@ export default function MediaPage() {
           </section>
 
           <section>
-            <SectionTitle>Voice takes ({takes.length})</SectionTitle>
+            <SectionTitle>Voice takes ({takesShown.length}{takesShown.length !== takes.length ? ` of ${takes.length}` : ""})</SectionTitle>
             {takes.length === 0 ? (
               <EmptyState title="No takes" hint="Record or upload voice takes from the Cut tab." />
+            ) : takesShown.length === 0 ? (
+              <EmptyState title="No matches" hint="Nothing matches the current search." />
             ) : (
               <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-                {takes.map((t) => (
+                {takesShown.map((t) => (
                   <div
                     key={t.id}
                     style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}
@@ -296,6 +442,7 @@ export default function MediaPage() {
                     <span style={{ fontSize: 13 }}>{t.name}</span>
                     <span className="kv-nums" style={{ fontSize: 12, color: "var(--kv-muted)" }}>
                       {t.duration_sec > 0 ? `${t.duration_sec.toFixed(1)}s` : "live"} · {t.mime || "audio"}
+                      {t.created_at ? ` · ${new Date(t.created_at).toLocaleDateString()}` : ""}
                     </span>
                     <Btn small danger onClick={() => doDeleteTake(t)} style={{ marginLeft: "auto" }}>
                       Delete
@@ -307,35 +454,43 @@ export default function MediaPage() {
           </section>
 
           <section>
-            <SectionTitle>AI generations ({aiJobs.length})</SectionTitle>
+            <SectionTitle>AI generations ({gensShown.length}{gensShown.length !== aiJobs.length ? ` of ${aiJobs.length}` : ""})</SectionTitle>
             {aiJobs.length === 0 ? (
               <EmptyState title="No generations" hint="Generate images from the Cut tab." />
+            ) : gensShown.length === 0 ? (
+              <EmptyState title="No matches" hint="Nothing matches the current search or filter." />
             ) : (
               <div
                 style={{
                   display: "grid",
-                  gridTemplateColumns: "repeat(auto-fill, minmax(140px, 1fr))",
-                  gap: 8,
+                  gridTemplateColumns: "repeat(auto-fill, minmax(170px, 1fr))",
+                  gap: 10,
                 }}
               >
-                {aiJobs.map((j) => (
-                  <div
-                    key={j.id}
-                    style={{
-                      border: "1px solid var(--kv-border)",
-                      borderRadius: 6,
-                      overflow: "hidden",
-                      background: "var(--kv-panel)",
-                    }}
-                  >
+                {gensShown.map((j) => (
+                  <div key={j.id} className="kv-media-card">
                     {j.status === "done" && j.result_url ? (
-                      <img
-                        crossOrigin="use-credentials"
-                        src={mediaUrl(j.result_url)}
-                        alt=""
-                        loading="lazy"
-                        style={{ width: "100%", aspectRatio: "1 / 1", objectFit: "cover", display: "block" }}
-                      />
+                      <button
+                        type="button"
+                        onClick={() => setLightbox({ kind: "gen", job: j })}
+                        title={j.prompt ? `View: ${j.prompt}` : "View full size"}
+                        style={{
+                          display: "block",
+                          width: "100%",
+                          padding: 0,
+                          border: "none",
+                          background: "none",
+                          cursor: "zoom-in",
+                        }}
+                      >
+                        <img
+                          crossOrigin="use-credentials"
+                          src={mediaUrl(j.result_url)}
+                          alt={j.prompt || "AI generation"}
+                          loading="lazy"
+                          style={{ width: "100%", aspectRatio: "1 / 1", objectFit: "cover", display: "block" }}
+                        />
+                      </button>
                     ) : (
                       <div
                         style={{
@@ -354,9 +509,52 @@ export default function MediaPage() {
                         {j.status === "failed" ? (j.error ?? "failed") : `${j.status} ${Math.round(j.progress * 100)}%`}
                       </div>
                     )}
-                    <div className="kv-nums" style={{ padding: 6, fontSize: 11, color: "var(--kv-muted)" }}>
-                      {j.id} · {j.status}
+                    <div style={{ padding: 8, fontSize: 12 }}>
+                      {j.prompt ? (
+                        <div
+                          title={j.prompt}
+                          style={{
+                            display: "-webkit-box",
+                            WebkitLineClamp: 2,
+                            WebkitBoxOrient: "vertical",
+                            overflow: "hidden",
+                            marginBottom: 4,
+                          }}
+                        >
+                          {j.prompt}
+                        </div>
+                      ) : null}
+                      <div className="kv-nums" style={{ fontSize: 11, color: "var(--kv-muted)" }}>
+                        {j.id} · {j.status}
+                      </div>
                     </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </section>
+
+          <section>
+            <SectionTitle>Draw frames ({frames.length})</SectionTitle>
+            {frames.length === 0 ? (
+              <EmptyState title="No frames" hint="Draw frames on the Draw tab." />
+            ) : (
+              <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                {frames.map((f, i) => (
+                  <div
+                    key={f.id}
+                    style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}
+                  >
+                    <span className="kv-nums" style={{ fontSize: 12 }}>
+                      FR {String(i + 1).padStart(2, "0")}
+                    </span>
+                    <span style={{ fontSize: 13 }}>{f.name || "Untitled frame"}</span>
+                    <span className="kv-nums" style={{ fontSize: 12, color: "var(--kv-muted)" }}>
+                      {f.width}×{f.height} · {f.layers.length} layer{f.layers.length === 1 ? "" : "s"}
+                    </span>
+                    <Btn small onClick={() => gotoTab("draw")} style={{ marginLeft: "auto" }}>
+                      Open in Draw
+                    </Btn>
                   </div>
                 ))}
               </div>
@@ -409,11 +607,41 @@ export default function MediaPage() {
               `${project.pages.length} pages`,
               `${takes.length} takes`,
               `${aiJobs.length} generations`,
+              `${frames.length} frames`,
               `${exports.length} renders`,
               usage ? `${fmtBytes(usage.bytes_used)} stored` : "",
             ]}
           />
         </div>
+      )}
+
+      {lightbox?.kind === "page" && (
+        <Lightbox
+          title={`PG ${lightbox.index + 1}`}
+          meta={`${lightbox.page.width}×${lightbox.page.height} · ${lightbox.page.panels.length} panels`}
+          onClose={() => setLightbox(null)}
+        >
+          <BlobImg
+            url={lightbox.page.image_url}
+            alt={`Scanned page ${lightbox.index + 1}`}
+            eager
+            style={{ width: "100%", maxHeight: "76vh", objectFit: "contain", display: "block", background: "#000" }}
+          />
+        </Lightbox>
+      )}
+      {lightbox?.kind === "gen" && lightbox.job.result_url && (
+        <Lightbox
+          title={lightbox.job.prompt || `Generation ${lightbox.job.id}`}
+          meta={`${lightbox.job.id} · ${lightbox.job.status}`}
+          onClose={() => setLightbox(null)}
+        >
+          <img
+            crossOrigin="use-credentials"
+            src={mediaUrl(lightbox.job.result_url)}
+            alt={lightbox.job.prompt || "AI generation"}
+            style={{ width: "100%", maxHeight: "76vh", objectFit: "contain", display: "block", background: "#000" }}
+          />
+        </Lightbox>
       )}
     </>
   );

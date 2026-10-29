@@ -47,6 +47,31 @@ export const BRUSH_PRESETS: BrushPreset[] = [
     size: 56, opacity: 0.16, thinning: 0.2, smoothing: 0.85, streamline: 0.6,
     taperStart: false, taperEnd: false, tiltEffect: 0.2,
   },
+  {
+    id: "g-pen", name: "G-pen", hint: "Manga nib: hairlines to bold",
+    size: 9, opacity: 1, thinning: 0.85, smoothing: 0.45, streamline: 0.55,
+    taperStart: true, taperEnd: true, tiltEffect: 0.25,
+  },
+  {
+    id: "maru", name: "Maru", hint: "Fine detail lines",
+    size: 3, opacity: 1, thinning: 0.4, smoothing: 0.35, streamline: 0.75,
+    taperStart: true, taperEnd: true, tiltEffect: 0.2,
+  },
+  {
+    id: "fude", name: "Fude", hint: "Brush pen: tilt for fat strokes",
+    size: 24, opacity: 1, thinning: 0.55, smoothing: 0.6, streamline: 0.45,
+    taperStart: true, taperEnd: false, tiltEffect: 0.75,
+  },
+  {
+    id: "sumi", name: "Sumi", hint: "Broad ink wash",
+    size: 72, opacity: 0.45, thinning: 0.3, smoothing: 0.85, streamline: 0.6,
+    taperStart: false, taperEnd: false, tiltEffect: 0.5,
+  },
+  {
+    id: "fineliner", name: "Fineliner", hint: "Constant-width drafting line",
+    size: 5, opacity: 1, thinning: 0.05, smoothing: 0.4, streamline: 0.8,
+    taperStart: false, taperEnd: false, tiltEffect: 0,
+  },
 ];
 
 export interface StrokeInput {

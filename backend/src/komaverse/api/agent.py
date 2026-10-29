@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from komaverse.agent import auto_direct_core, run_agent_turn
+from komaverse.agent import AgentRef, auto_direct_core, run_agent_turn
 from komaverse.auth import get_current_user
 from komaverse.db import get_session
 from komaverse.db_models import UserRow
@@ -19,6 +19,8 @@ class AgentChatBody(BaseModel):
     project_id: str | None = None
     message: str = ""
     clip_seconds: float = 2.0
+    # @-mentions parsed by the client: resolved ownership-scoped into context.
+    refs: list[AgentRef] = []
 
 
 class AgentAction(BaseModel):
@@ -47,7 +49,10 @@ def chat(
     if not body.message.strip():
         raise HTTPException(400, "message is required")
     seconds = min(max(body.clip_seconds, 0.1), 30.0)
-    out = run_agent_turn(body.message, body.project_id, session, user, None, seconds)
+    out = run_agent_turn(
+        body.message, body.project_id, session, user, None, seconds,
+        refs=[r.model_dump() for r in body.refs],
+    )
     return AgentReply(**out)
 
 

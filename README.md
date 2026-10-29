@@ -88,6 +88,20 @@ npm run dev        # tauri dev (loads studio-web, API via base-URL setting)
 docker compose -f infra/docker-compose.yml up postgres redis
 ```
 
+## Demo login
+
+Seeded by `python scripts/seed_demo.py` (from `backend/` with the venv
+active) — creates the user plus a Demo project with a manga page,
+detected panels, clips, credits, and an export. Re-running is safe
+(existing user is reused).
+
+- Email: `demo@komaverse.local`
+- Password: `demo1234`
+
+Sign in from the landing page (Sign in button, or Start creating →
+sign in). Registering a new account also works — auth is fully local,
+no email verification.
+
 ## Tests
 
 ```bash

@@ -31,3 +31,19 @@ foreach ($port in $Ports) {
 if (-not $found) {
   Write-Host ("Nothing listening on :" + ($Ports -join ", :") + ".")
 }
+
+# Second pass: uvicorn --reload orphans. When a reloader supervisor dies,
+# its live worker children keep serving while their sockets stay attributed
+# to the dead supervisor PID, so the sweep above cannot see them. Match the
+# API servers by command line as well (node/vite on 5173 is unaffected).
+foreach ($port in $Ports) {
+  $workers = Get-CimInstance Win32_Process -Filter "Name = 'python.exe'" -ErrorAction SilentlyContinue |
+    Where-Object { $_.CommandLine -match "komaverse\.main:app" -and $_.CommandLine -match "--port\s+$port\b" }
+  foreach ($w in $workers) {
+    $label = "uvicorn worker (pid $($w.ProcessId)) on port $port"
+    if ($PSCmdlet.ShouldProcess($label, "Stop process")) {
+      Stop-Process -Id $w.ProcessId -Force -ErrorAction SilentlyContinue
+      Write-Host "Stopped $label" -ForegroundColor Yellow
+    }
+  }
+}

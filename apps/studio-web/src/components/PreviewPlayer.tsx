@@ -34,14 +34,26 @@ export function PreviewPlayer({
   clips,
   seek,
   onTime,
+  hideMotion = false,
+  loop = false,
+  autoPlay = false,
+  playRequest = 0,
 }: {
   clips: PreviewClip[];
   /** External seek requests (filmstrip clicks). */
   seek: { time: number; nonce: number } | null;
   /** Throttled playhead emit for the filmstrip marker. */
   onTime: (t: number) => void;
+  /** Hide the "· motion" suffix (flipbook has no camera moves). */
+  hideMotion?: boolean;
+  /** Wrap back to the start instead of stopping at the end. */
+  loop?: boolean;
+  /** Start playing as soon as the player mounts. */
+  autoPlay?: boolean;
+  /** Restart from the first clip and play whenever this counter increases. */
+  playRequest?: number;
 }) {
-  const [playing, setPlaying] = useState(false);
+  const [playing, setPlaying] = useState(autoPlay);
   const [time, setTime] = useState(0);
   const total = useMemo(() => clips.reduce((a, c) => a + c.duration, 0), [clips]);
   const onTimeRef = useRef(onTime);
@@ -56,8 +68,17 @@ export function PreviewPlayer({
 
   useEffect(() => {
     setTime(0);
-    setPlaying(false);
-  }, [clips]);
+    setPlaying(autoPlay);
+  }, [clips, autoPlay]);
+
+  // External play button: restart from the first clip and play. Declared
+  // after the clips reset so it wins when both change in one commit.
+  useEffect(() => {
+    if (playRequest > 0) {
+      setTime(0);
+      setPlaying(true);
+    }
+  }, [playRequest]);
 
   useEffect(() => {
     if (seek) setTime(Math.min(Math.max(seek.time, 0), total));
@@ -73,6 +94,7 @@ export function PreviewPlayer({
       setTime((t) => {
         const nt = t + dt;
         if (nt >= total) {
+          if (loop) return nt - total;
           setPlaying(false);
           return total;
         }
@@ -82,7 +104,7 @@ export function PreviewPlayer({
     };
     raf = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(raf);
-  }, [playing, total]);
+  }, [playing, total, loop]);
 
   useEffect(() => {
     const now = performance.now();
@@ -132,7 +154,11 @@ export function PreviewPlayer({
           style={{
             width: "100%",
             height: "100%",
-            objectFit: "cover",
+            // Contain, not cover: panel crops are portrait, and cover scaled
+            // them up until they filled 16/9 — the "zoomed" look. The black
+            // stage letterboxes the rest, which the Ken Burns drift plays on.
+            objectFit: "contain",
+            background: "#000",
             ...motionStyle(current.motion, local, reduceMotion),
           }}
         />
@@ -149,7 +175,9 @@ export function PreviewPlayer({
             padding: "1px 6px",
           }}
         >
-          {current.label} · {current.motion}
+          {hideMotion || !current.motion || current.motion === "none"
+            ? current.label
+            : `${current.label} · ${current.motion}`}
         </span>
       </div>
       <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 8 }}>

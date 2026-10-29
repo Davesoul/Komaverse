@@ -3,7 +3,8 @@ import { api, reportClientError, setOnUnauthorized, type User } from "./api";
 import AuthForm from "./components/AuthForm";
 import AgentDock from "./components/AgentDock";
 import SystemCard from "./components/SystemCard";
-import { Btn, Card, Kanji, Spinner } from "./components/ui";
+import { Btn, Card, Kanji, SelectInput, Spinner, TextInput } from "./components/ui";
+import { getCurrentProject, setCurrentProject } from "./lib/studio";
 import { prefersReducedMotion } from "./components/Reveal";
 import LandingPage from "./pages/LandingPage";
 
@@ -27,20 +28,46 @@ export default function App() {
   const [user, setUser] = useState<User | null | undefined>(undefined);
   const [authMode, setAuthMode] = useState<"login" | "register">("register");
   const [showAuth, setShowAuth] = useState(false);
-  const [tab, setTab] = useState<Tab>("home");
+  const [tab, setTabState] = useState<Tab>(() => {
+    const t = (() => {
+      try {
+        return localStorage.getItem("komaverse.tab");
+      } catch {
+        return null;
+      }
+    })();
+    return TABS.some((x) => x.id === t) ? (t as Tab) : "home";
+  });
+  // The shell tab survives reloads next to the published project id, so a
+  // refresh drops you back where you were instead of Home with nothing open.
+  const setTab = (t: Tab) => {
+    setTabState(t);
+    try {
+      localStorage.setItem("komaverse.tab", t);
+    } catch {
+      // Private mode etc: tab simply resets next load.
+    }
+  };
   const [apiStatus, setApiStatus] = useState<string>("checking…");
   const [online, setOnline] = useState(navigator.onLine);
   const [apiBase, setApiBase] = useState(
     localStorage.getItem("komaverse.apiBase") || "",
   );
   const [projectCount, setProjectCount] = useState<number | null>(null);
+  const [homeProjects, setHomeProjects] = useState<{ id: string; name: string }[]>([]);
+  const [activeId, setActiveId] = useState<string>(() => getCurrentProject() ?? "");
   const mainRef = useRef<HTMLElement>(null);
 
   useEffect(() => {
     if (tab !== "home" || !user) return;
     api
       .listProjects()
-      .then((ps) => setProjectCount(ps.length))
+      .then((ps) => {
+        setProjectCount(ps.length);
+        setHomeProjects(ps);
+        const stored = getCurrentProject();
+        setActiveId(stored && ps.some((p) => p.id === stored) ? stored : "");
+      })
       .catch(() => setProjectCount(null));
   }, [tab, user]);
 
@@ -73,6 +100,17 @@ export default function App() {
         setApiStatus("offline (start backend on :8000)");
       });
     setOnUnauthorized(() => setUser(null));
+  }, []);
+
+  // Pages request shell navigation (e.g. Scan → Animate handoff) via
+  // lib/studio gotoTab; the detail is validated like stored tab ids.
+  useEffect(() => {
+    const goto = (e: Event) => {
+      const t = (e as CustomEvent).detail;
+      if (TABS.some((x) => x.id === t)) setTab(t);
+    };
+    window.addEventListener("komaverse:goto-tab", goto);
+    return () => window.removeEventListener("komaverse:goto-tab", goto);
   }, []);
 
   useEffect(() => {
@@ -116,8 +154,23 @@ export default function App() {
         <div style={{ maxWidth: 1024, margin: "0 auto" }}>
           {showAuth ? (
             <>
-              <div style={{ paddingTop: 16 }}>
-                <Btn onClick={() => setShowAuth(false)}>← Back</Btn>
+              <div
+                style={{
+                  paddingTop: 16,
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 10,
+                }}
+              >
+                <img
+                  src="/koma-wari-logo-sm.png"
+                  alt=""
+                  style={{ width: 28, height: 28, objectFit: "contain" }}
+                />
+                <strong style={{ fontSize: 16 }}>Komaverse</strong>
+                <span style={{ marginLeft: "auto" }}>
+                  <Btn onClick={() => setShowAuth(false)}>← Back</Btn>
+                </span>
               </div>
               <AuthForm
                 mode={authMode}
@@ -166,6 +219,8 @@ export default function App() {
             display: "flex",
             alignItems: "center",
             gap: 8,
+            rowGap: 10,
+            flexWrap: "wrap",
             maxWidth: 1280,
             margin: "0 auto",
           }}
@@ -196,15 +251,21 @@ export default function App() {
             }}
           >
             <span
-              aria-hidden
+              role="img"
+              aria-label={`API ${apiStatus}`}
+              title={apiStatus}
               style={{
                 width: 8,
                 height: 8,
                 borderRadius: "50%",
+                flexShrink: 0,
                 background:
                   apiStatus === "connected" ? "var(--kv-ok)" : "var(--kv-danger)",
               }}
             />
+            {apiStatus !== "connected" && (
+              <span style={{ color: "var(--kv-danger)" }}>{apiStatus}</span>
+            )}
             {user.name || user.email}
             <Btn small onClick={logout}>
               Sign out
@@ -248,6 +309,7 @@ export default function App() {
           <div
             style={{
               display: "flex",
+              flexWrap: "wrap",
               background: "var(--kv-surface)",
               border: "1px solid var(--kv-border)",
               borderRadius: "var(--kv-radius)",
@@ -263,7 +325,7 @@ export default function App() {
                   className="kv-pipe"
                   onClick={() => setTab(id)}
                   style={{
-                    flex: 1,
+                    flex: "1 1 160px",
                     border: "none",
                     borderLeft: i > 0 ? "1px solid var(--kv-border)" : "none",
                     padding: 16,
@@ -282,21 +344,48 @@ export default function App() {
             })}
           </div>
           <Card style={{ maxWidth: 640, marginBottom: 20 }}>
+            <h2 style={{ fontSize: 15, margin: "0 0 8px" }}>Active project</h2>
+            <div style={{ display: "flex", gap: 8 }}>
+              <SelectInput
+                value={activeId}
+                onChange={(e) => {
+                  const id = e.target.value;
+                  setActiveId(id);
+                  setCurrentProject(id || null);
+                }}
+                style={{ flex: 1 }}
+                aria-label="Active project"
+              >
+                <option value="">Select a project…</option>
+                {homeProjects.map((p) => (
+                  <option key={p.id} value={p.id}>
+                    {p.name}
+                  </option>
+                ))}
+              </SelectInput>
+              <Btn disabled={!activeId} onClick={() => setTab("scan")}>
+                Open in Scan
+              </Btn>
+            </div>
+            <p style={{ fontSize: 12, color: "var(--kv-muted)" }}>
+              Every tab reopens this project automatically — including after
+              a page reload.
+            </p>
+          </Card>
+          <Card style={{ maxWidth: 640, marginBottom: 20 }}>
             <h2 style={{ fontSize: 15, margin: "0 0 8px" }}>API connection</h2>
             <div style={{ display: "flex", gap: 8 }}>
-              <input
-                style={{
-                  background: "var(--kv-inset)",
-                  border: "1px solid var(--kv-border-strong)",
-                  borderRadius: "var(--kv-radius-sm)",
-                  padding: "6px 8px",
-                  fontSize: 13,
-                  flex: 1,
-                }}
-                placeholder="Same origin (empty = dev proxy)"
-                value={apiBase}
-                onChange={(e) => setApiBase(e.target.value)}
-              />
+              <label style={{ flex: 1, display: "flex" }}>
+                <span style={{ position: "absolute", width: 1, height: 1, overflow: "hidden", clip: "rect(0 0 0 0)" }}>
+                  API base URL
+                </span>
+                <TextInput
+                  style={{ flex: 1 }}
+                  placeholder="Same origin (empty = dev proxy)"
+                  value={apiBase}
+                  onChange={(e) => setApiBase(e.target.value)}
+                />
+              </label>
               <Btn
                 onClick={() => {
                   if (apiBase.trim()) {

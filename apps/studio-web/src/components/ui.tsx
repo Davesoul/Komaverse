@@ -16,13 +16,14 @@ type BtnProps = ButtonHTMLAttributes<HTMLButtonElement> & {
   small?: boolean;
 };
 
-export function Btn({ active, danger, small, style, ...rest }: BtnProps) {
-  const [pressed, setPressed] = useState(false);
+export function Btn({ active, danger, small, style, className, ...rest }: BtnProps) {
+  // Press/hover/shadow physics live in CSS (.kv-btn) so touch, mouse,
+  // and keyboard share them — inline styles only carry color variants.
+  // (Inline box-shadow/transform used to sit here and silently overrode
+  // the stylesheet's hover lift and press sink.)
   return (
     <button
-      onPointerDown={() => setPressed(true)}
-      onPointerUp={() => setPressed(false)}
-      onPointerLeave={() => setPressed(false)}
+      className={["kv-btn", className].filter(Boolean).join(" ")}
       style={{
         background: active ? "var(--kv-raised)" : "var(--kv-surface)",
         color: danger ? "var(--kv-danger)" : "var(--kv-text)",
@@ -33,9 +34,8 @@ export function Btn({ active, danger, small, style, ...rest }: BtnProps) {
         fontSize: 13,
         cursor: rest.disabled ? "default" : "pointer",
         opacity: rest.disabled ? 0.5 : 1,
-        transform: pressed && !rest.disabled ? "scale(0.97)" : "scale(1)",
         transition:
-          "background-color var(--kv-dur-fast) var(--kv-ease-out), transform var(--kv-dur-fast) var(--kv-ease-out)",
+          "background-color var(--kv-dur-fast) var(--kv-ease-out), transform var(--kv-dur-fast) var(--kv-ease-out), box-shadow var(--kv-dur-fast) var(--kv-ease-out)",
         ...style,
       }}
       onMouseEnter={(e) => {
@@ -47,7 +47,6 @@ export function Btn({ active, danger, small, style, ...rest }: BtnProps) {
         rest.onMouseEnter?.(e);
       }}
       onMouseLeave={(e) => {
-        setPressed(false);
         e.currentTarget.style.background = active
           ? "var(--kv-raised)"
           : "var(--kv-surface)";
@@ -395,10 +394,21 @@ export function SfxBtn({
   className,
   ...rest
 }: ButtonHTMLAttributes<HTMLButtonElement> & { small?: boolean }) {
+  // Click punch: the same ink-stamp slam as hover, fired on activation so
+  // the loudest action answers presses as well as hovers — including
+  // keyboard activation, which fires onClick too. ClassList restart (not
+  // state) so rapid repeat presses slam every time, not just the first.
   return (
     <button
       className={`kv-sfxbtn${small ? " small" : ""}${className ? ` ${className}` : ""}`}
       {...rest}
+      onClick={(e) => {
+        const el = e.currentTarget;
+        el.classList.remove("punch");
+        void el.offsetWidth;
+        el.classList.add("punch");
+        rest.onClick?.(e);
+      }}
     />
   );
 }

@@ -60,6 +60,14 @@ class Settings(BaseSettings):
 
     media_dir: Path = Field(default=Path("./media"), validation_alias="MEDIA_DIR")
 
+    # YOLO panel detector weights. Absolute or backend-root-relative path;
+    # default ships in backend/models/. Missing file ⇒ "yolo" requests fall
+    # back to heuristic (same contract as the cloud fallback).
+    yolo_model: str = Field(
+        default="models/best-comic-panel-detection.pt",
+        validation_alias="KOMA_YOLO_MODEL",
+    )
+
     model_config = {
         "env_file": ".env",
         "env_file_encoding": "utf-8",

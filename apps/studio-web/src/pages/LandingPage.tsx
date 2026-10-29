@@ -1,18 +1,14 @@
 import { lazy, Suspense, useEffect, useRef, useState } from "react";
-import { Btn, ImpactBurst, Kanji, PrimaryBtn, SfxBtn, Skeleton } from "../components/ui";
+import { Btn, Chip, ImpactBurst, Kanji, PrimaryBtn, SfxBtn } from "../components/ui";
 import { Magnet } from "../components/Magnet";
 import { prefersReducedMotion, useRevealScope } from "../components/Reveal";
+import { useKineticScope } from "../components/Kinetic";
+import Backdrop from "../components/Backdrop";
+import ShowcaseReels from "../components/ShowcaseReels";
 import "./LandingPage.css";
 
-const VIDEOS = [
-  "/videos/showcase_01.mp4",
-  "/videos/showcase_02.mp4",
-  "/videos/showcase_03.mp4",
-  "/videos/showcase_04.mp4",
-];
-
-const PenViewer = lazy(() => import("../components/PenViewer"));
-const LOGO = "/koma-wari-logo.png";
+const ScrollCompanion = lazy(() => import("../components/ScrollCompanion"));
+const LOGO = "/koma-wari-logo-sm.png";
 
 function Icon({ paths }: { paths: string[] }) {
   return (
@@ -103,23 +99,27 @@ export default function LandingPage({
   onSignIn: () => void;
   onRegister: () => void;
 }) {
+  // Reduced motion stills the UI chrome (splash, smooth scroll, hero
+  // stagger, sheen, magnet, 3D turntable) — but the reels are content, not
+  // chrome: backdrop and showcase playback plus the gentle opacity-only
+  // rotation always run, so the page never sits frozen.
   const reducedMotion =
     typeof window !== "undefined" &&
     window.matchMedia("(prefers-reduced-motion: reduce)").matches;
   const [splashDone, setSplashDone] = useState(reducedMotion);
-  const [activeIdx, setActiveIdx] = useState(0);
   const [scrolled, setScrolled] = useState(false);
   const [muted, setMuted] = useState(true);
   const splashRef = useRef<HTMLVideoElement>(null);
+  const dockRef = useRef<HTMLDivElement>(null);
+  const [docked, setDocked] = useState(false);
   const pageRef = useRef<HTMLDivElement>(null);
   const heroTitleRef = useRef<HTMLHeadingElement>(null);
   const heroPlayed = useRef(false);
   useRevealScope(pageRef);
+  useKineticScope(pageRef);
 
-  // Lenis smooth scroll, landing only. Skipped for reduced motion;
-  // any failure keeps native scroll.
+  // Lenis smooth scroll, landing only; any failure keeps native scroll.
   useEffect(() => {
-    if (prefersReducedMotion()) return;
     let lenis: { destroy: () => void } | null = null;
     import("lenis")
       .then(({ default: Lenis }) => {
@@ -146,23 +146,6 @@ export default function LandingPage({
       });
   }, [reducedMotion]);
 
-  // Named showcase works: mixed crops of the reels, masonry-style.
-const REELS = [
-  { v: 0, ratio: "16 / 10", title: "Neon Crossing", tag: "Studio Pick", pick: true },
-  { v: 1, ratio: "9 / 16", title: "Paper Storm", tag: "AI · 6s" },
-  { v: 2, ratio: "1 / 1", title: "Ink Drift", tag: "AI · 4s" },
-  { v: 3, ratio: "4 / 3", title: "Frame by Frame", tag: "Timeline · 8s" },
-  { v: 0, ratio: "1 / 1", title: "Redline Run", tag: "AI · 5s" },
-  { v: 1, ratio: "16 / 10", title: "Static Bloom", tag: "AI · 7s" },
-];
-
-// Cycle showcase backdrop every 4.5s.
-  useEffect(() => {
-    if (reducedMotion) return;
-    const timer = setInterval(() => setActiveIdx((i) => (i + 1) % VIDEOS.length), 4500);
-    return () => clearInterval(timer);
-  }, [reducedMotion]);
-
   useEffect(() => {
     const onScroll = () => setScrolled(window.scrollY > 20);
     window.addEventListener("scroll", onScroll, { passive: true });
@@ -173,7 +156,7 @@ const REELS = [
   // Static markup keeps clean text (SEO/no-JS); splitting happens at runtime.
   // Any failure leaves the hero fully visible.
   useEffect(() => {
-    if (!splashDone || heroPlayed.current || prefersReducedMotion()) return;
+    if (!splashDone || heroPlayed.current) return;
     const title = heroTitleRef.current;
     if (!title) return;
     heroPlayed.current = true;
@@ -218,21 +201,7 @@ const REELS = [
 
   return (
     <>
-      <div className="lv-bg" aria-hidden="true">
-        {VIDEOS.map((src, i) => (
-          <video
-            key={src}
-            src={src}
-            autoPlay
-            muted
-            loop
-            playsInline
-            preload={i === 0 ? "auto" : "metadata"}
-            className={i === activeIdx ? "active" : ""}
-          />
-        ))}
-        <div className="lv-bg-overlay" />
-      </div>
+      <Backdrop />
 
       <div className={`lv-splash${splashDone ? " done" : ""}`} aria-hidden={splashDone}>
         {!reducedMotion && (
@@ -270,6 +239,9 @@ const REELS = [
       </div>
 
       <div className="lv" ref={pageRef}>
+        <Suspense fallback={null}>
+          <ScrollCompanion dockRef={dockRef} onDock={setDocked} />
+        </Suspense>
         <nav className={`lv-nav${scrolled ? " scrolled" : ""}`}>
           <span className="lv-brand">
             <img src={LOGO} alt="" />
@@ -314,46 +286,7 @@ const REELS = [
         </section>
 
         <div className="kv-speedline" aria-hidden style={{ maxWidth: 1024, margin: "8px auto 0" }} />
-        <section
-          id="showcase"
-          className="lv-section lv-wide"
-          aria-label="Showcase reels"
-          data-reveal
-        >
-          <p className="lv-label">Showcase</p>
-          <h2 className="lv-h2">Made in the studio</h2>
-          <div className="lv-reels">
-            {REELS.map((r, i) => (
-              <figure
-                key={`${r.v}-${i}`}
-                className="lv-reel kv-reveal-media"
-                data-reveal
-                data-delay={(i % 3) * 80}
-              >
-                <video
-                  src={VIDEOS[r.v]}
-                  muted
-                  loop
-                  playsInline
-                  preload="metadata"
-                  style={{ aspectRatio: r.ratio }}
-                  aria-label={`${r.title} — showcase reel`}
-                  onMouseEnter={(e) => e.currentTarget.play().catch(() => {})}
-                  onMouseLeave={(e) => e.currentTarget.pause()}
-                  onClick={(e) => {
-                    const v = e.currentTarget;
-                    if (v.paused) v.play().catch(() => {});
-                    else v.pause();
-                  }}
-                />
-                <figcaption>
-                  <span className="kv-sfx lv-reel-title">{r.title}</span>
-                  <span className="lv-reel-tag">{r.pick ? "★ " : ""}{r.tag}</span>
-                </figcaption>
-              </figure>
-            ))}
-          </div>
-        </section>
+        <ShowcaseReels />
 
         <section
           id="instrument"
@@ -367,12 +300,47 @@ const REELS = [
               <h2 className="lv-h2">Drawn with real tools in mind</h2>
               <p className="lv-instrument-copy">
                 The studio treats the pen as the hero — pressure, tilt, and
-                ink all the way to export. Drag the studio pen to look around it.
+                ink all the way to export. It travels with you down this page,
+                and rests here when you arrive.
               </p>
+              <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 16 }}>
+                <Chip>Pressure-sensitive</Chip>
+                <Chip>Tilt-aware</Chip>
+                <Chip>Ink-first</Chip>
+              </div>
             </div>
-            <Suspense fallback={<Skeleton width="100%" height={320} />}>
-              <PenViewer />
-            </Suspense>
+            <div
+              ref={dockRef}
+              className="kv-panel-frame"
+              role="img"
+              aria-label="Instrument dock — the traveling pen rests here"
+              style={{
+                position: "relative",
+                aspectRatio: "16 / 10",
+                minHeight: 360,
+                background: "var(--kv-inset)",
+                borderRadius: "var(--kv-radius)",
+                overflow: "hidden",
+              }}
+            >
+              {!docked && (
+                <div
+                  className="kv-halftone"
+                  style={{
+                    position: "absolute",
+                    inset: 0,
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                  }}
+                >
+                  <span className="lv-dock-live" aria-hidden="true">
+                    <span className="lv-dock-live-dot" />
+                    Traveling
+                  </span>
+                </div>
+              )}
+            </div>
           </div>
           <Kanji char="筆" />
         </section>

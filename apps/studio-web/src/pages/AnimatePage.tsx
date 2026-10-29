@@ -30,7 +30,7 @@ import {
 import { AudioDeck } from "../components/AudioDeck";
 import { Magnet } from "../components/Magnet";
 import { PreviewPlayer, type PreviewClip } from "../components/PreviewPlayer";
-import { setCurrentProject } from "../lib/studio";
+import { getCurrentProject, setCurrentProject } from "../lib/studio";
 
 const MOTIONS = ["none", "zoom-in", "zoom-out", "pan-left", "pan-right"];
 const POLL_MS = 1500;
@@ -62,9 +62,16 @@ function labelFor(clip: Clip, project: Project | null, frames: DrawFrame[]): str
   return clip.kind;
 }
 
-function clipImageFor(clip: Clip, project: Project | null): string {
-  if (clip.kind === "panel") return api.panelPreviewUrl(clip.source_id);
-  if (clip.kind === "frame") return api.frameThumbnailUrl(clip.source_id);
+/**
+ * Clip artwork URL. `hiRes` asks the server for up to 960px on the long
+ * side (preview player); thumbs use the small 320 defaults so rows stay
+ * light. Page stills are full files either way.
+ */
+function clipImageFor(clip: Clip, project: Project | null, hiRes = false): string {
+  if (clip.kind === "panel")
+    return api.panelPreviewUrl(clip.source_id, hiRes ? 960 : undefined);
+  if (clip.kind === "frame")
+    return api.frameThumbnailUrl(clip.source_id, hiRes ? 960 : undefined);
   const page = project?.pages.find((p) => p.id === clip.source_id);
   return page ? mediaUrl(page.image_url) : "";
 }
@@ -134,8 +141,18 @@ export default function AnimatePage() {
   const [renamingScene, setRenamingScene] = useState("");
   const [dragId, setDragId] = useState<string | null>(null);
 
+  // Reload restores the persisted project (validated against the server
+  // list) instead of asking again; manual selection still publishes.
   useEffect(() => {
-    api.listProjects().then(setProjects).catch((e) => setNotice(`API offline: ${e.message}`));
+    api
+      .listProjects()
+      .then((ps) => {
+        setProjects(ps);
+        const stored = getCurrentProject();
+        if (stored && ps.some((p) => p.id === stored)) void refresh(stored);
+      })
+      .catch((e) => setNotice(`API offline: ${(e as Error).message}`));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const refresh = async (projectId: string, keepScene?: string) => {
@@ -170,7 +187,7 @@ export default function AnimatePage() {
         id: c.id,
         kind: c.kind,
         label: `${i + 1} · ${labelFor(c, project, frames)}`,
-        image: clipImageFor(c, project),
+        image: clipImageFor(c, project, true),
         duration: c.duration,
         motion: c.motion,
       })),

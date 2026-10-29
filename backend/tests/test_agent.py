@@ -184,6 +184,44 @@ def test_agent_export_rate_limited(factory, user):
     assert "rate limited" in out["reply"].lower()
 
 
+def test_agent_resolves_panel_mention(factory, user):
+    from komaverse.api.scans import DetectRequest, detect_panels, get_project
+
+    pid = seed_project(factory, user)
+    with factory() as s:
+        page = get_project(pid, s, user).pages[0]
+    with factory() as s:
+        detected = detect_panels(page.id, DetectRequest(detector="heuristic"), s, user)
+    assert detected.panels, "seed page must detect panels"
+    ref = {"kind": "panel", "id": detected.panels[0].id}
+    out = turn(factory, user, "hmm, tell me about this thing here", pid, refs=[ref])
+    assert "PG 1" in out["reply"]
+    assert "Panel" in out["reply"]
+
+
+def test_agent_names_missing_mention(factory, user):
+    pid = seed_project(factory, user)
+    out = turn(
+        factory, user, "hmm, tell me about this thing here", pid,
+        refs=[{"kind": "frame", "id": "nope00000000"}],
+    )
+    assert "(not found)" in out["reply"]
+
+
+def test_chat_accepts_refs(factory, user):
+    pid = seed_project(factory, user)
+    with factory() as s:
+        reply = chat(
+            AgentChatBody(
+                message="hello?", project_id=pid,
+                refs=[{"kind": "take", "id": "nope00000000"}],
+            ),
+            s,
+            user,
+        )
+    assert "(not found)" in reply.reply
+
+
 def test_chat_threads_clip_seconds(factory, user):
     from komaverse.api.animate import list_scenes
 

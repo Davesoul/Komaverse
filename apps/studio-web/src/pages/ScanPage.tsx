@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api, mediaUrl, type Page, type Panel, type Project } from "../api";
-import { setCurrentProject } from "../lib/studio";
+import { getCurrentProject, gotoTab, setCurrentProject } from "../lib/studio";
 import {
   Btn,
   ChapterHeader,
@@ -23,13 +23,17 @@ export default function ScanPage() {
   const [panels, setPanels] = useState<Panel[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [mode, setMode] = useState<Mode>("select");
-  const [detector, setDetector] = useState("heuristic");
+  const [detector, setDetector] = useState("yolo");
   const [direction, setDirection] = useState("rtl");
   const [autoDetect, setAutoDetect] = useState(true);
   const [busy, setBusy] = useState("");
   const [notice, setNotice] = useState("");
   const [newName, setNewName] = useState("");
   const [zoom, setZoom] = useState(1);
+  // True size (1:1): one image pixel per screen pixel, so the scan looks
+  // exactly like the upload instead of a CSS fit-downscale. Any fit/+/−
+  // zoom leaves 1:1 mode.
+  const [trueSize, setTrueSize] = useState(false);
   const [draft, setDraft] = useState<{ x: number; y: number; w: number; h: number } | null>(null);
   const [imgHref, setImgHref] = useState("");
   const svgRef = useRef<SVGSVGElement>(null);
@@ -61,9 +65,18 @@ export default function ScanPage() {
     });
   }, []);
 
+  // Reload restores the persisted project (validated against the server
+  // list) instead of asking again; manual selection still publishes.
   useEffect(() => {
-    refreshProjects().catch((e) => setNotice(`API offline: ${e.message}`));
-  }, [refreshProjects]);
+    api
+      .listProjects()
+      .then((ps) => {
+        setProjects(ps);
+        const stored = getCurrentProject();
+        if (stored && ps.some((p) => p.id === stored)) void refreshProject(stored);
+      })
+      .catch((e) => setNotice(`API offline: ${(e as Error).message}`));
+  }, [refreshProject]);
 
   // Page pixels via credentialed fetch → blob URL, so authed /media also
   // loads when the API lives on another origin (remote-URL desktop).
@@ -76,9 +89,16 @@ export default function ScanPage() {
     }
     let live = true;
     let objectUrl = "";
-    fetch(mediaUrl(pageImageUrl), { credentials: "include" })
+    // no-cache (not no-store): revalidates the immutable /media bytes so a
+    // re-uploaded page never shows stale pixels, while 304s stay cheap.
+    fetch(mediaUrl(pageImageUrl), { credentials: "include", cache: "no-cache" })
       .then((r) => {
         if (!r.ok) throw new Error(`image ${r.status}`);
+        // Never render a non-image blob: a misrouted /media (proxy, wrong
+        // apiBase) answers HTML 200, which used to show as garbage pixels.
+        const ct = r.headers.get("content-type") || "";
+        if (!ct.startsWith("image/"))
+          throw new Error(`expected an image, got ${ct || "unknown type"}`);
         return r.blob();
       })
       .then((b) => {
@@ -378,7 +398,7 @@ export default function ScanPage() {
         const created = await api.uploadPage(project.id, imgs[i]);
         if (autoDetect) {
           try {
-            await api.detect(created.id, "heuristic", direction, false);
+            await api.detect(created.id, detector, direction, false);
           } catch {
             failed.push(`${imgs[i].name} (detect)`);
           }
@@ -452,10 +472,30 @@ export default function ScanPage() {
       setPage(null);
       setPanels([]);
       setSelectedId(null);
+      setCurrentProject(null);
       await refreshProjects();
       setNotice(`Deleted project "${project.name}".`);
     } catch (e) {
       setNotice(`Delete failed: ${(e as Error).message}`);
+    } finally {
+      setBusy("");
+    }
+  };
+
+  // Panels → animation handoff: same server path as Animate's Auto-direct
+  // (dedupe + reading order + scene choice), then jump to the Animate tab —
+  // the project is already published, so Animate restores it on mount.
+  const doSendToAnimate = async () => {
+    if (!project || panels.length === 0 || busy) return;
+    setBusy("Sending panels…");
+    try {
+      const target = await api.autoDirect(project.id, { seconds: 2 });
+      setNotice(
+        `Sent ${target.clips.length} clip${target.clips.length === 1 ? "" : "s"} into '${target.name}' — opening Animate.`,
+      );
+      gotoTab("animate");
+    } catch (e) {
+      setNotice(`Couldn't send panels: ${(e as Error).message}`);
     } finally {
       setBusy("");
     }
@@ -560,7 +600,7 @@ export default function ScanPage() {
                 checked={autoDetect}
                 onChange={(e) => setAutoDetect(e.target.checked)}
               />
-              Auto-detect (local) after upload
+              Auto-detect after upload
             </label>
             <div style={{ fontSize: 12, color: "var(--kv-faint)", marginTop: 4 }}>
               …or drop image files anywhere on this page.
@@ -637,6 +677,8 @@ export default function ScanPage() {
                 aria-label="Detector"
               >
                 <option value="heuristic">Heuristic (local)</option>
+                <option value="yolo">YOLO best-comic (local)</option>
+                <option value="yolo-leoxs22">YOLO leoxs22 (local, fast)</option>
                 <option value="cloud">Cloud (fallback local)</option>
               </SelectInput>
               <PrimaryBtn onClick={doDetect} disabled={!!busy}>
@@ -676,13 +718,21 @@ export default function ScanPage() {
               <Btn danger disabled={!!busy} onClick={doDeletePage} title="Delete this page and its scan file">
                 Delete page…
               </Btn>
+              <PrimaryBtn
+                onClick={doSendToAnimate}
+                disabled={!!busy || panels.length === 0}
+                title="Add every panel to the timeline, then open the Animate tab"
+              >
+                Send to Animate →
+              </PrimaryBtn>
               <span style={{ display: "inline-flex", gap: 4, alignItems: "center" }}>
-                <Btn small onClick={() => setZoom((z) => Math.max(z / 1.25, 0.5))} aria-label="Zoom out">−</Btn>
+                <Btn small onClick={() => { setTrueSize(false); setZoom((z) => Math.max(z / 1.25, 0.5)); }} aria-label="Zoom out">−</Btn>
                 <span style={{ fontSize: 12, minWidth: 44, textAlign: "center", color: "var(--kv-muted)" }}>
-                  {Math.round(zoom * 100)}%
+                  {trueSize ? "1:1" : `${Math.round(zoom * 100)}%`}
                 </span>
-                <Btn small onClick={() => setZoom((z) => Math.min(z * 1.25, 4))} aria-label="Zoom in">+</Btn>
-                <Btn small onClick={() => setZoom(1)}>Fit</Btn>
+                <Btn small onClick={() => { setTrueSize(false); setZoom((z) => Math.min(z * 1.25, 4)); }} aria-label="Zoom in">+</Btn>
+                <Btn small onClick={() => { setTrueSize(false); setZoom(1); }}>Fit</Btn>
+                <Btn small active={trueSize} onClick={() => setTrueSize(true)} title="True size: one image pixel per screen pixel">1:1</Btn>
               </span>
             </div>
 
@@ -723,8 +773,8 @@ export default function ScanPage() {
                 ref={svgRef}
                 viewBox={`0 0 ${page.width} ${page.height}`}
                 style={{
-                  width: zoom === 1 ? "100%" : `${Math.round(zoom * 100)}%`,
-                  maxWidth: zoom === 1 ? "100%" : "none",
+                  width: trueSize ? page.width : zoom === 1 ? "100%" : `${Math.round(zoom * 100)}%`,
+                  maxWidth: trueSize || zoom !== 1 ? "none" : "100%",
                   display: "block",
                   cursor: mode === "draw" ? "crosshair" : undefined,
                 }}

@@ -37,10 +37,96 @@ from komaverse.api.scans import (
     list_projects,
 )
 from komaverse.config import settings
-from komaverse.db_models import ExportReportRow, JobRow, UserRow
+from komaverse.db_models import (
+    AudioTakeRow,
+    ExportReportRow,
+    FrameRow,
+    JobRow,
+    PageRow,
+    PanelRow,
+    UserRow,
+)
 from komaverse.security import limiter
+from pydantic import BaseModel
 
 logger = logging.getLogger("komaverse.agent")
+
+
+class AgentRef(BaseModel):
+    """One @-mention parsed by the client: a specific studio entity."""
+
+    kind: str  # frame | panel | take | gen
+    id: str
+
+
+def resolve_refs(
+    refs: list[AgentRef | dict] | None, session: Session, user: UserRow
+) -> str:
+    """Turn @-mentions into ownership-scoped context lines.
+
+    Every id is resolved against the caller's own projects (get_project
+    raises 404 unless owned); unknown or foreign ids are named as missing,
+    never leaked.
+    """
+    lines: list[str] = []
+    for ref in refs or []:
+        if isinstance(ref, dict):
+            kind, rid = ref.get("kind"), ref.get("id")
+        else:
+            kind, rid = ref.kind, ref.id
+        try:
+            if kind == "frame":
+                row = session.get(FrameRow, rid)
+                if row is None:
+                    raise _Missing()
+                get_project(row.project_id, session, user)
+                layers = ", ".join(l.name for l in row.layers[:6]) or "no layers"
+                lines.append(
+                    f"@frame:{rid} = Frame '{row.name or 'Untitled'}' "
+                    f"({row.width}x{row.height}, {len(row.layers)} layers: {layers})"
+                )
+            elif kind == "panel":
+                row = session.get(PanelRow, rid)
+                if row is None:
+                    raise _Missing()
+                page = session.get(PageRow, row.page_id)
+                if page is None:
+                    raise _Missing()
+                get_project(page.project_id, session, user)
+                lines.append(
+                    f"@panel:{rid} = Panel {row.reading_order + 1} on PG "
+                    f"{page.index + 1} (box x={row.x:.0f} y={row.y:.0f} "
+                    f"w={row.w:.0f} h={row.h:.0f})"
+                )
+            elif kind == "take":
+                row = session.get(AudioTakeRow, rid)
+                if row is None:
+                    raise _Missing()
+                get_project(row.project_id, session, user)
+                lines.append(
+                    f"@take:{rid} = Voice take '{row.name}' "
+                    f"({row.duration_sec:.1f}s, {row.mime or 'audio'})"
+                )
+            elif kind == "gen":
+                row = session.get(JobRow, rid)
+                if row is None or row.kind != "image":
+                    raise _Missing()
+                get_project(row.project_id, session, user) if row.project_id else None
+                prompt = (row.prompt or "")[:200]
+                lines.append(
+                    f"@gen:{rid} = AI generation ({row.status})"
+                    + (f": '{prompt}'" if prompt else "")
+                )
+            else:
+                lines.append(f"@{kind}:{rid} (unknown reference kind)")
+        except HTTPException:
+            lines.append(f"@{kind}:{rid} (not found)")
+    return "\n".join(lines)
+
+
+class _Missing(HTTPException):
+    def __init__(self) -> None:
+        super().__init__(404, "not found")
 
 DEFAULT_MOTIONS = ["zoom-in", "zoom-out", "pan-left", "pan-right"]
 EXPORT_KEYWORDS = ("export", "render", "video", "mp4")
@@ -263,6 +349,7 @@ def demo_turn(
     user: UserRow,
     job_factory=None,
     clip_seconds: float = 2.0,
+    ref_context: str = "",
 ) -> tuple[str, list[dict]]:
     text = message.lower().strip()
     actions: list[dict] = []
@@ -313,7 +400,16 @@ def demo_turn(
     ):
         reply = run("project_status", tool_status, session, user, project_id)
     else:
-        reply = f"Not sure what you mean. {CAPABILITIES}"
+        # No tool matched: @-mentions still get an answer grounded in what
+        # they point at; otherwise the generic capabilities line.
+        if ref_context:
+            reply = (
+                f"About what you @-mentioned:\n{ref_context}\n"
+                f"Tell me what to do with it — e.g. direct it, describe it, "
+                f"or export it. {CAPABILITIES}"
+            )
+        else:
+            reply = f"Not sure what you mean. {CAPABILITIES}"
     return reply, actions
 
 
@@ -395,11 +491,17 @@ def cloud_turn(
     session: Session,
     user: UserRow,
     job_factory=None,
+    ref_context: str = "",
 ) -> tuple[str, list[dict]]:
     context = tool_status(session, user, project_id)
+    user_content = f"Project: {context}\n\n{message}"
+    if ref_context:
+        user_content = (
+            f"Project: {context}\n\nReferenced:\n{ref_context}\n\n{message}"
+        )
     messages: list[dict] = [
         {"role": "system", "content": _SYSTEM},
-        {"role": "user", "content": f"Project: {context}\n\n{message}"},
+        {"role": "user", "content": user_content},
     ]
     actions: list[dict] = []
     for _ in range(6):
@@ -476,6 +578,7 @@ def run_agent_turn(
     user: UserRow,
     job_factory=None,
     clip_seconds: float = 2.0,
+    refs: list[AgentRef | dict] | None = None,
 ) -> dict:
     if project_id is not None:
         # Explicit target: ownership check first (404 unless owned).
@@ -512,9 +615,12 @@ def run_agent_turn(
                 "actions": [],
             }
         schema = get_project(target, session, user)
+    ref_context = resolve_refs(refs, session, user) if refs else ""
     if settings.ai_api_key and settings.ai_base_url:
         try:
-            reply, actions = cloud_turn(message, target, session, user, job_factory)
+            reply, actions = cloud_turn(
+                message, target, session, user, job_factory, ref_context
+            )
             return {
                 "reply": reply,
                 "project_id": target,
@@ -524,7 +630,7 @@ def run_agent_turn(
         except Exception as exc:
             logger.warning("cloud agent failed (%s); using demo brain", exc)
     reply, actions = demo_turn(
-        message, target, session, user, job_factory, clip_seconds
+        message, target, session, user, job_factory, clip_seconds, ref_context
     )
     return {
         "reply": f"[{schema.name}] {reply}",

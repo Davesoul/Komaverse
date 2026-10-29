@@ -241,6 +241,7 @@ class AudioTakeRow(Base):
             url=self.url,
             mime=self.mime,
             duration_sec=self.duration_sec,
+            created_at=self.created_at.isoformat() if self.created_at else None,
         )
 
 
@@ -352,6 +353,7 @@ class JobRow(Base):
             user_id=self.user_id,
             project_id=self.project_id,
             kind=self.kind,
+            prompt=self.prompt or "",
             status=self.status,  # type: ignore[arg-type]
             progress=self.progress,
             result_url=self.result_url,

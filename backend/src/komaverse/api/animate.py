@@ -541,14 +541,18 @@ def frame_thumbnail(
     frame_id: str,
     session: Session = Depends(get_session),
     user: UserRow = Depends(get_current_user),
+    px: int = THUMB_MAX_DIM,
 ):
-    """Contact-sheet thumbnail: composited frame, longest side THUMB_MAX_DIM."""
+    """Contact-sheet thumbnail: composited frame, longest side `px`
+    (default THUMB_MAX_DIM, clamped 64..1600). Thumbs stay small; the
+    preview player asks for more."""
     row = session.get(FrameRow, frame_id)
     if row is None:
         raise HTTPException(404, "frame not found")
     ensure_owner(session, user, row.project_id)
     img = composite_frame_image(row)
-    img.thumbnail((THUMB_MAX_DIM, THUMB_MAX_DIM))
+    side = min(max(px, 64), 1600)
+    img.thumbnail((side, side))
     buf = io.BytesIO()
     img.convert("RGB").save(buf, format="PNG")
     return Response(content=buf.getvalue(), media_type="image/png")

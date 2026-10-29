@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, mediaUrl, type DrawFrame, type Page, type Project } from "../api";
 import {
   Btn,
@@ -19,7 +19,7 @@ import {
   type SerializedLayer,
   type ToolId,
 } from "../lib/draw/engine";
-import { setCurrentProject } from "../lib/studio";
+import { getCurrentProject, getDrawFrame, setCurrentProject, setDrawFrame } from "../lib/studio";
 import { BRUSH_PRESETS } from "../lib/draw/brushes";
 
 const TOOLS: { id: ToolId; label: string; key: string }[] = [
@@ -139,6 +139,7 @@ export default function DrawPage() {
   const [projectId, setProjectId] = useState("");
   const [frames, setFrames] = useState<DrawFrame[]>([]);
   const [frameId, setFrameId] = useState("");
+  const [framesReady, setFramesReady] = useState(false);
   const [layers, setLayers] = useState<EngineLayerInfo[]>([]);
   const [live, setLive] = useState<LiveSettings>(DEFAULT_LIVE);
   const [notice, setNotice] = useState("");
@@ -159,6 +160,19 @@ export default function DrawPage() {
   const [placePages, setPlacePages] = useState<Page[]>([]);
   const [placePageId, setPlacePageId] = useState("");
   const [placeFit, setPlaceFit] = useState<"fit" | "fill">("fit");
+  const [loop, setLoop] = useState(true);
+  const [fps, setFps] = useState(6);
+  const [playing, setPlaying] = useState(false);
+  const [playLabel, setPlayLabel] = useState("");
+  const playingRef = useRef(false);
+  const loopRef = useRef(true);
+  loopRef.current = loop;
+  const fpsRef = useRef(fps);
+  fpsRef.current = fps;
+  const playTimerRef = useRef(0);
+  const playIdxRef = useRef(0);
+  const playBitmapsRef = useRef<HTMLCanvasElement[]>([]);
+  const playLabelsRef = useRef<string[]>([]);
 
   const placeFileRef = useRef<HTMLInputElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -205,13 +219,13 @@ export default function DrawPage() {
     refreshLayers();
   }, [refreshLayers]);
 
-  const save = useCallback(async (silent = false) => {
+  const save = useCallback(async (silent = false): Promise<DrawFrame | null> => {
     const engine = engineRef.current;
     const id = frameIdRef.current;
-    if (!engine || !id) return;
+    if (!engine || !id) return null;
     if (saveStateRef.current.saving) {
       saveStateRef.current.queued = true;
-      return;
+      return null;
     }
     saveStateRef.current.saving = true;
     setBusy(true);
@@ -223,8 +237,10 @@ export default function DrawPage() {
       setDirty(false);
       setThumbBust((n) => n + 1);
       if (!silent) setNotice("Saved.");
+      return res;
     } catch (e) {
       setNotice(`Save failed: ${(e as Error).message}`);
+      return null;
     } finally {
       saveStateRef.current.saving = false;
       setBusy(false);
@@ -270,14 +286,47 @@ export default function DrawPage() {
     setZoom(nz);
   }, []);
 
+  // Reload restores the persisted project (validated against the server
+  // list); the projectId effect below publishes and loads frames.
   useEffect(() => {
-    api.listProjects().then(setProjects).catch((e) => setNotice(`API offline: ${e.message}`));
+    api
+      .listProjects()
+      .then((ps) => {
+        setProjects(ps);
+        const stored = getCurrentProject();
+        if (stored && ps.some((p) => p.id === stored)) setProjectId(stored);
+      })
+      .catch((e) => setNotice(`API offline: ${(e as Error).message}`));
   }, []);
 
   useEffect(() => {
-    setCurrentProject(projectId || null);
+    // Publish only real selections: publishing "" on mount would wipe the
+    // persisted id before the restore above resolves. Clearing publishes
+    // from the project select instead.
     if (!projectId) return;
-    api.listFrames(projectId).then(setFrames).catch((e) => setNotice(e.message));
+    setCurrentProject(projectId);
+    setFramesReady(false);
+    api
+      .listFrames(projectId)
+      .then((fs) => {
+        setFrames(fs);
+        setFramesReady(true);
+        // Open the tab with a frame ready: restore the last-open frame when
+        // it still exists, otherwise open the first frame.
+        if (!frameIdRef.current) {
+          const stored = getDrawFrame(projectId);
+          const pick =
+            stored && fs.some((f) => f.id === stored) ? stored : fs[0]?.id;
+          if (pick) {
+            setDrawFrame(projectId, pick);
+            setFrameId(pick);
+          }
+        }
+      })
+      .catch((e) => {
+        setNotice(e.message);
+        setFramesReady(true);
+      });
   }, [projectId]);
 
   // Engine init per frame; prefers the unsaved stash over server layers.
@@ -319,12 +368,14 @@ export default function DrawPage() {
     return () => window.removeEventListener("beforeunload", onUnload);
   }, []);
 
-  // Wheel zoom to cursor (native listener: React's wheel is passive).
+  // Ctrl+wheel zoom to cursor (native listener: React's wheel is passive).
+  // Plain wheel scrolls the page — zooming on every scroll trapped users
+  // inside the canvas. Trackpad pinch arrives as ctrl+wheel, so it still zooms.
   useEffect(() => {
     const el = viewportRef.current;
     if (!el || !frameId) return;
     const onWheel = (e: WheelEvent) => {
-      if (!engineRef.current) return;
+      if (!engineRef.current || (!e.ctrlKey && !e.metaKey)) return;
       e.preventDefault();
       const z = zoomRef.current;
       const nz = clamp(z * Math.pow(1.0015, -e.deltaY), 0.1, 8);
@@ -343,6 +394,14 @@ export default function DrawPage() {
   // Shortcuts: tool letters, history, [ ] size, Ctrl+S save, Space pan.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      // Playback owns the canvas: every shortcut is inert except Escape (stop).
+      if (playingRef.current) {
+        if (e.key === "Escape") {
+          e.preventDefault();
+          stopPlayback();
+        }
+        return;
+      }
       const tag = (e.target as HTMLElement)?.tagName;
       const typing = tag === "INPUT" || tag === "SELECT" || tag === "TEXTAREA";
       if (e.code === "Space" && !typing && tag !== "BUTTON") {
@@ -403,6 +462,8 @@ export default function DrawPage() {
       setNotice("Transparent — nothing to pick.");
     } else if (res.reason === "no-layer") {
       setNotice("Add a layer first.");
+    } else if (res.reason === "unchanged") {
+      setNotice("Fill changed nothing — same color or raise tolerance.");
     }
   };
 
@@ -412,6 +473,7 @@ export default function DrawPage() {
   };
 
   const onPointerDown = (e: React.PointerEvent<HTMLCanvasElement>) => {
+    if (playingRef.current) return;
     const engine = engineRef.current;
     const el = viewportRef.current;
     if (!engine || !el) return;
@@ -458,6 +520,7 @@ export default function DrawPage() {
   };
 
   const onPointerMove = (e: React.PointerEvent<HTMLCanvasElement>) => {
+    if (playingRef.current) return;
     const engine = engineRef.current;
     const el = viewportRef.current;
     if (pinchRef.current.has(e.pointerId)) {
@@ -481,6 +544,7 @@ export default function DrawPage() {
   };
 
   const endPointer = (e: React.PointerEvent<HTMLCanvasElement>, cancel: boolean) => {
+    if (playingRef.current) return;
     pinchRef.current.delete(e.pointerId);
     if (pinchRef.current.size < 2) pinchStartRef.current = null;
     if (panRef.current) {
@@ -496,6 +560,7 @@ export default function DrawPage() {
   };
 
   const openFrame = (id: string) => {
+    stopPlayback();
     if (id === frameIdRef.current) return;
     const engine = engineRef.current;
     const prev = frameIdRef.current;
@@ -503,10 +568,12 @@ export default function DrawPage() {
       stashRef.current.set(prev, engine.serialize());
     }
     setNotice("");
+    setDrawFrame(projectId, id);
     setFrameId(id);
   };
 
   const newFrame = async () => {
+    stopPlayback();
     if (!projectId) return;
     const frame = await api.createFrame(projectId, {
       name: `Frame ${frames.length + 1}`,
@@ -514,18 +581,24 @@ export default function DrawPage() {
       height: 540,
     });
     setFrames((prev) => [...prev, frame]);
+    setDrawFrame(projectId, frame.id);
     setFrameId(frame.id);
   };
 
   const removeFrame = async () => {
+    stopPlayback();
     const f = frames.find((x) => x.id === frameId);
     if (!f) return;
     if (!window.confirm(`Delete frame "${f.name || "Untitled"}"? This can't be undone.`)) return;
     try {
       await api.deleteFrame(f.id);
       stashRef.current.delete(f.id);
-      setFrames((prev) => prev.filter((x) => x.id !== f.id));
-      setFrameId("");
+      const remaining = frames.filter((x) => x.id !== f.id);
+      setFrames(remaining);
+      // Keep a frame open: fall back to the first remaining frame.
+      const next = remaining[0]?.id ?? "";
+      setDrawFrame(projectId, next || null);
+      setFrameId(next);
       engineRef.current = null;
       openedRef.current = "";
       setLayers([]);
@@ -543,6 +616,7 @@ export default function DrawPage() {
   };
 
   const duplicateFrame = async () => {
+    stopPlayback();
     const f = frames.find((x) => x.id === frameId);
     if (!f) return;
     try {
@@ -554,6 +628,85 @@ export default function DrawPage() {
       setNotice(`Duplicate failed: ${(e as Error).message}`);
     }
   };
+
+  // Canvas playback (Krita-style): the drawing canvas itself flips
+  // through the frames at the chosen rate. Each frame is pre-rendered once
+  // via the engine; per tick the display only blits a bitmap, so the live
+  // editing stack is never touched and stopping restores it with one
+  // composite. Drawing input is ignored while playing.
+  const stopPlayback = useCallback(() => {
+    if (playTimerRef.current) {
+      window.clearInterval(playTimerRef.current);
+      playTimerRef.current = 0;
+    }
+    if (playingRef.current) {
+      playingRef.current = false;
+      setPlaying(false);
+      engineRef.current?.composite();
+    }
+  }, []);
+
+  const armPlayback = useCallback(() => {
+    if (playTimerRef.current) window.clearInterval(playTimerRef.current);
+    playTimerRef.current = window.setInterval(() => {
+      const total = playBitmapsRef.current.length;
+      if (total === 0) return;
+      let n = playIdxRef.current + 1;
+      if (n >= total) {
+        if (!loopRef.current) {
+          stopPlayback();
+          return;
+        }
+        n = 0;
+      }
+      playIdxRef.current = n;
+      engineRef.current?.showPlaybackBitmap(playBitmapsRef.current[n]);
+      setPlayLabel(playLabelsRef.current[n] ?? "");
+    }, 1000 / fpsRef.current);
+  }, [stopPlayback]);
+
+  const startPlayback = async () => {
+    const engine = engineRef.current;
+    if (!engine || playingRef.current || frames.length === 0) return;
+    // Land the current strokes first so this frame plays fresh too.
+    const saved = await save(true);
+    const list = saved ? frames.map((f) => (f.id === saved.id ? saved : f)) : frames;
+    if (list.length === 0) return;
+    setFrames(list);
+    let rendered: HTMLCanvasElement[];
+    try {
+      rendered = await Promise.all(
+        list.map((f) => engine.renderStack(f.layers, f.width, f.height)),
+      );
+    } catch {
+      setNotice("Playback failed to render the frames.");
+      return;
+    }
+    playBitmapsRef.current = rendered;
+    playLabelsRef.current = list.map(
+      (f, i) => `FR ${String(i + 1).padStart(2, "0")} ${f.name || "Untitled"}`,
+    );
+    playIdxRef.current = 0;
+    engine.showPlaybackBitmap(rendered[0]);
+    setPlayLabel(playLabelsRef.current[0]);
+    playingRef.current = true;
+    setPlaying(true);
+    armPlayback();
+  };
+
+  // A new cadence applies live when the rate changes mid-playback.
+  useEffect(() => {
+    if (playingRef.current) armPlayback();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [fps]);
+
+  // Never leave a stray timer behind.
+  useEffect(
+    () => () => {
+      if (playTimerRef.current) window.clearInterval(playTimerRef.current);
+    },
+    [],
+  );
 
   const downloadPNG = () => {
     const engine = engineRef.current;
@@ -586,8 +739,9 @@ export default function DrawPage() {
 
   const frame = frames.find((f) => f.id === frameId);
   const activeLayer = layers.find((l) => l.id === engineRef.current?.activeId);
-  const cursor =
-    panning || spaceDown || live.tool === "pan"
+  const cursor = playing
+    ? "default"
+    : panning || spaceDown || live.tool === "pan"
       ? panning
         ? "grabbing"
         : "grab"
@@ -658,7 +812,14 @@ export default function DrawPage() {
             style={{ width: "100%" }}
             value={projectId}
             onChange={(e) => {
+              stopPlayback();
+              const engine = engineRef.current;
+              const prev = frameIdRef.current;
+              if (engine && prev && saveStateRef.current.dirty) {
+                stashRef.current.set(prev, engine.serialize());
+              }
               setProjectId(e.target.value);
+              setCurrentProject(e.target.value || null);
               setFrameId("");
               engineRef.current = null;
               openedRef.current = "";
@@ -670,44 +831,6 @@ export default function DrawPage() {
             ))}
           </SelectInput>
         </div>
-
-        {projectId && (
-          <div>
-            <SectionTitle>Frames ({frames.length})</SectionTitle>
-            <div style={{ display: "flex", flexDirection: "column", gap: 4, marginBottom: 8 }}>
-              {frames.map((f, i) => (
-                <Btn
-                  key={f.id}
-                  active={f.id === frameId}
-                  style={{ textAlign: "left", display: "flex", alignItems: "center", gap: 8, width: "100%", padding: 4 }}
-                  onClick={() => openFrame(f.id)}
-                >
-                  <img
-                    crossOrigin="use-credentials"
-                    src={`${api.frameThumbnailUrl(f.id)}?v=${thumbBust}`}
-                    alt=""
-                    width={52}
-                    height={30}
-                    style={{ borderRadius: 4, objectFit: "cover", flexShrink: 0, background: "#f6f1e8" }}
-                    loading="lazy"
-                  />
-                  <span className="kv-nums">FR {String(i + 1).padStart(2, "0")}</span>
-                  <span style={{ overflow: "hidden", textOverflow: "ellipsis" }}>
-                    {f.name || "Untitled"}
-                  </span>
-                  <span className="kv-nums" style={{ marginLeft: "auto", opacity: 0.6 }}>
-                    {f.width}×{f.height}
-                  </span>
-                </Btn>
-              ))}
-            </div>
-            <div style={{ display: "flex", gap: 6 }}>
-              <Btn small onClick={newFrame}>New</Btn>
-              <Btn small disabled={!frame} onClick={duplicateFrame}>Duplicate</Btn>
-              <Btn small danger disabled={!frame} onClick={removeFrame}>Delete</Btn>
-            </div>
-          </div>
-        )}
 
         {frame && (
           <div>
@@ -728,6 +851,9 @@ export default function DrawPage() {
               <Btn small onClick={() => { const nz = clamp(zoomRef.current * 1.25, 0.1, 8); zoomRef.current = nz; setZoom(nz); }} title="Zoom in">+</Btn>
               <Btn small onClick={fitZoom} title="Fit to view">Fit</Btn>
               <Btn small onClick={() => { zoomRef.current = 1; setZoom(1); }} title="Actual size">1:1</Btn>
+              <span style={{ fontSize: 11, color: "var(--kv-faint)" }} title="Hold Ctrl (or pinch) while scrolling to zoom; plain scroll moves the page">
+                Ctrl+scroll zooms
+              </span>
             </div>
           </div>
         )}
@@ -847,7 +973,9 @@ export default function DrawPage() {
                 disabled={!activeLayer}
                 title="Merge into the layer below"
                 onClick={() => {
-                  if (activeLayer) engineRef.current?.mergeDown(activeLayer.id);
+                  if (!activeLayer) return;
+                  const ok = engineRef.current?.mergeDown(activeLayer.id);
+                  if (!ok) setNotice("Nothing to merge into — already the bottom layer.");
                   refreshLayers();
                 }}
               >
@@ -859,7 +987,8 @@ export default function DrawPage() {
                 onClick={() => {
                   const id = engineRef.current?.activeId;
                   if (id && window.confirm("Clear this layer's paint? This can't be undone.")) {
-                    engineRef.current?.clearLayer(id);
+                    if (!engineRef.current?.clearLayer(id))
+                      setNotice("Layer is locked — unlock it first.");
                   }
                   refreshLayers();
                 }}
@@ -871,7 +1000,9 @@ export default function DrawPage() {
                 disabled={!activeLayer}
                 title="Move up"
                 onClick={() => {
-                  if (activeLayer) engineRef.current?.moveLayer(activeLayer.id, 1);
+                  if (!activeLayer) return;
+                  if (!engineRef.current?.moveLayer(activeLayer.id, 1))
+                    setNotice("Already the top layer.");
                   refreshLayers();
                 }}
               >
@@ -882,7 +1013,9 @@ export default function DrawPage() {
                 disabled={!activeLayer}
                 title="Move down"
                 onClick={() => {
-                  if (activeLayer) engineRef.current?.moveLayer(activeLayer.id, -1);
+                  if (!activeLayer) return;
+                  if (!engineRef.current?.moveLayer(activeLayer.id, -1))
+                    setNotice("Already the bottom layer.");
                   refreshLayers();
                 }}
               >
@@ -1112,8 +1245,12 @@ export default function DrawPage() {
       <div style={{ flex: 1, minWidth: 0, order: 1 }}>
         {!projectId ? (
           <EmptyState title="No project selected" hint="Pick a project, then open or create a frame to draw." />
+        ) : !framesReady || (!frame && frames.length > 0) ? (
+          <EmptyState title="Loading frames…" hint="Opening your last frame.">
+            <Spinner />
+          </EmptyState>
         ) : !frame ? (
-          <EmptyState title="No frame open" hint="Frames are drawings you can drop onto the timeline as clips.">
+          <EmptyState title="No frames yet" hint="Frames are drawings you can drop onto the timeline as clips.">
             <Btn onClick={newFrame}>New frame</Btn>
           </EmptyState>
         ) : (
@@ -1173,10 +1310,31 @@ export default function DrawPage() {
                   onPointerMove={onPointerMove}
                   onPointerUp={(e) => endPointer(e, false)}
                   onPointerCancel={(e) => endPointer(e, true)}
-                  onPointerLeave={() => engineRef.current?.pointerUp()}
+                  onPointerLeave={() => {
+                    if (!playingRef.current) engineRef.current?.pointerUp();
+                  }}
                   onContextMenu={(e) => e.preventDefault()}
                 />
               </div>
+              {playing && (
+                <div
+                  className="kv-nums"
+                  style={{
+                    position: "absolute",
+                    left: 28,
+                    top: 88,
+                    zIndex: 6,
+                    fontSize: 12,
+                    color: "#fff",
+                    background: "rgba(0,0,0,0.6)",
+                    borderRadius: 6,
+                    padding: "3px 10px",
+                    pointerEvents: "none",
+                  }}
+                >
+                  ▶ {playLabel} · {fps} fps{loop ? " · loop" : ""}
+                </div>
+              )}
             </div>
             <StatusBar
               items={[
@@ -1188,10 +1346,120 @@ export default function DrawPage() {
                 busy ? "saving…" : dirty ? "● unsaved" : "saved",
               ]}
             />
+
+            <div style={{ marginTop: 16 }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <SectionTitle>Frames ({frames.length})</SectionTitle>
+                </div>
+                <SelectInput
+                  value={String(fps)}
+                  onChange={(e) => setFps(Number(e.target.value))}
+                  title="Flipbook frame rate"
+                  aria-label="Flipbook frame rate"
+                >
+                  {[2, 4, 6, 8, 12, 24].map((r) => (
+                    <option key={r} value={r}>{r} fps</option>
+                  ))}
+                </SelectInput>
+                <Btn
+                  small
+                  active={loop}
+                  onClick={() => setLoop(!loop)}
+                  title="Replay from the first frame when the end is reached"
+                >
+                  ↻ Loop
+                </Btn>
+                <PrimaryBtn
+                  small
+                  onClick={() => {
+                    if (playing) stopPlayback();
+                    else void startPlayback();
+                  }}
+                  title={playing ? "Stop and return to the open frame" : "Play the animation on the canvas"}
+                >
+                  {playing ? "■ Stop" : "▶ Play"}
+                </PrimaryBtn>
+                <Btn small onClick={newFrame}>New</Btn>
+                <Btn small disabled={!frame} onClick={duplicateFrame}>Duplicate</Btn>
+                <Btn small danger disabled={!frame} onClick={removeFrame}>Delete</Btn>
+              </div>
+              <div
+                role="listbox"
+                aria-label="Frames"
+                style={{
+                  display: "flex",
+                  gap: 8,
+                  overflowX: "auto",
+                  paddingBottom: 4,
+                }}
+              >
+                {frames.map((f, i) => {
+                  const selected = f.id === frameId;
+                  return (
+                    <button
+                      key={f.id}
+                      type="button"
+                      role="option"
+                      aria-selected={selected}
+                      title={f.name || `Frame ${i + 1}`}
+                      onClick={() => openFrame(f.id)}
+                      style={{
+                        flexShrink: 0,
+                        width: 132,
+                        textAlign: "left",
+                        padding: 6,
+                        borderRadius: 10,
+                        cursor: "pointer",
+                        background: selected ? "var(--kv-card)" : "transparent",
+                        border: selected
+                          ? "2px solid var(--kv-accent)"
+                          : "1px solid var(--kv-border)",
+                        color: "inherit",
+                      }}
+                    >
+                      <img
+                        crossOrigin="use-credentials"
+                        src={`${api.frameThumbnailUrl(f.id)}?v=${thumbBust}`}
+                        alt=""
+                        width={120}
+                        height={68}
+                        style={{
+                          width: "100%",
+                          height: 68,
+                          borderRadius: 6,
+                          objectFit: "cover",
+                          display: "block",
+                          background: "#f6f1e8",
+                        }}
+                        loading="lazy"
+                      />
+                      <div
+                        className="kv-nums"
+                        style={{ fontSize: 11, marginTop: 4, opacity: selected ? 1 : 0.75 }}
+                      >
+                        FR {String(i + 1).padStart(2, "0")}
+                      </div>
+                      <div
+                        style={{
+                          fontSize: 12,
+                          overflow: "hidden",
+                          textOverflow: "ellipsis",
+                          whiteSpace: "nowrap",
+                        }}
+                      >
+                        {f.name || "Untitled"}
+                      </div>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
           </>
         )}
       </div>
     </div>
+
     </>
   );
 }

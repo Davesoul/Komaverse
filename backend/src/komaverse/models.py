@@ -81,6 +81,8 @@ class AudioTake(BaseModel):
     url: str
     mime: str = ""
     duration_sec: float = 0.0
+    created_at: str | None = None  # ISO timestamp; serialized so the
+    # library can sort takes newest-first (column already on AudioTakeRow)
 
 
 class AudioCue(BaseModel):
@@ -137,6 +139,9 @@ class Job(BaseModel):
     user_id: str
     project_id: str | None = None
     kind: str  # detect | generate-image | export (video gen not available)
+    prompt: str = ""  # generation prompt (image jobs); serialized so the
+    # library can caption and search generations without a schema migration
+    # (the column already exists on JobRow)
     status: Literal["queued", "running", "done", "failed"] = "queued"
     progress: float = 0.0
     result_url: str | None = None

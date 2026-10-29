@@ -99,8 +99,11 @@ a {
 }
 
 /* Manga SFX button: skewed ink stamp with a hard offset. Hover slams it
-   straight and larger; press sinks it. Reserved for the loudest actions. */
+   straight and larger; press sinks it. An ink-sheen sweeps across at idle
+   so the loudest action stays alive. Reserved for the loudest actions. */
 .kv-sfxbtn {
+  position: relative;
+  overflow: hidden;
   font-weight: 900;
   font-style: italic;
   text-transform: uppercase;
@@ -112,6 +115,9 @@ a {
   border-radius: 4px;
   padding: 10px 22px;
   cursor: pointer;
+  user-select: none;
+  -webkit-tap-highlight-color: transparent;
+  touch-action: manipulation;
   transform: skewX(-6deg) rotate(-1deg);
   box-shadow: 5px 5px 0 #000;
   text-shadow: 2px 2px 0 #000;
@@ -120,14 +126,55 @@ a {
     background-color var(--kv-motion-fast) ease,
     box-shadow var(--kv-motion-fast) var(--kv-ease-out);
 }
+.kv-sfxbtn::after {
+  content: "";
+  position: absolute;
+  top: -25%;
+  bottom: -25%;
+  left: -45%;
+  width: 34%;
+  transform: skewX(-18deg);
+  background: linear-gradient(
+    90deg,
+    transparent,
+    rgba(255, 255, 255, 0.38),
+    transparent
+  );
+  animation: kv-sheen 3.8s var(--kv-ease-out) infinite;
+  pointer-events: none;
+}
+@keyframes kv-sheen {
+  0% { left: -45%; }
+  45%, 100% { left: 135%; }
+}
 .kv-sfxbtn:hover {
   background: var(--kv-accent-hover);
   transform: skewX(-6deg) rotate(0deg) scale(1.05);
   box-shadow: 7px 7px 0 #000;
 }
+/* Hovered sheen sweeps fast while the pointer stays on the stamp. */
+.kv-sfxbtn:hover::after {
+  animation-duration: 0.9s;
+}
 .kv-sfxbtn:active {
   transform: skewX(-6deg) scale(0.96);
   box-shadow: 2px 2px 0 #000;
+}
+/* Keyboard focus keeps the hard stamp shadow and adds a paper ring —
+   the global :focus-visible rule would otherwise swap the offset
+   shadow for a glow and flatten the stamp. Placed after hover so the
+   ring survives hovering. */
+.kv-btn:focus-visible {
+  box-shadow:
+    2px 2px 0 rgba(0, 0, 0, 0.55),
+    0 0 0 2px var(--kv-bg),
+    0 0 0 4px var(--kv-paper);
+}
+.kv-sfxbtn:focus-visible {
+  box-shadow:
+    5px 5px 0 #000,
+    0 0 0 2px var(--kv-bg),
+    0 0 0 5px var(--kv-paper);
 }
 .kv-sfxbtn:disabled {
   opacity: 0.5;
@@ -139,6 +186,111 @@ a {
   padding: 6px 14px;
   border-width: 2px;
   box-shadow: 4px 4px 0 #000;
+}
+/* Click punch: slam bigger, then settle. Fired on activation, so the
+   loudest action answers clicks as well as hovers. */
+.kv-sfxbtn.punch {
+  animation: kv-punch 0.45s var(--kv-ease-out);
+}
+@keyframes kv-punch {
+  0% { transform: skewX(-6deg) rotate(-1deg) scale(1); }
+  35% { transform: skewX(-6deg) rotate(-1deg) scale(1.14); }
+  100% { transform: skewX(-6deg) rotate(-1deg) scale(1); }
+}
+
+/* Everyday buttons: hover lifts with a growing hard shadow, press sinks.
+   Touch gets the same physics via :active (no JS press state); manipulation
+   removes the mobile tap delay. */
+.kv-btn {
+  user-select: none;
+  -webkit-tap-highlight-color: transparent;
+  touch-action: manipulation;
+  box-shadow: 2px 2px 0 rgba(0, 0, 0, 0.55);
+}
+.kv-btn:hover:not(:disabled) {
+  transform: translateY(-1px);
+  box-shadow: 3px 4px 0 rgba(0, 0, 0, 0.55);
+}
+.kv-btn:active:not(:disabled) {
+  transform: translateY(0) scale(0.97);
+  box-shadow: 1px 1px 0 rgba(0, 0, 0, 0.6);
+}
+
+/* Reel cards press in slightly when activated. */
+.lv-reel:active {
+  transform: translateY(-1px) scale(0.99);
+}
+
+/* Media library cards: lift + hard shadow on hover, press sinks. */
+.kv-media-card {
+  border: 1px solid var(--kv-border);
+  border-radius: 8px;
+  overflow: hidden;
+  background: var(--kv-panel);
+  transition:
+    transform var(--kv-motion-fast) var(--kv-ease-out),
+    border-color var(--kv-motion-fast) var(--kv-ease-out),
+    box-shadow var(--kv-motion-fast) var(--kv-ease-out);
+}
+.kv-media-card:hover {
+  transform: translateY(-2px);
+  border-color: var(--kv-border-strong);
+  box-shadow: var(--kv-shadow-hard);
+}
+.kv-media-card:active {
+  transform: translateY(0);
+}
+
+/* Media lightbox: fullscreen viewer over a dimmed stage. */
+.kv-lightbox {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  background: rgba(0, 0, 0, 0.82);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+}
+.kv-lightbox-frame {
+  width: min(1100px, 100%);
+  max-height: calc(100vh - 48px);
+  overflow: auto;
+  background: var(--kv-surface);
+  border: 1px solid var(--kv-border-strong);
+  border-radius: var(--kv-radius);
+  box-shadow: var(--kv-shadow-hard);
+  padding: 16px;
+}
+.kv-lightbox-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+/* Kinetic headline words: plain spans until the scroll animation runs. */
+.kv-kword {
+  display: inline-block;
+}
+
+/* Fixed scroll companion: ambient 3D drawing tool traveling the page.
+   Pointer-transparent so text stays selectable; hidden on small screens
+   where it would cover content. */
+.kv-companion {
+  position: fixed;
+  left: 0;
+  top: 0;
+  width: clamp(150px, 15vw, 220px);
+  aspect-ratio: 3 / 4;
+  z-index: -1;
+  pointer-events: none;
+}
+@media (max-width: 720px) {
+  .kv-companion {
+    display: none;
+  }
 }
 
 /* Kanji watermarks: giant outlined glyphs, decorative only. */
@@ -298,6 +450,11 @@ html {
 .kv-reveal-media {
   clip-path: inset(14% 8% 14% 8%);
 }
+/* Visible always means unclipped — even when the armed start state was
+   never applied (reduced motion / no IntersectionObserver). */
+.kv-reveal-media.is-visible {
+  clip-path: inset(0 0 0 0);
+}
 .kv-reveal-armed.kv-reveal-media.is-visible {
   clip-path: inset(0 0 0 0);
 }
@@ -370,6 +527,9 @@ html {
   .kv-bar-grow,
   .kv-skeleton {
     animation: none;
+  }
+  .kv-sfxbtn::after {
+    display: none;
   }
   .kv-reveal-armed {
     opacity: 1;

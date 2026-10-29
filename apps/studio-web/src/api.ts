@@ -55,6 +55,7 @@ export interface AudioTake {
   url: string;
   mime: string;
   duration_sec: number;
+  created_at: string | null;
 }
 
 export interface AudioCue {
@@ -114,6 +115,7 @@ export interface Job {
   user_id: string;
   project_id: string | null;
   kind: string;
+  prompt: string;
   status: "queued" | "running" | "done" | "failed";
   progress: number;
   result_url: string | null;
@@ -153,6 +155,28 @@ export interface AgentReply {
   project_id: string | null;
   project_name: string | null;
   actions: AgentAction[];
+}
+
+/** One @-mention: a specific frame, detected panel, voice take, or generation. */
+export interface AgentRef {
+  kind: "frame" | "panel" | "take" | "gen";
+  id: string;
+}
+
+const REF_RE = /@(frame|panel|take|gen):([A-Za-z0-9_-]+)/g;
+
+/** Pull @kind:id tokens out of composer text for the refs array. */
+export function parseAgentRefs(message: string): AgentRef[] {
+  const out: AgentRef[] = [];
+  const seen = new Set<string>();
+  for (const m of message.matchAll(REF_RE)) {
+    const key = `${m[1]}:${m[2]}`;
+    if (!seen.has(key)) {
+      seen.add(key);
+      out.push({ kind: m[1] as AgentRef["kind"], id: m[2] });
+    }
+  }
+  return out;
 }
 
 export interface SystemStatus {
@@ -336,9 +360,10 @@ export const api = {
     req<void>(`/api/v1/frames/${frameId}`, { method: "DELETE" }),
   duplicateFrame: (frameId: string) =>
     req<DrawFrame>(`/api/v1/frames/${frameId}/duplicate`, { method: "POST" }),
-  /** Composited contact-sheet thumbnail (cookie auth, usable in <img>). */
-  frameThumbnailUrl: (frameId: string) =>
-    `${apiBase()}/api/v1/frames/${frameId}/thumbnail`,
+  /** Composited contact-sheet thumbnail (cookie auth, usable in <img>).
+   * `px` grows the longest side for the preview player; thumbs use default. */
+  frameThumbnailUrl: (frameId: string, px?: number) =>
+    `${apiBase()}/api/v1/frames/${frameId}/thumbnail${px ? `?px=${px}` : ""}`,
 
   exportJob: (
     projectId: string,
@@ -372,9 +397,10 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(patch),
     }),
-  /** Panel crop preview (cookie auth, usable in <img>). */
-  panelPreviewUrl: (panelId: string) =>
-    `${apiBase()}/api/v1/panels/${panelId}/preview`,
+  /** Panel crop preview (cookie auth, usable in <img>). `px` grows the
+   * longest side for the preview player; thumbs use the 320 default. */
+  panelPreviewUrl: (panelId: string, px?: number) =>
+    `${apiBase()}/api/v1/panels/${panelId}/preview${px ? `?px=${px}` : ""}`,
 
   uploadTake: (projectId: string, file: Blob, filename: string, durationSec: number) => {
     const form = new FormData();
@@ -450,11 +476,16 @@ export const api = {
     }),
   logout: () => req<{ status: string }>("/api/v1/auth/logout", { method: "POST" }),
   getStatus: () => req<SystemStatus>("/api/v1/status"),
-  agentChat: (project_id: string | null, message: string, signal?: AbortSignal) =>
+  agentChat: (
+    project_id: string | null,
+    message: string,
+    signal?: AbortSignal,
+    refs: AgentRef[] = [],
+  ) =>
     req<AgentReply>("/api/v1/agent/chat", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ project_id, message }),
+      body: JSON.stringify({ project_id, message, refs }),
       signal,
     }),
   autoDirect: (projectId: string, body?: { seconds?: number; motions?: string[] }) =>

@@ -2,7 +2,7 @@
  * Same-origin navigation + static assets are cached; /api and /media always
  * go to the network (AI and export need a connection).
  */
-const CACHE = "komaverse-shell-v1";
+const CACHE = "komaverse-shell-v2";
 const BYPASS = ["/api/", "/media/"];
 
 self.addEventListener("install", (event) => {

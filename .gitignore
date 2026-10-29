@@ -14,6 +14,9 @@ media/
 output/
 cache/
 *.pt
+# ...except the shipped panel-detection weights (required for YOLO detect)
+!backend/models/best-comic-panel-detection.pt
+!backend/models/leoxs22_yolo26n_panel_detector.pt
 *.onnx
 *.db
 .DS_Store

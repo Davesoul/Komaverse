@@ -819,4 +819,53 @@ export class DrawEngine {
       );
     }
   }
+
+  /** Pre-render a saved stack to one canvas at native size (decodes once, up front). */
+  async renderStack(
+    layers: SerializedLayer[],
+    width: number,
+    height: number,
+  ): Promise<HTMLCanvasElement> {
+    const out = document.createElement("canvas");
+    out.width = Math.max(1, Math.round(width));
+    out.height = Math.max(1, Math.round(height));
+    const ctx = out.getContext("2d")!;
+    ctx.fillStyle = PAPER;
+    ctx.fillRect(0, 0, out.width, out.height);
+    for (const saved of layers) {
+      if (saved.visible === false || !saved.data_url) continue;
+      try {
+        const img = new Image();
+        img.src = saved.data_url;
+        await img.decode();
+        const opacity = Math.max(0, Math.min(100, Math.round(saved.opacity ?? 100))) / 100;
+        ctx.globalAlpha = opacity;
+        ctx.globalCompositeOperation =
+          saved.blend_mode && (BLEND_MODES as readonly string[]).includes(saved.blend_mode)
+            ? (saved.blend_mode as GlobalCompositeOperation)
+            : "source-over";
+        ctx.drawImage(img, 0, 0, out.width, out.height);
+      } catch {
+        // Corrupt layer: skip, like load().
+      }
+    }
+    ctx.globalAlpha = 1;
+    ctx.globalCompositeOperation = "source-over";
+    return out;
+  }
+
+  /** Playback: show a pre-rendered frame on the display (fit). Live layers are untouched. */
+  showPlaybackBitmap(bmp: HTMLCanvasElement) {
+    this.preview = null;
+    const ctx = this.display.getContext("2d")!;
+    ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
+    ctx.globalCompositeOperation = "source-over";
+    ctx.globalAlpha = 1;
+    ctx.fillStyle = PAPER;
+    ctx.fillRect(0, 0, this.width, this.height);
+    const s = Math.min(this.width / bmp.width, this.height / bmp.height);
+    const w = Math.max(1, bmp.width * s);
+    const h = Math.max(1, bmp.height * s);
+    ctx.drawImage(bmp, (this.width - w) / 2, (this.height - h) / 2, w, h);
+  }
 }

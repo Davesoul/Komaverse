@@ -46,7 +46,7 @@ class StorageOut(BaseModel):
 
 
 class DetectRequest(BaseModel):
-    detector: str = "heuristic"  # heuristic | cloud (falls back to heuristic)
+    detector: str = "heuristic"  # heuristic | yolo | yolo-leoxs22 | cloud (fall back to heuristic)
     direction: str = "rtl"  # rtl (manga) | ltr (western)
     confirm: bool = False  # required when the page already has panels
 
@@ -275,7 +275,7 @@ def detect_panels(
     user: UserRow = Depends(get_current_user),
 ):
     page = _get_page(session, user, page_id)
-    if body.detector not in ("heuristic", "cloud"):
+    if body.detector not in ("heuristic", "yolo", "yolo-leoxs22", "cloud"):
         raise HTTPException(400, f"unknown detector: {body.detector}")
     if body.direction not in ("rtl", "ltr"):
         raise HTTPException(400, f"unknown direction: {body.direction}")
@@ -413,8 +413,10 @@ def panel_preview(
     panel_id: str,
     session: Session = Depends(get_session),
     user: UserRow = Depends(get_current_user),
+    px: int = 320,
 ):
-    """Contact-sheet crop of one panel, longest side 320px."""
+    """Contact-sheet crop of one panel, longest side `px` (default 320,
+    clamped 64..1600). Thumbs stay small; the preview player asks for more."""
     row = session.get(PanelRow, panel_id)
     if row is None or row.page is None:
         raise HTTPException(404, "panel not found")
@@ -428,7 +430,8 @@ def panel_preview(
     x2 = min(x + max(int(row.w), 1), iw)
     y2 = min(y + max(int(row.h), 1), ih)
     crop = img.crop((x, y, max(x2, x + 1), max(y2, y + 1)))
-    crop.thumbnail((320, 320))
+    side = min(max(px, 64), 1600)
+    crop.thumbnail((side, side))
     buf = io.BytesIO()
     crop.save(buf, format="PNG")
     return Response(content=buf.getvalue(), media_type="image/png")

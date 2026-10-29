@@ -131,6 +131,13 @@ def test_panel_preview(factory, user):
     with factory() as s, pytest.raises(HTTPException) as exc:
         panel_preview("missing", s, user)
     assert exc.value.status_code == 404
+    with factory() as s:
+        big = panel_preview(detected.panels[0].id, s, user, px=960)
+    big_img = Image.open(io.BytesIO(big.body))
+    assert max(big_img.size) <= 960 and max(big_img.size) >= max(img.size)
+    with factory() as s:
+        clamped = panel_preview(detected.panels[0].id, s, user, px=99999)
+    assert max(Image.open(io.BytesIO(clamped.body)).size) <= 1600
 
 
 def test_scan_flow(factory, user):
@@ -169,6 +176,34 @@ def test_cloud_detector_falls_back_without_config(factory, user):
         page = upload(s, user, project.id, fake_page())
     with factory() as s:
         res = detect_panels(page.id, DetectRequest(detector="cloud"), s, user)
+    assert res.detector_used == "heuristic"
+    assert res.fell_back is True
+    assert len(res.panels) >= 3
+
+
+def test_yolo_detector_falls_back_without_weights(factory, user, monkeypatch):
+    monkeypatch.setattr(settings, "yolo_model", "models/does-not-exist.pt")
+    with factory() as s:
+        project = create_project(ProjectCreate(name="ChY"), s, user)
+    with factory() as s:
+        page = upload(s, user, project.id, fake_page())
+    with factory() as s:
+        res = detect_panels(page.id, DetectRequest(detector="yolo"), s, user)
+    assert res.detector_used == "heuristic"
+    assert res.fell_back is True
+    assert len(res.panels) >= 3
+
+
+def test_yolo_leoxs22_routes_and_falls_back(factory, user, monkeypatch):
+    import komaverse.detect as detect_mod
+
+    monkeypatch.setattr(detect_mod, "YOLO_LEOXS", "models/does-not-exist.pt")
+    with factory() as s:
+        project = create_project(ProjectCreate(name="ChL"), s, user)
+    with factory() as s:
+        page = upload(s, user, project.id, fake_page())
+    with factory() as s:
+        res = detect_panels(page.id, DetectRequest(detector="yolo-leoxs22"), s, user)
     assert res.detector_used == "heuristic"
     assert res.fell_back is True
     assert len(res.panels) >= 3
