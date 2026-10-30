@@ -754,3 +754,98 @@ def test_frame_from_unknown_media_rejected(factory, user):
             frame_from_media(
                 project.id, FrameFromMedia(source="@panel:nope"), s, user
             )
+
+
+def test_sequences_scope_frames(factory, user):
+    from komaverse.api.animate import (
+        FrameOrder,
+        SequenceCreate,
+        SequencePatch,
+        create_sequence,
+        delete_sequence,
+        duplicate_sequence,
+        list_sequences,
+        order_frames,
+        order_sequence_frames,
+        patch_sequence,
+    )
+
+    with factory() as s:
+        project = create_project(ProjectCreate(name="Seq"), s, user)
+    with factory() as s:
+        assert list_sequences(project.id, s, user) == []
+        a = create_sequence(project.id, SequenceCreate(name="A"), s, user)
+        b = create_sequence(project.id, SequenceCreate(name="B"), s, user)
+        assert [x.name for x in list_sequences(project.id, s, user)] == ["A", "B"]
+    with factory() as s:
+        fa = create_frame(project.id, FrameCreate(name="a1", sequence_id=a.id), s, user)
+        fb = create_frame(project.id, FrameCreate(name="b1", sequence_id=b.id), s, user)
+        assert (fa.sequence_id, fb.sequence_id) == (a.id, b.id)
+        # Legacy project-wide reorder rejects a cross-sequence set...
+        with pytest.raises(HTTPException):
+            order_frames(project.id, FrameOrder(frame_ids=[fa.id, fb.id]), s, user)
+        # ...while the per-sequence route accepts its exact set.
+        got = order_sequence_frames(a.id, FrameOrder(frame_ids=[fa.id]), s, user)
+        assert [f.id for f in got] == [fa.id]
+        with pytest.raises(HTTPException):
+            order_sequence_frames(a.id, FrameOrder(frame_ids=[fa.id, fb.id]), s, user)
+        renamed = patch_sequence(a.id, SequencePatch(name="Alpha"), s, user)
+        assert renamed.name == "Alpha"
+        copy = duplicate_sequence(a.id, s, user)
+        assert copy.name == "Alpha copy" and len(copy.frames) == 1
+        assert copy.frames[0].name == "a1"
+        delete_sequence(copy.id, s, user)
+    with factory() as s:
+        assert [x.name for x in list_sequences(project.id, s, user)] == ["Alpha", "B"]
+        # Frames with no sequence join the first one on next create.
+        legacy = create_frame(project.id, FrameCreate(name="legacy"), s, user)
+        assert legacy.sequence_id == a.id
+
+
+def test_legacy_frames_auto_group(factory, user):
+    from komaverse.api.animate import list_sequences
+
+    with factory() as s:
+        project = create_project(ProjectCreate(name="Legacy"), s, user)
+    with factory() as s:
+        create_frame(project.id, FrameCreate(name="one"), s, user)
+        create_frame(project.id, FrameCreate(name="two"), s, user)
+    # No sequences yet: the next frame triggers the auto-group migration.
+    with factory() as s:
+        third = create_frame(project.id, FrameCreate(name="three"), s, user)
+    with factory() as s:
+        seqs = list_sequences(project.id, s, user)
+        assert len(seqs) == 1 and seqs[0].name == "Sequence 1"
+        assert [f.name for f in seqs[0].frames] == ["one", "two", "three"]
+        assert third.sequence_id == seqs[0].id
+
+
+def test_duplicate_scene_and_scoped_export(factory, user):
+    from komaverse.api.animate import duplicate_scene
+
+    project_id, scene_id, panels = _scene_with_panels(factory, user)
+    with factory() as s:
+        add_clips_batch(
+            scene_id,
+            ClipBatchCreate(clips=[ClipCreate(kind="panel", source_id=panels[0], duration=0.5)]),
+            s,
+            user,
+        )
+        copy = duplicate_scene(scene_id, s, user)
+        assert copy.name.endswith("copy")
+        assert len(copy.clips) == 1 and copy.clips[0].source_id == panels[0]
+    # Two timelines with clips: an unscoped export must ask which one.
+    with factory() as s:
+        with pytest.raises(HTTPException, match="Which timeline"):
+            export_project(project_id, ExportRequest(fps=5, width=320, height=240), BackgroundTasks(), s, user)
+        job = export_project(
+            project_id,
+            ExportRequest(fps=5, width=320, height=240, scene_id=copy.id),
+            BackgroundTasks(),
+            s,
+            user,
+        )
+    run_export_job(job.id, factory)
+    with factory() as s:
+        done = get_job(job.id, s, user)
+    assert done.status == "done" and (done.result_url or "").endswith(".mp4")

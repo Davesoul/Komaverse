@@ -54,6 +54,27 @@ export function getDrawFrame(projectId: string): string | null {
   }
 }
 
+/* Current animation sequence, per project. Draw and Media share it so
+ * "Open in Draw" lands on the right sequence. */
+const sequenceKey = (projectId: string) => `komaverse.sequence.${projectId}`;
+
+export function setCurrentSequence(projectId: string, sequenceId: string | null) {
+  try {
+    if (sequenceId) localStorage.setItem(sequenceKey(projectId), sequenceId);
+    else localStorage.removeItem(sequenceKey(projectId));
+  } catch {
+    // Private mode etc: the tab just opens the first sequence instead.
+  }
+}
+
+export function getCurrentSequence(projectId: string): string | null {
+  try {
+    return localStorage.getItem(sequenceKey(projectId));
+  } catch {
+    return null;
+  }
+}
+
 /* Cross-tab jump: pages can't reach the shell's setTab, so they dispatch
  * this event (the project is already published via setCurrentProject, so
  * the target tab restores it on mount). */

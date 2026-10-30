@@ -56,7 +56,9 @@ started Oct 28, 2026.
   layers (add/rename/show/hide/lock/blend/reorder/merge), manga
   screentone layers, dropping any media onto a frame as a layer, plus
   frame and clip management — same tools over MCP (stdio + HTTP
-  `POST /mcp`)
+  `POST /mcp`). Projects hold multiple animation sequences (Draw tab
+  switcher, Media overview) and multiple timelines (Render switcher,
+  per-timeline export), all agent-operated
 
 ## Layout
 

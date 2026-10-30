@@ -787,6 +787,110 @@ def test_agent_draw_frames_and_clips(factory, user):
         assert all(not sc.clips for sc in scenes)
 
 
+def test_agent_sequences_crud(factory, user):
+    from komaverse import agent as agent_mod
+
+    pid = seed_project(factory, user)
+    f1 = draw_frame_id(factory, user, pid, "S1")
+    f2 = draw_frame_id(factory, user, pid, "S2")
+    with factory() as s:
+        listed = agent_mod.tool_manage_sequences(s, user, pid, "list")
+        assert "Sequence 1" in listed and "(2 frames)" in listed
+        assert "Created sequence 'Alt'" in agent_mod.tool_manage_sequences(
+            s, user, pid, "add", name="Alt"
+        )
+        assert "Moved 'S1' to sequence 'Alt'" in agent_mod.tool_manage_frames(
+            s, user, pid, "move", f1, target="Alt"
+        )
+        assert "already in 'Alt'" in agent_mod.tool_manage_frames(
+            s, user, pid, "move", f1, target="Alt"
+        )
+        assert "Move needs a target sequence" in agent_mod.tool_manage_frames(
+            s, user, pid, "move", f2
+        )
+        assert "Unknown sequence" in agent_mod.tool_manage_frames(
+            s, user, pid, "move", f2, target="Ghost"
+        )
+        assert "Duplicated 'Alt' as 'Alt copy'" in agent_mod.tool_manage_sequences(
+            s, user, pid, "duplicate", "Alt"
+        )
+        assert "Renamed sequence to 'Second'" in agent_mod.tool_manage_sequences(
+            s, user, pid, "rename", "Alt", name="Second"
+        )
+        assert "'Second' [sequence" in agent_mod.tool_manage_sequences(
+            s, user, pid, "list"
+        )
+        # Sequence 1 still holds S2: deleting Alt copy drops its frames.
+        assert "Deleted sequence 'Alt copy'" in agent_mod.tool_manage_sequences(
+            s, user, pid, "delete", "Alt copy"
+        )
+        added = agent_mod.tool_add_clip(s, user, pid, "frame", f2, None, 2.0, "none")
+        assert "[clip " in added
+        assert "used by 1 clip" in agent_mod.tool_manage_sequences(
+            s, user, pid, "delete", "Sequence 1"
+        )
+        remaining = agent_mod.tool_manage_sequences(s, user, pid, "list")
+        assert "'Second'" in remaining and "Sequence 1" in remaining
+        scoped = agent_mod.tool_list_frames(s, user, pid, "Second")
+        assert "Frames in 'Second'" in scoped and "S1" in scoped
+        assert "Unknown sequence" in agent_mod.tool_list_frames(
+            s, user, pid, "Ghost"
+        )
+
+
+def test_agent_timelines_crud(factory, user):
+    from komaverse import agent as agent_mod
+
+    pid = seed_project(factory, user)
+    f1 = draw_frame_id(factory, user, pid, "T1")
+    f2 = draw_frame_id(factory, user, pid, "T2")
+    with factory() as s:
+        assert "No timelines yet" not in agent_mod.tool_manage_timelines(
+            s, user, pid, "list"
+        )
+        assert "Created timeline 'Recut'" in agent_mod.tool_manage_timelines(
+            s, user, pid, "add", name="Recut"
+        )
+        assert "Duplicated 'Recut' as 'Recut copy'" in agent_mod.tool_manage_timelines(
+            s, user, pid, "duplicate", "Recut"
+        )
+        assert "Renamed timeline to 'Final'" in agent_mod.tool_manage_timelines(
+            s, user, pid, "rename", "Recut", name="Final"
+        )
+        # Two timelines with clips: export must ask which one.
+        assert "Final" in agent_mod.tool_manage_timelines(s, user, pid, "list")
+        agent_mod.tool_add_clip(s, user, pid, "frame", f1, "Final", 2.0, "none")
+        agent_mod.tool_add_clip(s, user, pid, "frame", f2, "Recut copy", 2.0, "none")
+        ambiguous = agent_mod.tool_export(s, user, pid)
+        assert "Which timeline?" in ambiguous
+        scoped = agent_mod.tool_export(s, user, pid, factory, False, "Final")
+        assert ".mp4" in scoped
+        assert "Deleted timeline 'Recut copy'" in agent_mod.tool_manage_timelines(
+            s, user, pid, "delete", "Recut copy"
+        )
+        assert "Unknown timeline" in agent_mod.tool_export(s, user, pid, scene="Ghost")
+        assert "Which timeline?" in agent_mod.tool_manage_timelines(
+            s, user, pid, "rename", None, name="X"
+        )
+
+
+def test_agent_demo_sequence_timeline_turns(factory, user):
+    pid = seed_project(factory, user)
+    draw_frame_id(factory, user, pid, "Demo")
+    out = turn(factory, user, "create a new sequence called Chase", pid)
+    assert any(a["tool"] == "manage_sequences" for a in out["actions"])
+    assert "Chase" in out["reply"]
+    out = turn(factory, user, "list sequences", pid)
+    assert any(a["tool"] == "manage_sequences" for a in out["actions"])
+    assert "Sequence 1" in out["reply"]
+    out = turn(factory, user, "create a new timeline called Recut", pid)
+    assert any(a["tool"] == "manage_timelines" for a in out["actions"])
+    assert "Recut" in out["reply"]
+    out = turn(factory, user, "duplicate the Recut timeline", pid)
+    assert any(a["tool"] == "manage_timelines" for a in out["actions"])
+    assert "Duplicated" in out["reply"]
+
+
 def test_agent_demo_draw_turns(factory, user):
     pid = seed_project(factory, user)
     fid = draw_frame_id(factory, user, pid, "Demo")

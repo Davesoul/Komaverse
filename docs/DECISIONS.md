@@ -234,3 +234,13 @@ onto a frame as a layer), `manage_frames` (duplicate/delete/rename/
 reorder), `manage_clips` (list/remove/set/reorder). Turn-scoped sessions
 call `session.expire_all()` on tool entry so a list after a mutation in
 the same turn never reads a stale cached collection.
+
+Amendment: sequences + timelines. One project now holds many animation
+shots and many timelines. `Sequence` rows group draw frames (Draw tab
+switcher + "new sequence", Media lists sequences with frame/layer counts,
+legacy frames auto-adopt into "Sequence 1" via `_adopt_orphans`, frame
+ordering is per-sequence, `DELETE` 409s when a frame sits on a timeline).
+Timelines are scenes (Render tab renamed the section, adds Duplicate,
+per-timeline export via `scene_id`; multi-clip-timeline exports 400 with
+"Which timeline?"). Both are agent/MCP-operated (`manage_sequences`,
+`manage_timelines`, sequence args on frame/layer tools, scene on export).

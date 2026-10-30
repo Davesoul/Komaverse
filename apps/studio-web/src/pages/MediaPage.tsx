@@ -9,9 +9,10 @@ import {
   type Job,
   type Page,
   type Project,
+  type Sequence,
   type StorageUsage,
 } from "../api";
-import { getCurrentProject, gotoTab, setCurrentProject } from "../lib/studio";
+import { getCurrentProject, gotoTab, setCurrentProject, setCurrentSequence } from "../lib/studio";
 import {
   Btn,
   ChapterHeader,
@@ -31,6 +32,31 @@ const fmtBytes = (n: number) =>
     : n < 1024 * 1024
       ? `${(n / 1024).toFixed(1)} KB`
       : `${(n / 1024 / 1024).toFixed(1)} MB`;
+
+type MediaSectionKey = "pages" | "takes" | "gens" | "frames" | "renders";
+
+const COLLAPSED_KEY = "komaverse.mediaCollapsed";
+// Most-recent rows per section before "Show all". Takes honor the sort
+// order instead (newest first by default); everything else is append-only.
+const PAGE_CAP = 8;
+const TAKE_CAP = 5;
+const GEN_CAP = 8;
+const RENDER_CAP = 5;
+const SEQ_CAP = 6;
+
+function loadCollapsed(): Partial<Record<MediaSectionKey, boolean>> {
+  try {
+    const raw = localStorage.getItem(COLLAPSED_KEY);
+    if (!raw) return {};
+    const parsed: unknown = JSON.parse(raw);
+    if (parsed && typeof parsed === "object") {
+      return parsed as Partial<Record<MediaSectionKey, boolean>>;
+    }
+  } catch {
+    // Corrupt or unavailable storage: start expanded.
+  }
+  return {};
+}
 
 /** Credentialed image (blob URL, works on remote-URL desktop). */
 function BlobImg({
@@ -136,12 +162,79 @@ type LightboxState =
   | { kind: "gen"; job: Job }
   | null;
 
+/** One collapsible library section: most-recent rows, "Show all" past the cap. */
+function MediaSection<T>({
+  title,
+  items,
+  total,
+  cap,
+  fromStart,
+  collapsed,
+  showAll,
+  searching,
+  onToggleCollapse,
+  onToggleShowAll,
+  emptyAll,
+  emptyFiltered,
+  children,
+}: {
+  title: string;
+  items: T[];
+  total: number;
+  cap: number;
+  fromStart?: boolean;
+  collapsed: boolean;
+  showAll: boolean;
+  searching: boolean;
+  onToggleCollapse: () => void;
+  onToggleShowAll: () => void;
+  emptyAll: React.ReactNode;
+  emptyFiltered: React.ReactNode;
+  children: (visible: T[]) => React.ReactNode;
+}) {
+  const visible = searching || showAll ? items : fromStart ? items.slice(0, cap) : items.slice(-cap);
+  return (
+    <section>
+      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+        <IconBtn
+          onClick={onToggleCollapse}
+          label={collapsed ? `Expand ${title}` : `Collapse ${title}`}
+        >
+          {collapsed ? "▸" : "▾"}
+        </IconBtn>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <SectionTitle>
+            {title} ({visible.length}{visible.length !== total ? ` of ${total}` : ""})
+          </SectionTitle>
+        </div>
+        {!collapsed && !searching && items.length > cap && (
+          <Btn
+            small
+            onClick={onToggleShowAll}
+            title={showAll ? "Back to the most recent rows" : `List all ${total}`}
+          >
+            {showAll ? "Show less" : `Show all ${total}`}
+          </Btn>
+        )}
+      </div>
+      {collapsed ? null : total === 0 ? (
+        emptyAll
+      ) : items.length === 0 ? (
+        emptyFiltered
+      ) : (
+        children(visible)
+      )}
+    </section>
+  );
+}
+
 export default function MediaPage() {
   const [projects, setProjects] = useState<Project[]>([]);
   const [project, setProject] = useState<Project | null>(null);
   const [takes, setTakes] = useState<AudioTake[]>([]);
   const [jobs, setJobs] = useState<Job[]>([]);
   const [frames, setFrames] = useState<DrawFrame[]>([]);
+  const [sequences, setSequences] = useState<Sequence[]>([]);
   const [usage, setUsage] = useState<StorageUsage | null>(null);
   const [report, setReport] = useState<ExportReport | null>(null);
   const [busy, setBusy] = useState("");
@@ -155,6 +248,38 @@ export default function MediaPage() {
   const [transcripts, setTranscripts] = useState<Record<string, Transcript>>({});
   const [transcribing, setTranscribing] = useState<string | null>(null);
   const [lightbox, setLightbox] = useState<LightboxState>(null);
+  // Collapsed sections persist across visits; show-all resets per visit so a
+  // full library never surprises on load.
+  const [collapsed, setCollapsed] = useState<Record<MediaSectionKey, boolean>>(() => ({
+    pages: false,
+    takes: false,
+    gens: false,
+    frames: false,
+    renders: false,
+    ...loadCollapsed(),
+  }));
+  const [showAll, setShowAll] = useState<Record<MediaSectionKey, boolean>>({
+    pages: false,
+    takes: false,
+    gens: false,
+    frames: false,
+    renders: false,
+  });
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(COLLAPSED_KEY, JSON.stringify(collapsed));
+    } catch {
+      // Private mode etc: collapsing just won't persist.
+    }
+  }, [collapsed]);
+
+  const toggleCollapsed = (key: MediaSectionKey) =>
+    setCollapsed((prev) => ({ ...prev, [key]: !prev[key] }));
+  const toggleShowAll = (key: MediaSectionKey) =>
+    setShowAll((prev) => ({ ...prev, [key]: !prev[key] }));
+  const setAllCollapsed = (value: boolean) =>
+    setCollapsed({ pages: value, takes: value, gens: value, frames: value, renders: value });
 
   const refresh = useCallback(async (id: string | null) => {
     const ps = await api.listProjects();
@@ -166,18 +291,21 @@ export default function MediaPage() {
       setTakes([]);
       setJobs([]);
       setFrames([]);
+      setSequences([]);
       setUsage(null);
       return;
     }
-    const [tk, allJobs, fr, st] = await Promise.all([
+    const [tk, allJobs, fr, sq, st] = await Promise.all([
       api.listTakes(chosen.id),
       api.listJobs(),
       api.listFrames(chosen.id).catch(() => [] as DrawFrame[]),
+      api.listSequences(chosen.id).catch(() => [] as Sequence[]),
       api.projectStorage(chosen.id),
     ]);
     setTakes(tk);
     setJobs(allJobs.filter((j) => j.project_id === chosen.id));
     setFrames(fr);
+    setSequences(sq);
     setUsage(st);
   }, []);
 
@@ -232,6 +360,50 @@ export default function MediaPage() {
       setNotice(`Deleted take "${take.name}".`);
     } catch (e) {
       setNotice(`Delete failed: ${(e as Error).message}`);
+    } finally {
+      setBusy("");
+    }
+  };
+
+  const openSequenceInDraw = (seq: Sequence) => {
+    if (project) setCurrentSequence(project.id, seq.id);
+    gotoTab("draw");
+  };
+
+  const doNewSequence = async () => {
+    if (!project) return;
+    setBusy("Creating sequence…");
+    try {
+      const seq = await api.createSequence(project.id, `Sequence ${sequences.length + 1}`);
+      await refresh(project.id);
+      setNotice(`Created "${seq.name}" — open it in Draw.`);
+    } catch (e) {
+      setNotice(`New sequence failed: ${(e as Error).message}`);
+    } finally {
+      setBusy("");
+    }
+  };
+
+  const doDeleteSequence = async (seq: Sequence) => {
+    if (!project) return;
+    if (
+      !window.confirm(
+        `Delete sequence "${seq.name}" with its ${seq.frames.length} frame(s)? This can't be undone.`,
+      )
+    )
+      return;
+    setBusy("Deleting sequence…");
+    try {
+      await api.deleteSequence(seq.id);
+      await refresh(project.id);
+      setNotice(`Deleted "${seq.name}".`);
+    } catch (e) {
+      const msg = (e as Error).message;
+      setNotice(
+        msg.includes("409")
+          ? "Sequence has frames on the timeline — remove those clips first."
+          : `Delete failed: ${msg}`,
+      );
     } finally {
       setBusy("");
     }
@@ -384,6 +556,14 @@ export default function MediaPage() {
           <option value="old">Oldest first</option>
           <option value="name">By name</option>
         </SelectInput>
+        <span style={{ marginLeft: "auto", display: "flex", gap: 6 }}>
+          <Btn small onClick={() => setAllCollapsed(true)} title="Collapse every section">
+            Collapse all
+          </Btn>
+          <Btn small onClick={() => setAllCollapsed(false)} title="Expand every section">
+            Expand all
+          </Btn>
+        </span>
       </div>
 
       {(busy || notice) && (
@@ -404,15 +584,20 @@ export default function MediaPage() {
         <EmptyState title="No projects yet" hint="Create one in Scan to start collecting media." />
       ) : (
         <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
-          <section>
-            <SectionTitle>
-              Scanned pages ({pages.length}{pages.length !== project.pages.length ? ` of ${project.pages.length}` : ""})
-            </SectionTitle>
-            {project.pages.length === 0 ? (
-              <EmptyState title="No pages" hint="Upload scans from the Scan tab." />
-            ) : pages.length === 0 ? (
-              <EmptyState title="No matches" hint="Nothing matches the current search." />
-            ) : (
+          <MediaSection
+            title="Scanned pages"
+            items={pages}
+            total={project.pages.length}
+            cap={PAGE_CAP}
+            collapsed={collapsed.pages}
+            showAll={showAll.pages}
+            searching={q !== ""}
+            onToggleCollapse={() => toggleCollapsed("pages")}
+            onToggleShowAll={() => toggleShowAll("pages")}
+            emptyAll={<EmptyState title="No pages" hint="Upload scans from the Scan tab." />}
+            emptyFiltered={<EmptyState title="No matches" hint="Nothing matches the current search." />}
+          >
+            {(list) => (
               <div
                 style={{
                   display: "grid",
@@ -420,7 +605,7 @@ export default function MediaPage() {
                   gap: 10,
                 }}
               >
-                {pages.map(({ pg, i }) => (
+                {list.map(({ pg, i }) => (
                   <div key={pg.id} className="kv-media-card">
                     <button
                       type="button"
@@ -454,17 +639,25 @@ export default function MediaPage() {
                 ))}
               </div>
             )}
-          </section>
+          </MediaSection>
 
-          <section>
-            <SectionTitle>Voice takes ({takesShown.length}{takesShown.length !== takes.length ? ` of ${takes.length}` : ""})</SectionTitle>
-            {takes.length === 0 ? (
-              <EmptyState title="No takes" hint="Record or upload voice takes from the Render tab." />
-            ) : takesShown.length === 0 ? (
-              <EmptyState title="No matches" hint="Nothing matches the current search." />
-            ) : (
+          <MediaSection
+            title="Voice takes"
+            items={takesShown}
+            total={takes.length}
+            cap={TAKE_CAP}
+            fromStart
+            collapsed={collapsed.takes}
+            showAll={showAll.takes}
+            searching={q !== ""}
+            onToggleCollapse={() => toggleCollapsed("takes")}
+            onToggleShowAll={() => toggleShowAll("takes")}
+            emptyAll={<EmptyState title="No takes" hint="Record or upload voice takes from the Render tab." />}
+            emptyFiltered={<EmptyState title="No matches" hint="Nothing matches the current search." />}
+          >
+            {(list) => (
               <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-                {takesShown.map((t) => (
+                {list.map((t) => (
                   <div key={t.id} style={{ display: "flex", flexDirection: "column", gap: 4 }}>
                   <div
                     style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}
@@ -502,15 +695,22 @@ export default function MediaPage() {
                 ))}
               </div>
             )}
-          </section>
+          </MediaSection>
 
-          <section>
-            <SectionTitle>AI generations ({gensShown.length}{gensShown.length !== aiJobs.length ? ` of ${aiJobs.length}` : ""})</SectionTitle>
-            {aiJobs.length === 0 ? (
-              <EmptyState title="No generations" hint="Generate images from the Render tab." />
-            ) : gensShown.length === 0 ? (
-              <EmptyState title="No matches" hint="Nothing matches the current search or filter." />
-            ) : (
+          <MediaSection
+            title="AI generations"
+            items={gensShown}
+            total={aiJobs.length}
+            cap={GEN_CAP}
+            collapsed={collapsed.gens}
+            showAll={showAll.gens}
+            searching={q !== ""}
+            onToggleCollapse={() => toggleCollapsed("gens")}
+            onToggleShowAll={() => toggleShowAll("gens")}
+            emptyAll={<EmptyState title="No generations" hint="Generate images from the Render tab." />}
+            emptyFiltered={<EmptyState title="No matches" hint="Nothing matches the current search or filter." />}
+          >
+            {(list) => (
               <div
                 style={{
                   display: "grid",
@@ -518,7 +718,7 @@ export default function MediaPage() {
                   gap: 10,
                 }}
               >
-                {gensShown.map((j) => (
+                {list.map((j) => (
                   <div key={j.id} className="kv-media-card">
                     {j.status === "done" && j.result_url ? (
                       <button
@@ -606,42 +806,69 @@ export default function MediaPage() {
                 ))}
               </div>
             )}
-          </section>
+          </MediaSection>
 
-          <section>
-            <SectionTitle>Draw frames ({frames.length})</SectionTitle>
-            {frames.length === 0 ? (
-              <EmptyState title="No frames" hint="Draw frames on the Draw tab." />
-            ) : (
+          <MediaSection
+            title="Sequences"
+            items={sequences}
+            total={sequences.length}
+            cap={SEQ_CAP}
+            collapsed={collapsed.frames}
+            showAll={showAll.frames}
+            searching={q !== ""}
+            onToggleCollapse={() => toggleCollapsed("frames")}
+            onToggleShowAll={() => toggleShowAll("frames")}
+            emptyAll={<EmptyState title="No sequences" hint="Group your animation into shots — create the first sequence, then draw it." />}
+            emptyFiltered={<EmptyState title="No matches" hint="Nothing matches the current search." />}
+          >
+            {(list) => (
               <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-                {frames.map((f, i) => (
+                <div>
+                  <Btn small onClick={() => void doNewSequence()}>
+                    New sequence
+                  </Btn>
+                </div>
+                {list.map((s) => (
                   <div
-                    key={f.id}
+                    key={s.id}
                     style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}
                   >
-                    <span className="kv-nums" style={{ fontSize: 12 }}>
-                      FR {String(i + 1).padStart(2, "0")}
-                    </span>
-                    <span style={{ fontSize: 13 }}>{f.name || "Untitled frame"}</span>
+                    <span style={{ fontSize: 13, fontWeight: 700 }}>{s.name}</span>
                     <span className="kv-nums" style={{ fontSize: 12, color: "var(--kv-muted)" }}>
-                      {f.width}×{f.height} · {f.layers.length} layer{f.layers.length === 1 ? "" : "s"}
+                      {s.frames.length} frame{s.frames.length === 1 ? "" : "s"}
+                      {s.frames.length > 0 &&
+                        ` · ${s.frames.reduce((n, f) => n + f.layer_count, 0)} layers`}
                     </span>
-                    <Btn small onClick={() => gotoTab("draw")} style={{ marginLeft: "auto" }}>
-                      Open in Draw
-                    </Btn>
+                    <span style={{ marginLeft: "auto", display: "flex", gap: 6 }}>
+                      <Btn small onClick={() => openSequenceInDraw(s)}>
+                        Open in Draw
+                      </Btn>
+                      <IconBtn danger onClick={() => void doDeleteSequence(s)} label={`Delete sequence "${s.name}" and its frames`}>
+                        ×
+                      </IconBtn>
+                    </span>
                   </div>
                 ))}
               </div>
             )}
-          </section>
+          </MediaSection>
 
-          <section>
-            <SectionTitle>Renders ({exports.length})</SectionTitle>
-            {exports.length === 0 ? (
-              <EmptyState title="No renders" hint="Export the timeline from the Render tab." />
-            ) : (
+          <MediaSection
+            title="Renders"
+            items={exports}
+            total={exports.length}
+            cap={RENDER_CAP}
+            collapsed={collapsed.renders}
+            showAll={showAll.renders}
+            searching={q !== ""}
+            onToggleCollapse={() => toggleCollapsed("renders")}
+            onToggleShowAll={() => toggleShowAll("renders")}
+            emptyAll={<EmptyState title="No renders" hint="Export the timeline from the Render tab." />}
+            emptyFiltered={<EmptyState title="No matches" hint="Nothing matches the current search." />}
+          >
+            {(list) => (
               <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-                {exports.map((j) => (
+                {list.map((j) => (
                   <div
                     key={j.id}
                     style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}
@@ -665,16 +892,16 @@ export default function MediaPage() {
                 ))}
               </div>
             )}
-            {report && (
-              <div style={{ marginTop: 8 }}>
-                <Notice tone={report.warnings.length > 0 ? "warn" : "info"}>
-                  {report.job_id}: {report.rendered_sec.toFixed(1)}s · {report.clips_rendered} clips ·{" "}
-                  {report.audio_cues} cues
-                  {report.warnings.length > 0 && ` — ${report.warnings.join("; ")}`}
-                </Notice>
-              </div>
-            )}
-          </section>
+          </MediaSection>
+          {report && (
+            <div style={{ marginTop: 8 }}>
+              <Notice tone={report.warnings.length > 0 ? "warn" : "info"}>
+                {report.job_id}: {report.rendered_sec.toFixed(1)}s · {report.clips_rendered} clips ·{" "}
+                {report.audio_cues} cues
+                {report.warnings.length > 0 && ` — ${report.warnings.join("; ")}`}
+              </Notice>
+            </div>
+          )}
 
           <StatusBar
             items={[

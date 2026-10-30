@@ -48,6 +48,8 @@ from komaverse.agent import (
     tool_manage_clips,
     tool_manage_frames,
     tool_manage_layers,
+    tool_manage_sequences,
+    tool_manage_timelines,
     tool_status,
     tool_tone_layer,
 )
@@ -88,7 +90,8 @@ def call_tool(
         return tool_create_project(session, user, _str(args, "name") or "Untitled")
     if name == "create_frame":
         return tool_create_frame(
-            session, user, _str(args, "project_id"), _str(args, "name")
+            session, user, _str(args, "project_id"), _str(args, "name"),
+            args.get("sequence"),
         )
     if name == "detect_panels":
         return tool_detect_all(
@@ -107,7 +110,10 @@ def call_tool(
     if name == "export_video":
         # Never block the transport: the job id comes back at once, and
         # check_job reports completion.
-        return tool_export(session, user, _str(args, "project_id"), job_factory, True)
+        return tool_export(
+            session, user, _str(args, "project_id"), job_factory, True,
+            args.get("scene"),
+        )
     if name == "create_image":
         # Same non-blocking contract as exports: immediate job id, poll it.
         return tool_generate(
@@ -180,9 +186,12 @@ def call_tool(
             _str(args, "project_id"),
             _str(args, "source"),
             args.get("name"),
+            args.get("sequence"),
         )
     if name == "list_frames":
-        return tool_list_frames(session, user, _str(args, "project_id"))
+        return tool_list_frames(
+            session, user, _str(args, "project_id"), args.get("sequence")
+        )
     if name == "manage_layers":
         return tool_manage_layers(
             session,
@@ -197,6 +206,7 @@ def call_tool(
             args.get("locked"),
             args.get("blend"),
             args.get("position"),
+            args.get("sequence"),
         )
     if name == "tone_layer":
         return tool_tone_layer(
@@ -210,6 +220,7 @@ def call_tool(
             args.get("opacity", 100),
             _str(args, "blend") or "multiply",
             args.get("name"),
+            args.get("sequence"),
         )
     if name == "layer_from_media":
         return tool_layer_from_media(
@@ -221,6 +232,7 @@ def call_tool(
             args.get("name"),
             args.get("opacity", 100),
             _str(args, "blend") or "normal",
+            args.get("sequence"),
         )
     if name == "manage_frames":
         return tool_manage_frames(
@@ -231,6 +243,26 @@ def call_tool(
             args.get("frame"),
             args.get("name"),
             args.get("frame_ids"),
+            args.get("sequence"),
+            args.get("target"),
+        )
+    if name == "manage_sequences":
+        return tool_manage_sequences(
+            session,
+            user,
+            _str(args, "project_id"),
+            _str(args, "op") or "list",
+            args.get("sequence"),
+            args.get("name"),
+        )
+    if name == "manage_timelines":
+        return tool_manage_timelines(
+            session,
+            user,
+            _str(args, "project_id"),
+            _str(args, "op") or "list",
+            args.get("scene"),
+            args.get("name"),
         )
     if name == "manage_clips":
         return tool_manage_clips(
@@ -276,11 +308,34 @@ def _tool_defs() -> list[dict]:
         },
         {
             "name": "create_frame",
-            "description": "Create a blank draw frame in a project.",
+            "description": "Create a blank draw frame in a project, optionally in one sequence.",
             "inputSchema": {
                 "type": "object",
-                "properties": {"project_id": s, "name": s},
+                "properties": {"project_id": s, "name": s, "sequence": s},
                 "required": ["project_id"],
+            },
+        },
+        {
+            "name": "manage_sequences",
+            "description": (
+                "Animation-shot ops: list, add, rename, duplicate, delete "
+                "frame sequences."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {"project_id": s, "op": s, "sequence": s, "name": s},
+                "required": ["project_id", "op"],
+            },
+        },
+        {
+            "name": "manage_timelines",
+            "description": (
+                "Timeline ops: list, add, rename, duplicate, delete scenes."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {"project_id": s, "op": s, "scene": s, "name": s},
+                "required": ["project_id", "op"],
             },
         },
         {
@@ -308,10 +363,10 @@ def _tool_defs() -> list[dict]:
         },
         {
             "name": "export_video",
-            "description": "Render the timeline to MP4 (blocks until done).",
+            "description": "Render one timeline to MP4 (blocks until done).",
             "inputSchema": {
                 "type": "object",
-                "properties": {"project_id": s},
+                "properties": {"project_id": s, "scene": s},
                 "required": ["project_id"],
             },
         },
@@ -427,16 +482,16 @@ def _tool_defs() -> list[dict]:
             ),
             "inputSchema": {
                 "type": "object",
-                "properties": {"project_id": s, "source": s, "name": s},
+                "properties": {"project_id": s, "source": s, "name": s, "sequence": s},
                 "required": ["project_id", "source"],
             },
         },
         {
             "name": "list_frames",
-            "description": "List the project's draw frames with their layers.",
+            "description": "List the project's draw frames with their layers, optionally one sequence.",
             "inputSchema": {
                 "type": "object",
-                "properties": {"project_id": s},
+                "properties": {"project_id": s, "sequence": s},
                 "required": ["project_id"],
             },
         },
@@ -460,6 +515,7 @@ def _tool_defs() -> list[dict]:
                     "locked": {"type": "boolean"},
                     "blend": s,
                     "position": num,
+                    "sequence": s,
                 },
                 "required": ["project_id", "frame", "op"],
             },
@@ -481,6 +537,7 @@ def _tool_defs() -> list[dict]:
                     "opacity": num,
                     "blend": s,
                     "name": s,
+                    "sequence": s,
                 },
                 "required": ["project_id", "frame"],
             },
@@ -501,6 +558,7 @@ def _tool_defs() -> list[dict]:
                     "name": s,
                     "opacity": num,
                     "blend": s,
+                    "sequence": s,
                 },
                 "required": ["project_id", "frame", "source"],
             },
@@ -508,8 +566,9 @@ def _tool_defs() -> list[dict]:
         {
             "name": "manage_frames",
             "description": (
-                "Flipbook ops: list, duplicate, delete, rename, reorder "
-                "(frame_ids lists every frame id once)."
+                "Flipbook ops: list, duplicate, delete, rename, reorder, move "
+                "(frame_ids lists every frame id once; target is the destination "
+                "sequence for move)."
             ),
             "inputSchema": {
                 "type": "object",
@@ -519,6 +578,8 @@ def _tool_defs() -> list[dict]:
                     "frame": s,
                     "name": s,
                     "frame_ids": arr,
+                    "sequence": s,
+                    "target": s,
                 },
                 "required": ["project_id", "op"],
             },

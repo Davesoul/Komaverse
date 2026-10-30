@@ -22,6 +22,7 @@ from komaverse.auth import ensure_owner, get_current_user, own_project
 from komaverse.config import settings
 from komaverse.db import get_session, session_factory
 from komaverse.db_models import (
+    AudioCueRow,
     ClipRow,
     ExportReportRow,
     FrameRow,
@@ -30,9 +31,11 @@ from komaverse.db_models import (
     PageRow,
     PanelRow,
     SceneRow,
+    SequenceRow,
+    SubtitleTrackRow,
     UserRow,
 )
-from komaverse.models import Clip, DrawFrame, ExportReport, Job, Scene, uuid_short
+from komaverse.models import Clip, DrawFrame, ExportReport, Job, Scene, Sequence, uuid_short
 from komaverse.observability import metrics
 from komaverse.renderer import MAX_TOTAL_SEC, composite_frame_image, render_project
 
@@ -136,6 +139,7 @@ class FrameCreate(BaseModel):
     name: str = ""
     width: int = 1920
     height: int = 1080
+    sequence_id: str | None = None
 
 
 class LayerPut(BaseModel):
@@ -161,6 +165,7 @@ class ExportRequest(BaseModel):
     width: int | None = None
     height: int | None = None
     include_audio: bool = True
+    scene_id: str | None = None
 
 
 def _get_scene(session: Session, user: UserRow, scene_id: str) -> SceneRow:
@@ -253,6 +258,68 @@ def patch_scene(
     return row.to_schema()
 
 
+@router.post("/scenes/{scene_id}/duplicate", response_model=Scene, status_code=201)
+def duplicate_scene(
+    scene_id: str,
+    session: Session = Depends(get_session),
+    user: UserRow = Depends(get_current_user),
+):
+    """Copy a timeline (clips, cues, subtitles) for an alternate cut."""
+    row = _get_scene(session, user, scene_id)
+    project = own_project(session, user, row.project_id)
+    existing = session.execute(
+        select(SceneRow).where(SceneRow.project_id == project.id)
+    )
+    copy = SceneRow(
+        project_id=project.id,
+        name=f"{row.name} copy"[:200] if row.name else "copy",
+        order=len(existing.scalars().all()),
+    )
+    session.add(copy)
+    session.flush()
+    for clip in sorted(row.clips, key=lambda c: c.order):
+        session.add(
+            ClipRow(
+                scene_id=copy.id,
+                kind=clip.kind,
+                source_id=clip.source_id,
+                start=clip.start,
+                duration=clip.duration,
+                motion=clip.motion,
+                order=clip.order,
+            )
+        )
+    for cue in row.cues:
+        session.add(
+            AudioCueRow(
+                scene_id=copy.id,
+                audio_id=cue.audio_id,
+                start_sec=cue.start_sec,
+                offset_sec=cue.offset_sec,
+                end_sec=cue.end_sec,
+                lane=cue.lane,
+                volume=cue.volume,
+                fade_in=cue.fade_in,
+                fade_out=cue.fade_out,
+            )
+        )
+    session.flush()
+    old_track = session.execute(
+        select(SubtitleTrackRow).where(SubtitleTrackRow.scene_id == row.id)
+    ).scalars().first()
+    if old_track is not None:
+        try:
+            data = storage.resolve(old_track.file_path).read_bytes()
+            rel, _url = storage.save_upload(project.id, "subtitles.srt", data)
+            session.add(
+                SubtitleTrackRow(scene_id=copy.id, lang=old_track.lang, file_path=rel)
+            )
+        except OSError:
+            logger.warning("subtitle copy failed for scene %s", row.id)
+    session.commit()
+    return copy.to_schema()
+
+
 @router.delete("/scenes/{scene_id}", status_code=204)
 def delete_scene(
     scene_id: str,
@@ -262,6 +329,246 @@ def delete_scene(
     row = _get_scene(session, user, scene_id)
     session.delete(row)
     session.commit()
+
+
+class SequenceCreate(BaseModel):
+    name: str = "Sequence"
+
+
+class SequencePatch(BaseModel):
+    name: str | None = None
+    order: int | None = None
+
+
+def _sequence_rows(session: Session, project_id: str) -> list[SequenceRow]:
+    return (
+        session.execute(
+            select(SequenceRow)
+            .where(SequenceRow.project_id == project_id)
+            .order_by(SequenceRow.index)
+        )
+        .scalars()
+        .all()
+    )
+
+
+def _frame_rows(session: Session, project_id: str) -> list[FrameRow]:
+    return (
+        session.execute(
+            select(FrameRow)
+            .where(FrameRow.project_id == project_id)
+            .order_by(FrameRow.index)
+        )
+        .scalars()
+        .all()
+    )
+
+
+def _adopt_orphans(session: Session, project, first: SequenceRow) -> None:
+    """Attach sequence-less frames to the given sequence, keeping order."""
+    orphans = [f for f in _frame_rows(session, project.id) if f.sequence_id is None]
+    if not orphans:
+        return
+    base = max([f.index for f in first.frames], default=-1) + 1
+    for i, f in enumerate(sorted(orphans, key=lambda f: f.index)):
+        f.sequence_id = first.id
+        f.index = base + i
+    session.flush()
+
+
+def ensure_project_sequences(session: Session, project) -> list[SequenceRow]:
+    """Auto-group legacy frames: every project ends up with ≥1 sequence.
+
+    Projects created before sequences get a single "Sequence 1" holding
+    their frames in flipbook order; orphan frames (no sequence) join the
+    first sequence. Returns the sequences in order.
+    """
+    seqs = list(_sequence_rows(session, project.id))
+    if not seqs:
+        seqs = [
+            SequenceRow(project_id=project.id, name="Sequence 1", index=0)
+        ]
+        session.add(seqs[0])
+        session.flush()
+    _adopt_orphans(session, project, seqs[0])
+    return seqs
+
+
+def _get_sequence(session: Session, user: UserRow, sequence_id: str) -> SequenceRow:
+    row = session.get(SequenceRow, sequence_id)
+    if row is None:
+        raise HTTPException(404, "sequence not found")
+    ensure_owner(session, user, row.project_id)
+    return row
+
+
+def _resolve_sequence(
+    session: Session, user: UserRow, project_id: str, sequence=None
+) -> SequenceRow:
+    """SequenceRow by @sequence: mention, id, or name (first sequence fallback)."""
+    project = own_project(session, user, project_id)
+    seqs = ensure_project_sequences(session, project)
+    ref = str(sequence or "").strip()
+    m = re.search(r"@sequence:([A-Za-z0-9_-]+)", ref)
+    if m:
+        ref = m.group(1)
+    for s in seqs:
+        if s.id == ref:
+            return s
+    lowered = ref.lower()
+    for s in seqs:
+        if (s.name or "").lower() == lowered:
+            return s
+    if not ref:
+        return seqs[0]
+    if len(seqs) == 1:
+        return seqs[0]
+    names = "; ".join(f"'{s.name}' [sequence {s.id}]" for s in seqs)
+    raise HTTPException(400, f"Unknown sequence '{sequence}'. Sequences: {names}.")
+
+
+def _next_frame_index(session: Session, sequence_id: str) -> int:
+    top = session.execute(
+        select(FrameRow.index)
+        .where(FrameRow.sequence_id == sequence_id)
+        .order_by(FrameRow.index.desc())
+        .limit(1)
+    ).scalars().first()
+    return (top + 1) if top is not None else 0
+
+
+@router.post("/projects/{project_id}/sequences", response_model=Sequence, status_code=201)
+def create_sequence(
+    project_id: str,
+    body: SequenceCreate,
+    session: Session = Depends(get_session),
+    user: UserRow = Depends(get_current_user),
+):
+    project = own_project(session, user, project_id)
+    seqs = list(_sequence_rows(session, project.id))
+    row = SequenceRow(
+        project_id=project.id,
+        name=(body.name or "Sequence").strip()[:200] or "Sequence",
+        index=len(seqs),
+    )
+    session.add(row)
+    session.flush()
+    if not seqs:
+        # First sequence adopts any pre-sequence frames.
+        _adopt_orphans(session, project, row)
+    session.commit()
+    return row.to_schema()
+
+
+@router.get("/projects/{project_id}/sequences", response_model=list[Sequence])
+def list_sequences(
+    project_id: str,
+    session: Session = Depends(get_session),
+    user: UserRow = Depends(get_current_user),
+):
+    project = own_project(session, user, project_id)
+    return [s.to_schema() for s in _sequence_rows(session, project.id)]
+
+
+@router.patch("/sequences/{sequence_id}", response_model=Sequence)
+def patch_sequence(
+    sequence_id: str,
+    body: SequencePatch,
+    session: Session = Depends(get_session),
+    user: UserRow = Depends(get_current_user),
+):
+    row = _get_sequence(session, user, sequence_id)
+    if body.name is not None and body.name.strip():
+        row.name = body.name.strip()[:200]
+    if body.order is not None:
+        row.index = body.order
+    session.commit()
+    return row.to_schema()
+
+
+@router.delete("/sequences/{sequence_id}", status_code=204)
+def delete_sequence(
+    sequence_id: str,
+    session: Session = Depends(get_session),
+    user: UserRow = Depends(get_current_user),
+):
+    row = _get_sequence(session, user, sequence_id)
+    refs = session.execute(
+        select(ClipRow).where(
+            ClipRow.kind == "frame",
+            ClipRow.source_id.in_([f.id for f in row.frames]),
+        )
+    ).scalars().all()
+    if refs and row.frames:
+        raise HTTPException(
+            409,
+            f"sequence is used by {len(refs)} clip(s); remove them first",
+        )
+    session.delete(row)  # frames + layers cascade via delete-orphan
+    session.commit()
+
+
+@router.post("/sequences/{sequence_id}/duplicate", response_model=Sequence, status_code=201)
+def duplicate_sequence(
+    sequence_id: str,
+    session: Session = Depends(get_session),
+    user: UserRow = Depends(get_current_user),
+):
+    row = _get_sequence(session, user, sequence_id)
+    project = own_project(session, user, row.project_id)
+    seqs = ensure_project_sequences(session, project)
+    copy = SequenceRow(
+        project_id=row.project_id,
+        name=f"{row.name} copy"[:200] if row.name else "copy",
+        index=len(seqs),
+    )
+    session.add(copy)
+    session.flush()
+    for frame in sorted(row.frames, key=lambda f: f.index):
+        frame_copy = FrameRow(
+            project_id=row.project_id,
+            sequence_id=copy.id,
+            name=frame.name,
+            index=frame.index,
+            width=frame.width,
+            height=frame.height,
+        )
+        session.add(frame_copy)
+        session.flush()
+        for layer in sorted(frame.layers, key=lambda l: l.layer_order):
+            session.add(
+                LayerRow(
+                    frame_id=frame_copy.id,
+                    name=layer.name,
+                    opacity=layer.opacity,
+                    visible=layer.visible,
+                    locked=layer.locked,
+                    blend_mode=layer.blend_mode,
+                    layer_order=layer.layer_order,
+                    data_url=layer.data_url,
+                )
+            )
+    session.commit()
+    session.refresh(copy, ["frames"])
+    return copy.to_schema()
+
+
+@router.patch("/sequences/{sequence_id}/frames/order", response_model=list[DrawFrame])
+def order_sequence_frames(
+    sequence_id: str,
+    body: FrameOrder,
+    session: Session = Depends(get_session),
+    user: UserRow = Depends(get_current_user),
+):
+    """Replace one sequence's frame order with the given id list (exact set)."""
+    row = _get_sequence(session, user, sequence_id)
+    by_id = {f.id: f for f in row.frames}
+    if set(body.frame_ids) != set(by_id) or len(body.frame_ids) != len(by_id):
+        raise HTTPException(400, "frame_ids must list exactly the sequence's frames")
+    for index, frame_id in enumerate(body.frame_ids):
+        by_id[frame_id].index = index
+    session.commit()
+    return [by_id[fid].to_schema() for fid in body.frame_ids]
 
 
 @router.post("/scenes/{scene_id}/clips", response_model=Clip, status_code=201)
@@ -405,13 +712,12 @@ def create_frame(
 ):
     _check_dims(body.width, body.height)
     project = own_project(session, user, project_id)
-    existing = session.execute(
-        select(FrameRow).where(FrameRow.project_id == project.id)
-    )
+    seq = _resolve_sequence(session, user, project.id, body.sequence_id)
     row = FrameRow(
         project_id=project.id,
+        sequence_id=seq.id,
         name=body.name,
-        index=len(existing.scalars().all()),
+        index=_next_frame_index(session, seq.id),
         width=body.width,
         height=body.height,
     )
@@ -427,14 +733,31 @@ def order_frames(
     session: Session = Depends(get_session),
     user: UserRow = Depends(get_current_user),
 ):
-    """Replace the project's frame order with the given id list (exact set)."""
+    """Replace one sequence's frame order with the given id list (exact set).
+
+    Legacy project-wide route: the ids must all belong to a single
+    sequence and match it exactly (single-sequence projects behave as
+    before). Prefer PATCH /sequences/{id}/frames/order.
+    """
     project = own_project(session, user, project_id)
     current = session.execute(
         select(FrameRow).where(FrameRow.project_id == project.id)
     ).scalars().all()
     by_id = {f.id: f for f in current}
+    if len({f.sequence_id for f in current}) > 1:
+        raise HTTPException(400, "frame_ids span several sequences — order frames within one sequence")
     if set(body.frame_ids) != set(by_id) or len(body.frame_ids) != len(by_id):
-        raise HTTPException(400, "frame_ids must list exactly the project's frames")
+        seq_ids = {by_id[fid].sequence_id for fid in body.frame_ids if fid in by_id}
+        if len(seq_ids) == 1:
+            seq_id = next(iter(seq_ids))
+            seq_frames = [f for f in current if f.sequence_id == seq_id]
+            seq_by_id = {f.id: f for f in seq_frames}
+            if set(body.frame_ids) == set(seq_by_id) and len(body.frame_ids) == len(seq_by_id):
+                for index, frame_id in enumerate(body.frame_ids):
+                    seq_by_id[frame_id].index = index
+                session.commit()
+                return [seq_by_id[fid].to_schema() for fid in body.frame_ids]
+        raise HTTPException(400, "frame_ids must list exactly the sequence's frames")
     for index, frame_id in enumerate(body.frame_ids):
         by_id[frame_id].index = index
     session.commit()
@@ -542,13 +865,15 @@ def duplicate_frame(
     if row is None:
         raise HTTPException(404, "frame not found")
     ensure_owner(session, user, row.project_id)
-    existing = session.execute(
-        select(FrameRow).where(FrameRow.project_id == row.project_id)
-    )
+    if row.sequence_id is None:
+        project = own_project(session, user, row.project_id)
+        row.sequence_id = ensure_project_sequences(session, project)[0].id
+        session.flush()
     copy = FrameRow(
         project_id=row.project_id,
+        sequence_id=row.sequence_id,
         name=f"{row.name} copy" if row.name else "copy",
-        index=len(existing.scalars().all()),
+        index=_next_frame_index(session, row.sequence_id),
         width=row.width,
         height=row.height,
     )
@@ -699,6 +1024,7 @@ def frame_from_media_source(
     project_id: str,
     source,
     name: str | None = None,
+    sequence=None,
 ) -> DrawFrame:
     """Create a draw frame from a scan page, panel, generation, or frame.
 
@@ -724,7 +1050,12 @@ def frame_from_media_source(
     mime = "image/jpeg" if fmt in ("JPEG", "JPG") else "image/png"
     schema = create_frame(
         project_id,
-        FrameCreate(name=(name or f"Media: {label}")[:200], width=w, height=h),
+        FrameCreate(
+            name=(name or f"Media: {label}")[:200],
+            width=w,
+            height=h,
+            sequence_id=str(sequence) if sequence else None,
+        ),
         session,
         user,
     )
@@ -745,6 +1076,7 @@ def frame_from_media_source(
 class FrameFromMedia(BaseModel):
     source: str = ""  # @media:/@gen:/@frame:/@panel: id, or 'page N'
     name: str | None = None
+    sequence_id: str | None = None
 
 
 @router.post(
@@ -759,7 +1091,9 @@ def frame_from_media(
     user: UserRow = Depends(get_current_user),
 ):
     """Manual framing: the UI twin of the agent's frame-from-media tool."""
-    return frame_from_media_source(session, user, project_id, body.source, body.name)
+    return frame_from_media_source(
+        session, user, project_id, body.source, body.name, body.sequence_id
+    )
 
 
 @router.get("/frames/{frame_id}/thumbnail")
@@ -795,7 +1129,20 @@ def export_project(
     """Queue an MP4 render (SPEC §Export). Poll GET /ai/jobs/{id}, then read
     GET /exports/{id} for the report (warnings, actual duration, download)."""
     project = own_project(session, user, project_id)
-    clips = [c for s in project.scenes for c in s.clips]
+    if body.scene_id:
+        scene = _get_scene(session, user, body.scene_id)
+        if scene.project_id != project.id:
+            raise HTTPException(400, "scene belongs to another project")
+        scenes = [scene]
+    else:
+        scenes = [s for s in project.scenes if s.clips]
+        if len(scenes) > 1:
+            names = "; ".join(f"'{s.name}' [scene {s.id}]" for s in scenes)
+            raise HTTPException(
+                400,
+                f"Which timeline? The project has {len(scenes)} timelines with clips — pick one: {names}.",
+            )
+    clips = [c for s in scenes for c in s.clips]
     total = sum(c.duration for c in clips)
     if not clips or total <= 0:
         raise HTTPException(400, "nothing to render: add clips first")
@@ -811,6 +1158,7 @@ def export_project(
                 "width": body.width,
                 "height": body.height,
                 "include_audio": body.include_audio,
+                "scene_id": body.scene_id,
             }
         ),
         provider="local",
@@ -856,6 +1204,7 @@ def run_export_job(job_id: str, factory=None) -> None:
                 params.get("height"),
                 include_audio=params.get("include_audio", True),
                 on_progress=on_progress,
+                scene_id=params.get("scene_id"),
             )
         except ValueError as exc:
             job.status = "failed"

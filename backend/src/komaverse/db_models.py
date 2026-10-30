@@ -73,6 +73,12 @@ class ProjectRow(Base):
         order_by="SceneRow.order",
         lazy="selectin",
     )
+    sequences: Mapped[list[SequenceRow]] = relationship(
+        back_populates="project",
+        cascade="all, delete-orphan",
+        order_by="SequenceRow.index",
+        lazy="selectin",
+    )
     frames: Mapped[list[FrameRow]] = relationship(
         back_populates="project",
         cascade="all, delete-orphan",
@@ -97,7 +103,44 @@ class ProjectRow(Base):
             pages=[p.to_schema() for p in self.pages],
             scenes=[s.to_schema() for s in self.scenes],
             frames=[f.to_schema() for f in self.frames],
+            sequences=[s.to_schema() for s in self.sequences],
             audios=[a.to_schema() for a in self.audios],
+        )
+
+
+class SequenceRow(Base):
+    __tablename__ = "sequences"
+
+    id: Mapped[str] = mapped_column(String(12), primary_key=True, default=uuid_short)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id"), index=True)
+    name: Mapped[str] = mapped_column(String(200), default="Sequence")
+    index: Mapped[int] = mapped_column(default=0)
+
+    project: Mapped[ProjectRow] = relationship(back_populates="sequences")
+    frames: Mapped[list[FrameRow]] = relationship(
+        back_populates="sequence",
+        cascade="all, delete-orphan",
+        order_by="FrameRow.index",
+        lazy="selectin",
+    )
+
+    def to_schema(self) -> schemas.Sequence:
+        return schemas.Sequence(
+            id=self.id,
+            project_id=self.project_id,
+            name=self.name,
+            index=self.index,
+            frames=[
+                schemas.SequenceFrame(
+                    id=f.id,
+                    name=f.name,
+                    width=f.width,
+                    height=f.height,
+                    index=f.index,
+                    layer_count=len(f.layers),
+                )
+                for f in sorted(self.frames, key=lambda f: f.index)
+            ],
         )
 
 
@@ -312,12 +355,16 @@ class FrameRow(Base):
 
     id: Mapped[str] = mapped_column(String(12), primary_key=True, default=uuid_short)
     project_id: Mapped[str] = mapped_column(ForeignKey("projects.id"), index=True)
+    sequence_id: Mapped[str | None] = mapped_column(
+        ForeignKey("sequences.id"), index=True, nullable=True, default=None
+    )
     name: Mapped[str] = mapped_column(String(200), default="")
     index: Mapped[int] = mapped_column(default=0)
     width: Mapped[int] = mapped_column(default=1920)
     height: Mapped[int] = mapped_column(default=1080)
 
     project: Mapped[ProjectRow] = relationship(back_populates="frames")
+    sequence: Mapped[SequenceRow | None] = relationship(back_populates="frames")
     layers: Mapped[list[LayerRow]] = relationship(
         back_populates="frame",
         cascade="all, delete-orphan",
@@ -332,6 +379,7 @@ class FrameRow(Base):
             width=self.width,
             height=self.height,
             layers=[layer.to_schema() for layer in self.layers],
+            sequence_id=self.sequence_id,
         )
 
 

@@ -263,6 +263,7 @@ def render_project(
     height: int | None = None,
     include_audio: bool = True,
     on_progress=None,
+    scene_id: str | None = None,
 ) -> dict:
     project = session.get(ProjectRow, project_id)
     if project is None:
@@ -279,6 +280,10 @@ def render_project(
         warnings.append(f"height {height} coerced to {h} (even)")
 
     scenes = sorted(project.scenes, key=lambda s: s.order)
+    if scene_id is not None:
+        scenes = [s for s in scenes if s.id == scene_id]
+        if not scenes:
+            raise ValueError("timeline not found in this project")
     clips: list[ClipRow] = []
     scene_starts: dict[str, float] = {}
     offset = 0.0

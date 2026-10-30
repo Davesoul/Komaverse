@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { api, mediaUrl, type DrawFrame, type Page, type Project } from "../api";
+import { api, mediaUrl, type DrawFrame, type Page, type Project, type Sequence } from "../api";
 import {
   Btn,
   ChapterHeader,
@@ -20,7 +20,7 @@ import {
   type SerializedLayer,
   type ToolId,
 } from "../lib/draw/engine";
-import { getCurrentProject, getDrawFrame, setCurrentProject, setDrawFrame } from "../lib/studio";
+import { getCurrentProject, getCurrentSequence, getDrawFrame, setCurrentProject, setCurrentSequence, setDrawFrame } from "../lib/studio";
 import {
   BRUSH_PRESETS,
   paintStroke,
@@ -236,6 +236,9 @@ export default function DrawPage() {
   const [projects, setProjects] = useState<Project[]>([]);
   const [projectId, setProjectId] = useState("");
   const [frames, setFrames] = useState<DrawFrame[]>([]);
+  const [sequences, setSequences] = useState<Sequence[]>([]);
+  const [sequenceId, setSequenceIdState] = useState("");
+  const sequenceIdRef = useRef("");
   const [frameId, setFrameId] = useState("");
   const [framesReady, setFramesReady] = useState(false);
   const [layers, setLayers] = useState<EngineLayerInfo[]>([]);
@@ -302,6 +305,16 @@ export default function DrawPage() {
   liveRef.current = live;
   const frameIdRef = useRef(frameId);
   frameIdRef.current = frameId;
+  sequenceIdRef.current = sequenceId;
+  // Frames of the current sequence, in flipbook order. Frames with no
+  // sequence (pre-sequence projects) read as the first sequence, matching
+  // the backend's orphan adoption.
+  const seqFrames = useMemo(() => {
+    const first = sequences[0]?.id;
+    return frames
+      .filter((f) => f.sequence_id === sequenceId || (f.sequence_id == null && sequenceId === first))
+      .sort((a, b) => a.index - b.index);
+  }, [frames, sequenceId, sequences]);
   const zoomRef = useRef(zoom);
   zoomRef.current = zoom;
   const stashRef = useRef(new Map<string, SerializedLayer[]>());
@@ -433,27 +446,42 @@ export default function DrawPage() {
     if (!projectId) return;
     setCurrentProject(projectId);
     setFramesReady(false);
-    api
-      .listFrames(projectId)
-      .then((fs) => {
+    void (async () => {
+      try {
+        const [seqs, fs] = await Promise.all([
+          api.listSequences(projectId),
+          api.listFrames(projectId),
+        ]);
+        setSequences(seqs);
+        // Restore the last-open sequence when it still exists.
+        const storedSeq = getCurrentSequence(projectId);
+        const sid =
+          (storedSeq && seqs.some((s) => s.id === storedSeq) ? storedSeq : seqs[0]?.id) ?? "";
+        sequenceIdRef.current = sid;
+        setSequenceIdState(sid);
+        if (sid) setCurrentSequence(projectId, sid);
         setFrames(fs);
         setFramesReady(true);
         // Open the tab with a frame ready: restore the last-open frame when
-        // it still exists, otherwise open the first frame.
+        // it still exists in this sequence, otherwise open the first frame.
         if (!frameIdRef.current) {
+          const first = seqs[0]?.id;
+          const inSeq = fs.filter(
+            (f) => f.sequence_id === sid || (f.sequence_id == null && sid === first),
+          );
           const stored = getDrawFrame(projectId);
           const pick =
-            stored && fs.some((f) => f.id === stored) ? stored : fs[0]?.id;
+            stored && inSeq.some((f) => f.id === stored) ? stored : inSeq[0]?.id;
           if (pick) {
             setDrawFrame(projectId, pick);
             setFrameId(pick);
           }
         }
-      })
-      .catch((e) => {
-        setNotice(e.message);
+      } catch (e) {
+        setNotice((e as Error).message);
         setFramesReady(true);
-      });
+      }
+    })();
   }, [projectId]);
 
   // Engine init per frame; prefers the unsaved stash over server layers.
@@ -719,18 +747,81 @@ export default function DrawPage() {
     if (engine && prev && saveStateRef.current.dirty) {
       stashRef.current.set(prev, engine.serialize());
     }
+    // Frames opened from another sequence (agent, Media) switch the
+    // sequence instead of stranding the strip.
+    const target = frames.find((f) => f.id === id);
+    if (target?.sequence_id && target.sequence_id !== sequenceIdRef.current) {
+      sequenceIdRef.current = target.sequence_id;
+      setSequenceIdState(target.sequence_id);
+      setCurrentSequence(projectId, target.sequence_id);
+    }
     setNotice("");
     setDrawFrame(projectId, id);
     setFrameId(id);
   };
 
+  const pickSequence = (sid: string, openId?: string) => {
+    stopPlayback();
+    const engine = engineRef.current;
+    const prev = frameIdRef.current;
+    if (engine && prev && saveStateRef.current.dirty) {
+      stashRef.current.set(prev, engine.serialize());
+    }
+    sequenceIdRef.current = sid;
+    setSequenceIdState(sid);
+    if (projectId) setCurrentSequence(projectId, sid);
+    setNotice("");
+    if (openId !== undefined) {
+      setDrawFrame(projectId, openId);
+      setFrameId(openId);
+      return;
+    }
+    const first = sequences[0]?.id;
+    const list = frames.filter(
+      (f) => f.sequence_id === sid || (f.sequence_id == null && sid === first),
+    );
+    const stored = getDrawFrame(projectId);
+    const pick =
+      stored && list.some((f) => f.id === stored) ? stored : list[0]?.id ?? "";
+    setDrawFrame(projectId, pick || null);
+    setFrameId(pick);
+  };
+
+  const newSequence = async () => {
+    stopPlayback();
+    if (!projectId) return;
+    const engine = engineRef.current;
+    const prev = frameIdRef.current;
+    if (engine && prev && saveStateRef.current.dirty) {
+      stashRef.current.set(prev, engine.serialize());
+    }
+    try {
+      const seq = await api.createSequence(projectId, `Sequence ${sequences.length + 1}`);
+      setSequences((prevSeqs) => [...prevSeqs, seq]);
+      // Open the new sequence with a fresh first frame, like a new shot.
+      const frame = await api.createFrame(projectId, {
+        name: "Frame 1",
+        width: 960,
+        height: 540,
+        sequence_id: seq.id,
+      });
+      setFrames((prev) => [...prev, frame]);
+      pickSequence(seq.id, frame.id);
+      setNotice(`Switched to "${seq.name}".`);
+    } catch (e) {
+      setNotice(`New sequence failed: ${(e as Error).message}`);
+    }
+  };
+
   const newFrame = async () => {
     stopPlayback();
     if (!projectId) return;
+    const sid = sequenceIdRef.current;
     const frame = await api.createFrame(projectId, {
-      name: `Frame ${frames.length + 1}`,
+      name: `Frame ${seqFrames.length + 1}`,
       width: 960,
       height: 540,
+      sequence_id: sid || undefined,
     });
     setFrames((prev) => [...prev, frame]);
     setDrawFrame(projectId, frame.id);
@@ -745,8 +836,8 @@ export default function DrawPage() {
     try {
       await api.deleteFrame(f.id);
       stashRef.current.delete(f.id);
-      const remaining = frames.filter((x) => x.id !== f.id);
-      setFrames(remaining);
+      const remaining = seqFrames.filter((x) => x.id !== f.id);
+      setFrames((prev) => prev.filter((x) => x.id !== f.id));
       // Keep a frame open: fall back to the first remaining frame.
       const next = remaining[0]?.id ?? "";
       setDrawFrame(projectId, next || null);
@@ -771,20 +862,25 @@ export default function DrawPage() {
   // server-side; a failure re-lists to revert.
   const moveFrameTo = useCallback(
     async (dragId: string, overId: string | null, after: boolean) => {
-      if (!projectId) return;
-      if (!frames.some((f) => f.id === dragId)) return;
-      const ids = frames.map((f) => f.id).filter((id) => id !== dragId);
+      const sid = sequenceIdRef.current;
+      if (!projectId || !sid) return;
+      const list = seqFrames;
+      if (!list.some((f) => f.id === dragId)) return;
+      const ids = list.map((f) => f.id).filter((id) => id !== dragId);
       if (overId !== null && !ids.includes(overId)) return;
       const pos =
         overId === null ? ids.length : ids.indexOf(overId) + (after ? 1 : 0);
       const finalIds = [...ids.slice(0, pos), dragId, ...ids.slice(pos)];
-      const byId = new Map(frames.map((f) => [f.id, f]));
+      const byId = new Map(list.map((f) => [f.id, f]));
       const next = finalIds.map((id) => byId.get(id)!).filter(Boolean);
-      if (next.length !== frames.length) return;
-      setFrames(next);
+      if (next.length !== list.length) return;
+      setFrames((prev) => {
+        const others = prev.filter((f) => !byId.has(f.id));
+        return [...others, ...next];
+      });
       setDropHint(null);
       try {
-        await api.orderFrames(projectId, finalIds);
+        await api.orderSequenceFrames(sid, finalIds);
       } catch (e) {
         setNotice(`Reorder failed: ${(e as Error).message}`);
         try {
@@ -794,17 +890,18 @@ export default function DrawPage() {
         }
       }
     },
-    [frames, projectId],
+    [seqFrames, projectId, sequenceId],
   );
 
   const moveFrameStep = useCallback(
     (id: string, delta: -1 | 1) => {
-      const idx = frames.findIndex((f) => f.id === id);
+      const list = seqFrames;
+      const idx = list.findIndex((f) => f.id === id);
       if (idx < 0) return;
       if (delta < 0 && idx === 0) return;
-      if (delta > 0 && idx === frames.length - 1) return;
+      if (delta > 0 && idx === list.length - 1) return;
       // Post-removal array: inserting at idx+delta lands on that slot.
-      const ids = frames.map((f) => f.id).filter((x) => x !== id);
+      const ids = list.map((f) => f.id).filter((x) => x !== id);
       const pos = Math.max(0, Math.min(ids.length, idx + delta));
       void moveFrameTo(id, ids[pos] ?? null, false);
     },
@@ -863,10 +960,10 @@ export default function DrawPage() {
 
   const startPlayback = async () => {
     const engine = engineRef.current;
-    if (!engine || playingRef.current || frames.length === 0) return;
+    if (!engine || playingRef.current || seqFrames.length === 0) return;
     // Land the current strokes first so this frame plays fresh too.
     const saved = await save(true);
-    const list = saved ? frames.map((f) => (f.id === saved.id ? saved : f)) : frames;
+    const list = saved ? seqFrames.map((f) => (f.id === saved.id ? saved : f)) : seqFrames;
     if (list.length === 0) return;
     setFrames(list);
     let rendered: HTMLCanvasElement[];
@@ -916,7 +1013,7 @@ export default function DrawPage() {
       engine.setOnionSkins([], [], onionOpacityRef.current / 100, false);
       return;
     }
-    const idx = frames.findIndex((f) => f.id === frameIdRef.current);
+    const idx = seqFrames.findIndex((f) => f.id === frameIdRef.current);
     if (idx < 0) return;
     const gen = ++onionGenRef.current;
     const renderable = (f: DrawFrame) =>
@@ -930,8 +1027,8 @@ export default function DrawPage() {
     void (async () => {
       try {
         const [prev, next] = await Promise.all([
-          Promise.all(frames.slice(Math.max(0, idx - onionPrevN), idx).map(renderable)),
-          Promise.all(frames.slice(idx + 1, idx + 1 + onionNextN).map(renderable)),
+          Promise.all(seqFrames.slice(Math.max(0, idx - onionPrevN), idx).map(renderable)),
+          Promise.all(seqFrames.slice(idx + 1, idx + 1 + onionNextN).map(renderable)),
         ]);
         if (onionGenRef.current !== gen || playingRef.current) return;
         onionCacheRef.current = { prev, next };
@@ -941,7 +1038,7 @@ export default function DrawPage() {
       }
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [frameId, frames, onion, onionPrevN, onionNextN, playing, layers]);
+  }, [frameId, seqFrames, onion, onionPrevN, onionNextN, playing, layers]);
 
   // Opacity applies instantly without re-rendering the skins.
   useEffect(() => {
@@ -1503,7 +1600,7 @@ export default function DrawPage() {
       <div style={{ flex: 1, minWidth: 0, order: 1 }}>
         {!projectId ? (
           <EmptyState title="No project selected" hint="Pick a project, then open or create a frame to draw." />
-        ) : !framesReady || (!frame && frames.length > 0) ? (
+        ) : !framesReady || (!frame && seqFrames.length > 0) ? (
           <EmptyState title="Loading frames…" hint="Opening your last frame.">
             <Spinner />
           </EmptyState>
@@ -1621,8 +1718,24 @@ export default function DrawPage() {
 
             <div style={{ marginTop: 16 }}>
               <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
+                <SelectInput
+                  value={sequenceId}
+                  onChange={(e) => pickSequence(e.target.value)}
+                  title="Animation sequence — switch the shot you are drawing"
+                  aria-label="Animation sequence"
+                  style={{ maxWidth: 190 }}
+                >
+                  {sequences.map((s) => (
+                    <option key={s.id} value={s.id}>
+                      {s.name} ({frames.filter((f) => f.sequence_id === s.id || (f.sequence_id == null && sequences[0]?.id === s.id)).length})
+                    </option>
+                  ))}
+                </SelectInput>
+                <IconBtn onClick={newSequence} label="New animation sequence — a fresh shot in this project">
+                  ＋Seq
+                </IconBtn>
                 <div style={{ flex: 1, minWidth: 0 }}>
-                  <SectionTitle>Frames ({frames.length})</SectionTitle>
+                  <SectionTitle>Frames ({seqFrames.length})</SectionTitle>
                 </div>
                 <SelectInput
                   value={String(fps)}
@@ -1713,7 +1826,7 @@ export default function DrawPage() {
                   paddingBottom: 4,
                 }}
               >
-                {frames.map((f, i) => {
+                {seqFrames.map((f, i) => {
                   const selected = f.id === frameId;
                   const hinted = dropHint?.id === f.id;
                   return (

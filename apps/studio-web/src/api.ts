@@ -110,6 +110,24 @@ export interface DrawFrame {
   width: number;
   height: number;
   layers: DrawLayer[];
+  sequence_id: string | null;
+}
+
+export interface SequenceFrame {
+  id: string;
+  name: string;
+  width: number;
+  height: number;
+  index: number;
+  layer_count: number;
+}
+
+export interface Sequence {
+  id: string;
+  project_id: string;
+  name: string;
+  index: number;
+  frames: SequenceFrame[];
 }
 
 export interface ExportReport {
@@ -424,12 +442,38 @@ export const api = {
 
   listFrames: (projectId: string) =>
     req<DrawFrame[]>(`/api/v1/projects/${projectId}/frames`),
-  createFrame: (projectId: string, body: { name?: string; width?: number; height?: number }) =>
+  createFrame: (projectId: string, body: { name?: string; width?: number; height?: number; sequence_id?: string }) =>
     req<DrawFrame>(`/api/v1/projects/${projectId}/frames`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     }),
+  listSequences: (projectId: string) =>
+    req<Sequence[]>(`/api/v1/projects/${projectId}/sequences`),
+  createSequence: (projectId: string, name?: string) =>
+    req<Sequence>(`/api/v1/projects/${projectId}/sequences`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: name ?? "Sequence" }),
+    }),
+  patchSequence: (sequenceId: string, patch: { name?: string }) =>
+    req<Sequence>(`/api/v1/sequences/${sequenceId}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(patch),
+    }),
+  deleteSequence: (sequenceId: string) =>
+    req<void>(`/api/v1/sequences/${sequenceId}`, { method: "DELETE" }),
+  duplicateSequence: (sequenceId: string) =>
+    req<Sequence>(`/api/v1/sequences/${sequenceId}/duplicate`, { method: "POST" }),
+  orderSequenceFrames: (sequenceId: string, frameIds: string[]) =>
+    req<DrawFrame[]>(`/api/v1/sequences/${sequenceId}/frames/order`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ frame_ids: frameIds }),
+    }),
+  duplicateScene: (sceneId: string) =>
+    req<Scene>(`/api/v1/scenes/${sceneId}/duplicate`, { method: "POST" }),
   getFrame: (frameId: string) => req<DrawFrame>(`/api/v1/frames/${frameId}`),
   putFrame: (frameId: string, body: { layers: unknown[]; name?: string }) =>
     req<DrawFrame>(`/api/v1/frames/${frameId}`, {
@@ -454,7 +498,7 @@ export const api = {
 
   exportJob: (
     projectId: string,
-    body: { fps?: number; width?: number; height?: number; include_audio?: boolean },
+    body: { fps?: number; width?: number; height?: number; include_audio?: boolean; scene_id?: string },
   ) =>
     req<Job>(`/api/v1/projects/${projectId}/export`, {
       method: "POST",
@@ -508,11 +552,11 @@ export const api = {
     }),
   deleteTake: (audioId: string) =>
     req<void>(`/api/v1/audio/${audioId}`, { method: "DELETE" }),
-  frameFromMedia: (projectId: string, source: string, name?: string) =>
+  frameFromMedia: (projectId: string, source: string, name?: string, sequence_id?: string) =>
     req<DrawFrame>(`/api/v1/projects/${projectId}/frames/from-media`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ source, name }),
+      body: JSON.stringify({ source, name, sequence_id }),
     }),
   transcribeTake: (audioId: string) =>
     req<Transcript>(`/api/v1/audio/${audioId}/transcribe`, { method: "POST" }),

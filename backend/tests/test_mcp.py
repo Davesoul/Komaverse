@@ -119,6 +119,8 @@ def test_mcp_tools_list_covers_studio():
         "layer_from_media",
         "manage_frames",
         "manage_clips",
+        "manage_sequences",
+        "manage_timelines",
     } <= names
     for tool in TOOLS():
         assert tool["description"]
@@ -267,8 +269,21 @@ def test_mcp_draw_studio_tools(factory, user, uid):
     assert "screentone" in call(
         "tone_layer", {"project_id": pid, "frame": fid, "density": 0.3}
     )
-    listed = call("list_frames", {"project_id": pid})
+    assert "Created sequence 'Alt'" in call(
+        "manage_sequences", {"project_id": pid, "op": "add", "name": "Alt"}
+    )
+    assert "Moved" in call(
+        "manage_frames",
+        {"project_id": pid, "op": "move", "frame": fid, "target": "Alt"},
+    )
+    listed = call("list_frames", {"project_id": pid, "sequence": "Alt"})
     assert "MCP Frame" in listed and "ink" in listed
+    assert "Created timeline 'Recut'" in call(
+        "manage_timelines", {"project_id": pid, "op": "add", "name": "Recut"}
+    )
+    assert "Duplicated" in call(
+        "manage_timelines", {"project_id": pid, "op": "duplicate", "scene": "Recut"}
+    )
     assert "Timeline" in call("manage_clips", {"project_id": pid, "op": "list"})
     assert "Duplicated" in call(
         "manage_frames", {"project_id": pid, "op": "duplicate", "frame": fid}

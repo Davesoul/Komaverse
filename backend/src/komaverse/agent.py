@@ -47,16 +47,29 @@ from komaverse.api.animate import (
     frame_from_media_source,
     load_media_image,
     SceneCreate,
+    ScenePatch,
+    SequenceCreate,
+    SequencePatch,
+    _next_frame_index,
+    _resolve_sequence,
     add_clip,
     create_frame,
     create_scene,
+    create_sequence,
     delete_clip,
     delete_frame,
+    delete_scene,
+    delete_sequence,
     duplicate_frame,
+    duplicate_scene,
+    duplicate_sequence,
     list_scenes,
+    list_sequences,
     order_clips,
     order_frames,
     patch_clip,
+    patch_scene,
+    patch_sequence,
     run_export_job,
 )
 from komaverse.api.audio import CueCreate, add_cue, list_takes
@@ -184,7 +197,8 @@ CAPABILITIES = (
     "to the timeline\" once done), cue voice takes "
     "(\"put the take at 2s\"), frame scan pages (\"put page 1 on a frame\"), "
     "manage draw layers (\"add a tone layer\", \"hide the ink layer\"), "
-    "reorder frames and clips, "
+    "reorder frames and clips, run sequences (\"new sequence\") and "
+    "timelines (\"duplicate the timeline\"), "
     "and check on running jobs (\"check job abc123\")."
 )
 
@@ -230,10 +244,16 @@ def tool_create_project(session: Session, user: UserRow, name: str) -> str:
 
 
 def tool_create_frame(
-    session: Session, user: UserRow, project_id: str, name: str = ""
+    session: Session, user: UserRow, project_id: str, name: str = "", sequence=None
 ) -> str:
     schema = create_frame(
-        project_id, FrameCreate(name=name.strip() or "Untitled"), session, user
+        project_id,
+        FrameCreate(
+            name=name.strip() or "Untitled",
+            sequence_id=str(sequence) if sequence else None,
+        ),
+        session,
+        user,
     )
     return f"Created frame '{schema.name}' [frame {schema.id}] ({schema.width}x{schema.height})."
 
@@ -352,7 +372,8 @@ def tool_auto_direct(
 
 
 def tool_export(
-    session: Session, user: UserRow, project_id: str, job_factory=None, background: bool = False
+    session: Session, user: UserRow, project_id: str, job_factory=None, background: bool = False,
+    scene=None
 ) -> str:
     # Chat-driven exports respect the same 5/min bucket as POST /export.
     retry = limiter.check(f"chat-export:{user.id}", 5, 60)
@@ -363,12 +384,28 @@ def tool_export(
             headers={"Retry-After": str(int(retry) + 1)},
         )
     p = get_project(project_id, session, user)
-    clips = sum(len(s.clips) for s in p.scenes)
+    if scene is not None:
+        try:
+            target = _resolve_scene(session, user, project_id, scene)
+        except HTTPException as exc:
+            detail = str(exc.detail)
+            if detail.startswith("unknown scene"):
+                return f"Unknown timeline '{scene}'."
+            return detail
+        scenes = [target]
+    else:
+        scenes = [s for s in p.scenes if s.clips]
+        if len(scenes) > 1:
+            names = "; ".join(f"'{s.name}' [scene {s.id}]" for s in scenes)
+            return f"Which timeline? {names} — say 'export the NAME timeline'."
+    clips = sum(len(s.clips) for s in scenes)
     chained = ""
     if clips == 0:
         panels = sum(len(page.panels) for page in p.pages)
         if panels == 0:
             return "Nothing to export — upload and detect panels first."
+        if scene is not None:
+            return f"Timeline '{target.name}' has no clips yet — add clips first."
         tool_auto_direct(session, user, project_id)
         chained = "No clips, so I cut the timeline first. "
     job = JobRow(
@@ -381,6 +418,7 @@ def tool_export(
                 "width": p.canvas_width,
                 "height": p.canvas_height,
                 "include_audio": True,
+                "scene_id": scenes[0].id if len(scenes) == 1 else None,
             }
         ),
         provider="local",
@@ -987,10 +1025,12 @@ def tool_transcribe_audio(
     return f"Transcript of '{row.name or 'take'}' ({len(segs)} turns): {head}"
 
 
-def tool_frame_from_media(session, user, project_id, source, name=None):
+def tool_frame_from_media(session, user, project_id, source, name=None, sequence=None):
     """Draw frame from a scan page, panel, generation, or frame."""
     try:
-        schema = frame_from_media_source(session, user, project_id, source, name)
+        schema = frame_from_media_source(
+            session, user, project_id, source, name, sequence
+        )
     except HTTPException as exc:
         return str(exc.detail)
     return f"Created frame '{schema.name}' [frame {schema.id}]."
@@ -1013,11 +1053,19 @@ def _project_frames(session, user, project_id):
     )
 
 
-def _resolve_frame(session, user, project_id, frame):
+def _resolve_frame(session, user, project_id, frame, sequence=None):
     """FrameRow by @frame: mention, id, or name (single-frame shortcut)."""
     frames = _project_frames(session, user, project_id)
     if not frames:
         return "No draw frames yet - create one first ('new frame')."
+    if sequence:
+        try:
+            seq = _resolve_sequence(session, user, project_id, sequence)
+        except HTTPException as exc:
+            return str(exc.detail)
+        frames = [f for f in frames if f.sequence_id == seq.id]
+        if not frames:
+            return f"Sequence '{seq.name}' has no frames yet."
     ref = str(frame or "").strip()
     m = re.search(r"@frame:([A-Za-z0-9_-]+)", ref)
     if m:
@@ -1123,30 +1171,41 @@ def _layer_rgba(layer, width, height):
     return Image.new("RGBA", (width, height), (0, 0, 0, 0))
 
 
-def tool_list_frames(session, user, project_id) -> str:
+def tool_list_frames(session, user, project_id, sequence=None) -> str:
     # Fresh reads: this session may have cached relations from an
     # earlier tool call in the same turn.
     session.expire_all()
     frames = _project_frames(session, user, project_id)
     if not frames:
         return "No draw frames yet - create one first ('new frame')."
+    label = "Draw frames"
+    if sequence:
+        try:
+            seq = _resolve_sequence(session, user, project_id, sequence)
+        except HTTPException as exc:
+            return str(exc.detail)
+        frames = [f for f in frames if f.sequence_id == seq.id]
+        if not frames:
+            return f"Sequence '{seq.name}' has no frames yet."
+        label = f"Frames in '{seq.name}'"
     lines = [
         f"'{f.name or 'Untitled'}' [frame {f.id}] {f.width}x{f.height}, "
         f"{len(f.layers)} layers: {_layer_list(f)}"
         for f in frames
     ]
-    return f"Draw frames ({len(frames)}): " + " | ".join(lines)
+    return f"{label} ({len(frames)}): " + " | ".join(lines)
 
 
 def tool_manage_layers(
     session, user, project_id, frame, op="list", layer=None, name=None,
     opacity=None, visible=None, locked=None, blend=None, position=None,
+    sequence=None,
 ) -> str:
     """Draw-layer ops: list/add/rename/set/move/remove/duplicate/clear/merge."""
     # Fresh reads: this session may have cached relations from an
     # earlier tool call in the same turn.
     session.expire_all()
-    f = _resolve_frame(session, user, project_id, frame)
+    f = _resolve_frame(session, user, project_id, frame, sequence)
     if isinstance(f, str):
         return f
     op = str(op or "list").strip().lower()
@@ -1304,12 +1363,13 @@ def _parse_hex_color(value, default=(17, 17, 17)):
 def tool_tone_layer(
     session, user, project_id, frame, density=0.2, angle=20.0,
     color="#111111", opacity=100, blend="multiply", name=None,
+    sequence=None,
 ) -> str:
     """Add a manga screentone dot layer to a draw frame."""
     # Fresh reads: this session may have cached relations from an
     # earlier tool call in the same turn.
     session.expire_all()
-    f = _resolve_frame(session, user, project_id, frame)
+    f = _resolve_frame(session, user, project_id, frame, sequence)
     if isinstance(f, str):
         return f
     if len(f.layers) >= MAX_LAYERS:
@@ -1350,13 +1410,13 @@ def tool_tone_layer(
 
 def tool_layer_from_media(
     session, user, project_id, frame, source, name=None,
-    opacity=100, blend="normal",
+    opacity=100, blend="normal", sequence=None,
 ) -> str:
     # Fresh reads: this session may have cached relations from an
     # earlier tool call in the same turn.
     session.expire_all()
     """Drop a scan page, panel, generation, or frame onto a frame as a layer."""
-    f = _resolve_frame(session, user, project_id, frame)
+    f = _resolve_frame(session, user, project_id, frame, sequence)
     if isinstance(f, str):
         return f
     if len(f.layers) >= MAX_LAYERS:
@@ -1400,14 +1460,15 @@ def tool_layer_from_media(
 
 def tool_manage_frames(
     session, user, project_id, op, frame=None, name=None, frame_ids=None,
+    sequence=None, target=None,
 ) -> str:
     # Fresh reads: this session may have cached relations from an
     # earlier tool call in the same turn.
     session.expire_all()
-    """Flipbook ops: list, duplicate, delete, rename, reorder draw frames."""
+    """Flipbook ops: list, duplicate, delete, rename, reorder, move draw frames."""
     op = str(op or "list").strip().lower()
     if op == "list":
-        return tool_list_frames(session, user, project_id)
+        return tool_list_frames(session, user, project_id, sequence)
     if op == "reorder":
         raw = (
             list(frame_ids)
@@ -1438,9 +1499,22 @@ def tool_manage_frames(
         return "Reordered frames: " + ", ".join(
             f"'{f.name or 'Untitled'}'" for f in ordered
         ) + "."
-    f = _resolve_frame(session, user, project_id, frame)
+    f = _resolve_frame(session, user, project_id, frame, sequence)
     if isinstance(f, str):
         return f
+    if op == "move":
+        if not target:
+            return "Move needs a target sequence ('move it to Sequence 2')."
+        try:
+            dest = _resolve_sequence(session, user, project_id, target)
+        except HTTPException as exc:
+            return str(exc.detail)
+        if f.sequence_id == dest.id:
+            return f"'{f.name or 'Untitled'}' is already in '{dest.name}'."
+        f.sequence_id = dest.id
+        f.index = _next_frame_index(session, dest.id)
+        session.commit()
+        return f"Moved '{f.name or 'Untitled'}' to sequence '{dest.name}'."
     if op == "duplicate":
         copy = duplicate_frame(f.id, session, user)
         return f"Duplicated '{f.name or 'Untitled'}' as '{copy.name}' [frame {copy.id}]."
@@ -1543,6 +1617,101 @@ def tool_manage_clips(
     return (
         f"Unknown clip op '{op}'. Valid: list, remove, set, reorder."
     )
+
+
+def tool_manage_sequences(
+    session, user, project_id, op="list", sequence=None, name=None,
+) -> str:
+    """Animation-shot ops: list, add, rename, duplicate, delete sequences."""
+    # Fresh reads: this session may have cached relations from an
+    # earlier tool call in the same turn.
+    session.expire_all()
+    op = str(op or "list").strip().lower()
+    if op == "list":
+        seqs = list_sequences(project_id, session, user)
+        if not seqs:
+            return "No sequences yet - create one ('new sequence')."
+        lines = [
+            f"'{s.name}' [sequence {s.id}] ({len(s.frames)} frames)"
+            for s in seqs
+        ]
+        return f"Sequences ({len(seqs)}): " + " | ".join(lines)
+    if op == "add":
+        label = str(name or "").strip()
+        if not label:
+            label = f"Sequence {len(list_sequences(project_id, session, user)) + 1}"
+        schema = create_sequence(project_id, SequenceCreate(name=label), session, user)
+        return f"Created sequence '{schema.name}' [sequence {schema.id}]."
+    try:
+        seq = _resolve_sequence(session, user, project_id, sequence)
+    except HTTPException as exc:
+        return str(exc.detail)
+    if op == "rename":
+        if not str(name or "").strip():
+            return "Rename needs a name."
+        schema = patch_sequence(seq.id, SequencePatch(name=str(name).strip()), session, user)
+        return f"Renamed sequence to '{schema.name}'."
+    if op == "duplicate":
+        schema = duplicate_sequence(seq.id, session, user)
+        return (
+            f"Duplicated '{seq.name}' as '{schema.name}' "
+            f"[sequence {schema.id}] ({len(schema.frames)} frames)."
+        )
+    if op in ("delete", "remove"):
+        try:
+            delete_sequence(seq.id, session, user)
+        except HTTPException as exc:
+            return str(exc.detail)
+        return f"Deleted sequence '{seq.name}'."
+    return f"Unknown sequence op '{op}'. Valid: list, add, rename, duplicate, delete."
+
+
+def tool_manage_timelines(
+    session, user, project_id, op="list", scene=None, name=None,
+) -> str:
+    """Timeline ops: list, add, rename, duplicate, delete scenes."""
+    # Fresh reads: this session may have cached relations from an
+    # earlier tool call in the same turn.
+    session.expire_all()
+    op = str(op or "list").strip().lower()
+    if op == "list":
+        scenes = sorted(list_scenes(project_id, session, user), key=lambda s: s.order)
+        if not scenes:
+            return "No timelines yet - create one ('new timeline')."
+        lines = [
+            f"'{s.name}' [scene {s.id}] ({len(s.clips)} clips, {len(s.cues)} cues)"
+            for s in scenes
+        ]
+        return f"Timelines ({len(scenes)}): " + " | ".join(lines)
+    if op == "add":
+        label = str(name or "").strip()
+        if not label:
+            label = f"Timeline {len(list_scenes(project_id, session, user)) + 1}"
+        schema = create_scene(project_id, SceneCreate(name=label), session, user)
+        return f"Created timeline '{schema.name}' [scene {schema.id}]."
+    if not scene:
+        return "Which timeline? " + tool_manage_timelines(
+            session, user, project_id, "list"
+        )
+    try:
+        target = _resolve_scene(session, user, project_id, scene)
+    except HTTPException as exc:
+        return str(exc.detail)
+    if op == "rename":
+        if not str(name or "").strip():
+            return "Rename needs a name."
+        schema = patch_scene(target.id, ScenePatch(name=str(name).strip()), session, user)
+        return f"Renamed timeline to '{schema.name}'."
+    if op == "duplicate":
+        schema = duplicate_scene(target.id, session, user)
+        return (
+            f"Duplicated '{target.name}' as '{schema.name}' "
+            f"[scene {schema.id}] ({len(schema.clips)} clips)."
+        )
+    if op in ("delete", "remove"):
+        delete_scene(target.id, session, user)
+        return f"Deleted timeline '{target.name}'."
+    return f"Unknown timeline op '{op}'. Valid: list, add, rename, duplicate, delete."
 
 
 
@@ -1664,19 +1833,19 @@ def _demo_frame_turn(session, user, project_id, message):
     text = message.lower()
     quoted = _parse_quoted(message)
     if any(k in text for k in ("duplicate", "copy")):
-        return tool_manage_frames(session, user, project_id, "duplicate", message)
+        return tool_manage_frames(session, user, project_id, "duplicate", message, sequence=_demo_seq_ref(message))
     if any(k in text for k in ("delete", "remove")):
-        return tool_manage_frames(session, user, project_id, "delete", message)
+        return tool_manage_frames(session, user, project_id, "delete", message, sequence=_demo_seq_ref(message))
     if "rename" in text:
         m = re.search(r"\bto\s+([A-Za-z0-9 _-]+?)\s*$", message, re.IGNORECASE)
         new = quoted[-1] if quoted else (m.group(1).strip() if m else None)
-        return tool_manage_frames(session, user, project_id, "rename", message, new)
+        return tool_manage_frames(session, user, project_id, "rename", message, new, sequence=_demo_seq_ref(message))
     if "reorder" in text or ("order" in text and "frame" in text):
         ids = re.findall(r"\[frame ([A-Za-z0-9_-]+)\]", message)
         if not ids:
             return ("Say the new order with frame ids, e.g. 'reorder frames: "
                     "[frame abc], [frame def]' (see 'list frames').")
-        return tool_manage_frames(session, user, project_id, "reorder", frame_ids=ids)
+        return tool_manage_frames(session, user, project_id, "reorder", frame_ids=ids, sequence=_demo_seq_ref(message))
     return tool_list_frames(session, user, project_id)
 
 
@@ -1712,6 +1881,88 @@ def _demo_clip_turn(session, user, project_id, message):
         return tool_manage_clips(session, user, project_id, "set", clip=m.group(1),
                                  duration=secs, motion=(motions or [None])[0])
     return tool_manage_clips(session, user, project_id, "list")
+
+
+def _demo_seq_ref(message):
+    quoted = _parse_quoted(message)
+    if quoted:
+        return quoted[0]
+    m = re.search(
+        r"(?:in|to|on|of|called)\s+(?:the\s+)?sequence\s+([A-Za-z0-9 _-]+?)(?:\s*$)",
+        message,
+        re.IGNORECASE,
+    )
+    if m and m.group(1).strip():
+        return m.group(1).strip()
+    m = re.search(r"sequence\s+(\d+)", message, re.IGNORECASE)
+    if m:
+        return "Sequence " + m.group(1)
+    return None
+
+
+def _demo_sequence_turn(session, user, project_id, message):
+    """Demo-brain sequence control: verbs map to manage_sequences ops."""
+    text = message.lower()
+    if any(k in text for k in ("duplicate", "copy")):
+        return tool_manage_sequences(session, user, project_id, "duplicate", _demo_seq_ref(message))
+    if any(k in text for k in ("delete", "remove")):
+        return tool_manage_sequences(session, user, project_id, "delete", _demo_seq_ref(message))
+    if "rename" in text:
+        quoted = _parse_quoted(message)
+        m = re.search(r"\bto\s+([A-Za-z0-9 _-]+?)\s*$", message, re.IGNORECASE)
+        new = quoted[-1] if quoted else (m.group(1).strip() if m else None)
+        return tool_manage_sequences(session, user, project_id, "rename", _demo_seq_ref(message), new)
+    if any(k in text for k in ("new", "create", "add")):
+        quoted = _parse_quoted(message)
+        named = quoted[0] if quoted else None
+        if not named:
+            m = re.search(r"called\s+([A-Za-z0-9 _-]+?)(?:\s*$)", message, re.IGNORECASE)
+            named = m.group(1).strip() if m else None
+        return tool_manage_sequences(session, user, project_id, "add", None, named)
+    return tool_manage_sequences(session, user, project_id, "list")
+
+
+def _demo_scene_ref(message):
+    quoted = _parse_quoted(message)
+    if quoted:
+        return quoted[0]
+    m = re.search(
+        r"(?:the\s+)?([A-Za-z0-9 _-]+?)\s+timeline\b", message, re.IGNORECASE
+    )
+    if m and m.group(1).strip():
+        cand = m.group(1).strip()
+        cand = re.sub(
+            r"^(?:(?:duplicate|copy|delete|remove|rename|create|new|add|list|show|switch|open|the|a|an)\s+)+",
+            "", cand, flags=re.IGNORECASE,
+        ).strip()
+        return cand or None
+    return None
+
+
+def _demo_timeline_turn(session, user, project_id, message):
+    """Demo-brain timeline control: verbs map to manage_timelines ops."""
+    text = message.lower()
+    if any(k in text for k in ("duplicate", "copy")):
+        return tool_manage_timelines(session, user, project_id, "duplicate", _demo_scene_ref(message))
+    if any(k in text for k in ("delete", "remove")):
+        return tool_manage_timelines(session, user, project_id, "delete", _demo_scene_ref(message))
+    if "rename" in text:
+        quoted = _parse_quoted(message)
+        m = re.search(r"\bto\s+([A-Za-z0-9 _-]+?)\s*$", message, re.IGNORECASE)
+        new = quoted[-1] if quoted else (m.group(1).strip() if m else None)
+        return tool_manage_timelines(session, user, project_id, "rename", _demo_scene_ref(message), new)
+    if any(k in text for k in ("new", "create", "add")):
+        quoted = _parse_quoted(message)
+        named = quoted[0] if quoted else None
+        if not named:
+            m = re.search(r"called\s+([A-Za-z0-9 _-]+?)(?:\s*$)", message, re.IGNORECASE)
+            named = m.group(1).strip() if m else None
+        return tool_manage_timelines(session, user, project_id, "add", None, named)
+    if any(k in text for k in ("list", "show", "what", "switch", "open")):
+        return tool_manage_timelines(session, user, project_id, "list") + (
+            " Open the Render tab and pick it in Timelines — I can't switch your tab for you."
+        )
+    return tool_manage_timelines(session, user, project_id, "list")
 
 
 def demo_turn(
@@ -1850,6 +2101,10 @@ def demo_turn(
             reply = resolved
         else:
             reply = run("add_cue", tool_add_cue, session, user, project_id, resolved.id, _parse_scene_ref(message), parse_seconds(message) or 0.0)
+    elif "sequence" in text and any(k in text for k in ("new", "create", "add", "list", "show", "duplicate", "copy", "delete", "remove", "rename")):
+        reply = run("manage_sequences", _demo_sequence_turn, session, user, project_id, message)
+    elif "timeline" in text and any(k in text for k in ("new", "create", "duplicate", "copy", "delete", "remove", "rename", "list", "show", "switch", "open")) and not any(k in text for k in ("video", "take", "clip", "frame", "panel", "caption", "subtitle", "export")):
+        reply = run("manage_timelines", _demo_timeline_turn, session, user, project_id, message)
     elif any(k in text for k in ("animate", "timeline", "direct", "clips", "cut")):
         p = get_project(project_id, session, user)
         if sum(len(page.panels) for page in p.pages) == 0 and p.pages:
@@ -1965,10 +2220,13 @@ _TOOLS_SCHEMA = [
         "type": "function",
         "function": {
             "name": "create_frame",
-            "description": "Create a blank draw frame in the project.",
+            "description": "Create a blank draw frame in the project, optionally in one sequence.",
             "parameters": {
                 "type": "object",
-                "properties": {"name": {"type": "string"}},
+                "properties": {
+                    "name": {"type": "string"},
+                    "sequence": {"type": "string"},
+                },
             },
         },
     },
@@ -2046,8 +2304,11 @@ _TOOLS_SCHEMA = [
         "type": "function",
         "function": {
             "name": "export_video",
-            "description": "Render the timeline to MP4.",
-            "parameters": {"type": "object", "properties": {}},
+            "description": "Render one timeline to MP4 (default: the only timeline with clips).",
+            "parameters": {
+                "type": "object",
+                "properties": {"scene": {"type": "string"}},
+            },
         },
     },
     {
@@ -2141,6 +2402,7 @@ _TOOLS_SCHEMA = [
                 "properties": {
                     "source": {"type": "string"},
                     "name": {"type": "string"},
+                    "sequence": {"type": "string"},
                 },
             },
         },
@@ -2164,8 +2426,11 @@ _TOOLS_SCHEMA = [
         "type": "function",
         "function": {
             "name": "list_frames",
-            "description": "List the project's draw frames with their layers.",
-            "parameters": {"type": "object", "properties": {}},
+            "description": "List the project's draw frames with their layers, optionally one sequence.",
+            "parameters": {
+                "type": "object",
+                "properties": {"sequence": {"type": "string"}},
+            },
         },
     },
     {
@@ -2189,6 +2454,7 @@ _TOOLS_SCHEMA = [
                     "locked": {"type": "boolean"},
                     "blend": {"type": "string"},
                     "position": {"type": "number"},
+                    "sequence": {"type": "string"},
                 },
                 "required": ["frame", "op"],
             },
@@ -2212,6 +2478,7 @@ _TOOLS_SCHEMA = [
                     "opacity": {"type": "number"},
                     "blend": {"type": "string"},
                     "name": {"type": "string"},
+                    "sequence": {"type": "string"},
                 },
                 "required": ["frame"],
             },
@@ -2232,6 +2499,7 @@ _TOOLS_SCHEMA = [
                     "frame": {"type": "string"},
                     "source": {"type": "string"},
                     "name": {"type": "string"},
+                    "sequence": {"type": "string"},
                     "opacity": {"type": "number"},
                     "blend": {"type": "string"},
                 },
@@ -2254,6 +2522,8 @@ _TOOLS_SCHEMA = [
                     "frame": {"type": "string"},
                     "name": {"type": "string"},
                     "frame_ids": {"type": "array"},
+                    "sequence": {"type": "string"},
+                    "target": {"type": "string"},
                 },
                 "required": ["op"],
             },
@@ -2276,6 +2546,43 @@ _TOOLS_SCHEMA = [
                     "duration": {"type": "number"},
                     "motion": {"type": "string"},
                     "clip_ids": {"type": "array"},
+                },
+                "required": ["op"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "manage_sequences",
+            "description": (
+                "Animation-shot ops: list, add, rename, duplicate, delete "
+                "frame sequences."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "op": {"type": "string"},
+                    "sequence": {"type": "string"},
+                    "name": {"type": "string"},
+                },
+                "required": ["op"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "manage_timelines",
+            "description": (
+                "Timeline ops: list, add, rename, duplicate, delete scenes."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "op": {"type": "string"},
+                    "scene": {"type": "string"},
+                    "name": {"type": "string"},
                 },
                 "required": ["op"],
             },
@@ -2335,7 +2642,8 @@ def cloud_turn(
                     )
                 elif name == "create_frame":
                     result = tool_create_frame(
-                        session, user, project_id, str(args.get("name") or "")
+                        session, user, project_id, str(args.get("name") or ""),
+                        args.get("sequence"),
                     )
                 elif name == "detect_all":
                     result = tool_detect_all(
@@ -2359,7 +2667,10 @@ def cloud_turn(
                         session, user, project_id, seconds, motions
                     )
                 elif name == "export_video":
-                    result = tool_export(session, user, project_id, job_factory)
+                    result = tool_export(
+                        session, user, project_id, job_factory,
+                        scene=args.get("scene"),
+                    )
                 elif name == "add_clip":
                     kind = str(args.get("kind") or "")
                     source = str(args.get("source_id") or "")
@@ -2466,14 +2777,16 @@ def cloud_turn(
                     result = tool_frame_from_media(
                         session, user, project_id,
                         str(args.get("source") or message),
-                        args.get("name"),
+                        args.get("name"), args.get("sequence"),
                     )
                 elif name == "check_job":
                     result = tool_check_job(
                         session, user, str(args.get("job_id") or "")
                     )
                 elif name == "list_frames":
-                    result = tool_list_frames(session, user, project_id)
+                    result = tool_list_frames(
+                        session, user, project_id, args.get("sequence")
+                    )
                 elif name == "manage_layers":
                     result = tool_manage_layers(
                         session, user, project_id,
@@ -2481,7 +2794,7 @@ def cloud_turn(
                         args.get("layer"), args.get("name"),
                         args.get("opacity"), args.get("visible"),
                         args.get("locked"), args.get("blend"),
-                        args.get("position"),
+                        args.get("position"), args.get("sequence"),
                     )
                 elif name == "tone_layer":
                     result = tool_tone_layer(
@@ -2490,18 +2803,20 @@ def cloud_turn(
                         args.get("color", "#111111"),
                         args.get("opacity", 100),
                         args.get("blend", "multiply"), args.get("name"),
+                        args.get("sequence"),
                     )
                 elif name == "layer_from_media":
                     result = tool_layer_from_media(
                         session, user, project_id, args.get("frame"),
                         str(args.get("source") or message),
                         args.get("name"), args.get("opacity", 100),
-                        args.get("blend", "normal"),
+                        args.get("blend", "normal"), args.get("sequence"),
                     )
                 elif name == "manage_frames":
                     result = tool_manage_frames(
                         session, user, project_id, str(args.get("op") or "list"),
                         args.get("frame"), args.get("name"), args.get("frame_ids"),
+                        args.get("sequence"), args.get("target"),
                     )
                 elif name == "manage_clips":
                     result = tool_manage_clips(
@@ -2509,6 +2824,16 @@ def cloud_turn(
                         args.get("clip"), args.get("scene"),
                         args.get("duration"), args.get("motion"),
                         args.get("clip_ids"),
+                    )
+                elif name == "manage_sequences":
+                    result = tool_manage_sequences(
+                        session, user, project_id, str(args.get("op") or "list"),
+                        args.get("sequence"), args.get("name"),
+                    )
+                elif name == "manage_timelines":
+                    result = tool_manage_timelines(
+                        session, user, project_id, str(args.get("op") or "list"),
+                        args.get("scene"), args.get("name"),
                     )
                 else:
                     result = f"unknown tool: {name}"

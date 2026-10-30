@@ -490,6 +490,7 @@ export default function RenderPage() {
         width: Number(expW) || 1280,
         height: Number(expH) || 720,
         include_audio: includeAudio,
+        scene_id: scene.id,
       });
       setExporting({ jobId: job.id, progress: 0 });
       let finished = false;
@@ -735,15 +736,15 @@ export default function RenderPage() {
 
         {project && (
           <div>
-            <SectionTitle>Scenes ({scenes.length})</SectionTitle>
+            <SectionTitle>Timelines ({scenes.length})</SectionTitle>
             <SelectInput
               style={{ width: "100%", marginBottom: 8 }}
               value={sceneId}
               onChange={(e) => setSceneId(e.target.value)}
-              aria-label="Active scene"
+              aria-label="Active timeline"
             >
               {scenes.map((s) => (
-                <option key={s.id} value={s.id}>{s.name}</option>
+                <option key={s.id} value={s.id}>{s.name} ({s.clips.length})</option>
               ))}
             </SelectInput>
             {renamingScene === sceneId && scene ? (
@@ -780,6 +781,18 @@ export default function RenderPage() {
                 </Btn>
                 <Btn small disabled={!scene} onClick={() => setRenamingScene(sceneId)}>
                   Rename
+                </Btn>
+                <Btn
+                  small
+                  disabled={!scene}
+                  title="Copy this timeline with all its clips, cues, and subtitles"
+                  onClick={async () => {
+                    if (!project || !scene) return;
+                    const copy = await api.duplicateScene(scene.id);
+                    await refresh(project.id, copy.id);
+                  }}
+                >
+                  Duplicate
                 </Btn>
                 <IconBtn disabled={!scene} label="Move scene earlier" onClick={() => moveScene(-1)}>↑</IconBtn>
                 <IconBtn disabled={!scene} label="Move scene later" onClick={() => moveScene(1)}>↓</IconBtn>

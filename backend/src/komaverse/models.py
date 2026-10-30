@@ -59,6 +59,26 @@ class DrawFrame(BaseModel):
     height: int = 1080
     layers: list[DrawLayer] = Field(default_factory=list)
     thumbnail: str | None = None
+    sequence_id: str | None = None
+
+
+class SequenceFrame(BaseModel):
+    """Frame metadata inside a sequence (no pixels — Media lists stay light)."""
+
+    id: str = Field(default_factory=uuid_short)
+    name: str = ""
+    width: int = 1920
+    height: int = 1080
+    index: int = 0
+    layer_count: int = 0
+
+
+class Sequence(BaseModel):
+    id: str = Field(default_factory=uuid_short)
+    project_id: str
+    name: str = "Sequence"
+    index: int = 0
+    frames: list[SequenceFrame] = Field(default_factory=list)
 
 
 class Clip(BaseModel):
@@ -136,6 +156,7 @@ class Project(BaseModel):
     pages: list[Page] = Field(default_factory=list)
     scenes: list[Scene] = Field(default_factory=list)
     frames: list[DrawFrame] = Field(default_factory=list)
+    sequences: list[Sequence] = Field(default_factory=list)
     audios: list[AudioTake] = Field(default_factory=list)
 
 
