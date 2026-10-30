@@ -6,8 +6,8 @@ MP4 export, and image generation. Two brains:
 - DemoBrain: keyword intents, always works, executes the REAL tools
   (same endpoint functions as the UI, so auth scoping, validation,
   metrics, and credits apply identically).
-- CloudBrain: tool-calling LLM when AI_API_KEY is set; any failure falls
-  back to DemoBrain.
+- CloudBrain: tool-calling LLM (Meta Muse, OpenRouter, or generic cloud,
+  via AI_PROVIDER) when its key is set; any failure falls back to DemoBrain.
 """
 
 from __future__ import annotations
@@ -16,10 +16,10 @@ import json
 import logging
 import re
 
-import httpx
 from fastapi import HTTPException
 from sqlalchemy.orm import Session
 
+from komaverse.ai.providers import chat_complete, chat_configured, get_chat_config
 from komaverse.api.ai import COSTS, PROVIDERS, add_entry, get_balance, run_ai_job
 from komaverse.api.animate import (
     MOTIONS,
@@ -309,6 +309,12 @@ def tool_generate(
     )
     if provider == "cloud" and not settings.ai_api_key:
         provider = "fake"
+    if provider == "meta":
+        # Meta has no image endpoint: say so instead of failing a job.
+        return (
+            "Meta Muse can't generate images — set AI_PROVIDER=openrouter "
+            "(or cloud/comfyui) for image jobs."
+        )
     if provider == "fake" and settings.is_production:
         return "No AI provider configured."
     cost = COSTS["image"]
@@ -504,20 +510,15 @@ def cloud_turn(
         {"role": "user", "content": user_content},
     ]
     actions: list[dict] = []
+    base_url, api_key, model = get_chat_config()
     for _ in range(6):
-        res = httpx.post(
-            f"{settings.ai_base_url}/chat/completions",
-            headers={"Authorization": f"Bearer {settings.ai_api_key}"},
-            json={
-                "model": settings.ai_chat_model,
-                "messages": messages,
-                "tools": _TOOLS_SCHEMA,
-                "tool_choice": "auto",
-            },
-            timeout=60,
+        msg = chat_complete(
+            base_url=base_url,
+            api_key=api_key,
+            model=model,
+            messages=messages,
+            tools=_TOOLS_SCHEMA,
         )
-        res.raise_for_status()
-        msg = res.json()["choices"][0]["message"]
         calls = msg.get("tool_calls") or []
         if not calls:
             return msg.get("content") or "Done.", actions
@@ -616,7 +617,7 @@ def run_agent_turn(
             }
         schema = get_project(target, session, user)
     ref_context = resolve_refs(refs, session, user) if refs else ""
-    if settings.ai_api_key and settings.ai_base_url:
+    if chat_configured():
         try:
             reply, actions = cloud_turn(
                 message, target, session, user, job_factory, ref_context

@@ -53,4 +53,26 @@ def get_session() -> Generator[Session, None, None]:
 def init_db() -> None:
     from komaverse.db_models import Base  # noqa: PLC0415 — register tables
 
-    Base.metadata.create_all(get_engine())
+    engine = get_engine()
+    Base.metadata.create_all(engine)
+    # No Alembic yet (ADR-5): backfill columns that create_all cannot add
+    # to existing tables. Each ALTER is a no-op when the column exists.
+    for ddl in (
+        "ALTER TABLE audio_cues ADD COLUMN end_sec FLOAT",
+        "ALTER TABLE audio_cues ADD COLUMN lane INTEGER",
+        "ALTER TABLE export_reports ADD COLUMN subtitles_vtt_url VARCHAR(500)",
+        "ALTER TABLE jobs ADD COLUMN model VARCHAR(200)",
+        "ALTER TABLE jobs ADD COLUMN seed INTEGER",
+        "ALTER TABLE jobs ADD COLUMN negative_prompt TEXT",
+        "ALTER TABLE jobs ADD COLUMN style VARCHAR(32)",
+        "ALTER TABLE jobs ADD COLUMN camera_move VARCHAR(32)",
+        "ALTER TABLE jobs ADD COLUMN final_prompt TEXT",
+        "ALTER TABLE jobs ADD COLUMN entities_json TEXT",
+        "ALTER TABLE jobs ADD COLUMN enhance BOOLEAN",
+        "ALTER TABLE jobs ADD COLUMN reference_frame_id VARCHAR(12)",
+    ):
+        try:
+            with engine.begin() as conn:
+                conn.exec_driver_sql(ddl)
+        except Exception:
+            pass

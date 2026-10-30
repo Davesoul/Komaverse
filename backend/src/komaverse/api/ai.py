@@ -4,7 +4,10 @@ frames are scoped to the current user."""
 from __future__ import annotations
 
 import base64
+import io
+import json
 import logging
+import random
 from pathlib import Path
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
@@ -12,31 +15,112 @@ from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from komaverse.ai.providers import ProviderError, get_provider
+from komaverse.ai.direction import (
+    ENTITY_KINDS,
+    build_final_prompt,
+)
+from komaverse.ai.providers import (
+    ProviderError,
+    chat_complete,
+    check_openrouter_model,
+    get_chat_config,
+    get_provider,
+    list_openrouter_models,
+)
 from komaverse.auth import ensure_owner, get_current_user
 from komaverse.config import settings
 from komaverse.db import get_session, session_factory
-from komaverse.db_models import FrameRow, JobRow, LayerRow, LedgerRow, UserRow
-from komaverse.models import CreditEntry, Job
+from komaverse.db_models import (
+    EntityRow,
+    FrameRow,
+    JobRow,
+    LayerRow,
+    LedgerRow,
+    UserRow,
+)
+from komaverse.models import CreditEntry, Entity, Job
 from komaverse.observability import metrics
+from komaverse.renderer import composite_frame_image
 
 router = APIRouter(prefix="/api/v1")
 billing_router = APIRouter(prefix="/api/v1")
 logger = logging.getLogger("komaverse.ai")
 
-COSTS = {"image": 5}
-PROVIDERS = ("cloud", "comfyui", "fake")
+COSTS = {"image": 5, "video": 25}
+PROVIDERS = ("cloud", "comfyui", "fake", "meta", "openrouter")
 
 
 class GenerateRequest(BaseModel):
-    kind: str = "image"  # image only; video generation is not available yet
+    kind: str = "image"  # image, or video (openrouter provider only)
     prompt: str = ""
     project_id: str | None = None
     provider: str = Field(default_factory=lambda: settings.ai_provider)
+    model: str | None = None  # openrouter model id (catalogued); None = default
     width: int = 1024
     height: int = 1024
     seconds: float = 2.0
     attach_frame: bool = True
+    seed: int | None = None  # None = random per job (stored on the job)
+    negative_prompt: str = ""
+    enhance: bool = False  # LLM rewrite before sending (fail-soft)
+    style: str = "none"  # STYLE_PRESETS key
+    camera_move: str = "none"  # CAMERA_MOVES key (video only)
+    entity_ids: list[str] = Field(default_factory=list)
+    reference_frame_id: str | None = None  # start frame (video) / redraw (image)
+
+
+class EntityCreate(BaseModel):
+    kind: str = "character"  # character | field | prop
+    name: str = ""
+    anchor: str = ""
+    frame_id: str | None = None
+
+
+_REF_PX = 768  # reference snapshots are guidance, not artwork
+_MAX_REFS = 3
+_MAX_SEED = 2**31 - 1
+
+
+def _frame_png(session: Session, project_id: str, frame_id: str) -> bytes | None:
+    """Composite one draw frame to a small PNG for provider references."""
+    row = session.get(FrameRow, frame_id)
+    if row is None or row.project_id != project_id:
+        return None
+    try:
+        img = composite_frame_image(row)
+        img.thumbnail((_REF_PX, _REF_PX))
+        buf = io.BytesIO()
+        img.convert("RGB").save(buf, format="PNG")
+        return buf.getvalue()
+    except Exception:
+        return None
+
+
+def _enhance_prompt(prompt: str) -> str:
+    """One chat call to enrich a thin prompt; fail-soft to the original."""
+    try:
+        base_url, api_key, model = get_chat_config()
+        msg = chat_complete(
+            base_url=base_url,
+            api_key=api_key,
+            model=model,
+            messages=[
+                {
+                    "role": "system",
+                    "content": "Rewrite the user prompt as one dense visual paragraph for an image/video model. Keep every named subject. Reply with the rewrite only.",
+                },
+                {"role": "user", "content": prompt},
+            ],
+        )
+        content = msg.get("content", "") if isinstance(msg, dict) else ""
+        if isinstance(content, list):  # multimodal content blocks
+            content = " ".join(
+                b.get("text", "") for b in content if isinstance(b, dict)
+            )
+        text = str(content).strip()
+        return text or prompt
+    except Exception:
+        return prompt
 
 
 class BalanceOut(BaseModel):
@@ -78,11 +162,66 @@ def run_ai_job(job_id: str, factory=None) -> None:
         session.commit()
         try:
             provider = get_provider(job.provider)
+            try:
+                entities = json.loads(job.entities_json or "[]")
+            except ValueError:
+                entities = []
+            if not isinstance(entities, list):
+                entities = []
+            entities = [e for e in entities if isinstance(e, dict)]
+            final = build_final_prompt(
+                prompt=job.prompt,
+                entities=entities,
+                style=job.style or "none",
+                camera_move=job.camera_move or "none",
+                kind=job.kind,
+                negative_prompt=job.negative_prompt or "",
+            )
+            if job.enhance:
+                final = _enhance_prompt(final)
+            job.final_prompt = final
+            seed_used = (
+                job.seed if job.seed is not None else random.randint(0, _MAX_SEED)
+            )
+            job.seed = seed_used
+            # Visual guidance, cheapest-first: explicit start frame, then
+            # entity snapshots in order. Capped — each is a full upload.
+            ref_pngs: list[bytes] = []
+            if job.reference_frame_id and job.project_id:
+                png = _frame_png(session, job.project_id, job.reference_frame_id)
+                if png is not None:
+                    ref_pngs.append(png)
+            for ent in entities:
+                if len(ref_pngs) >= _MAX_REFS:
+                    break
+                fid = ent.get("frame_id")
+                if fid and job.project_id:
+                    png = _frame_png(session, job.project_id, str(fid))
+                    if png is not None:
+                        ref_pngs.append(png)
             if job.kind == "image":
-                data = provider.generate_image(job.prompt, job.width, job.height)
+                data = provider.generate_image(
+                    final,
+                    job.width,
+                    job.height,
+                    model=job.model,
+                    seed=seed_used,
+                    negative_prompt=job.negative_prompt or "",
+                    reference_images=tuple(ref_pngs),
+                )
                 suffix = "png"
             elif job.kind == "video":
-                data = provider.generate_video(job.prompt, job.seconds)
+                start, rest = (
+                    (ref_pngs[0], ref_pngs[1:]) if ref_pngs else (None, [])
+                )
+                data = provider.generate_video(
+                    final,
+                    job.seconds,
+                    model=job.model,
+                    seed=seed_used,
+                    start_frame=start,
+                    reference_images=tuple(rest),
+                )
                 suffix = "mp4"
             else:
                 raise ProviderError(f"unknown job kind: {job.kind}")
@@ -153,16 +292,77 @@ def generate(
     session: Session = Depends(get_session),
     user: UserRow = Depends(get_current_user),
 ):
-    if body.kind == "video":
-        raise HTTPException(400, "video generation is not available yet")
     if body.kind not in COSTS:
         raise HTTPException(400, f"unknown kind: {body.kind}")
     if body.provider not in PROVIDERS:
         raise HTTPException(400, f"unknown provider: {body.provider}")
+    if body.kind == "video" and body.provider != "openrouter":
+        raise HTTPException(
+            400, "video generation needs provider=openrouter "
+            "(meta has no video endpoint)"
+        )
+    if body.kind == "image" and body.provider == "meta":
+        raise HTTPException(
+            400, "meta has no image endpoint: use provider=openrouter "
+            "(or cloud/comfyui)"
+        )
+    if body.model and body.provider != "openrouter":
+        raise HTTPException(400, "per-model choice is openrouter-only")
+    if body.provider == "openrouter" and body.model:
+        try:
+            check_openrouter_model(body.kind, body.model)
+        except ProviderError as exc:
+            raise HTTPException(400, str(exc)) from exc
     if not body.prompt.strip():
         raise HTTPException(400, "prompt is required")
+    if body.seed is not None and not (0 <= body.seed <= _MAX_SEED):
+        raise HTTPException(400, f"seed must be 0..{_MAX_SEED}")
+    if len(body.entity_ids) > 8:
+        raise HTTPException(400, "at most 8 entities per generation")
+    try:
+        # Validates style/camera ids up front (unknown ids never bill).
+        build_final_prompt(
+            prompt="x",
+            entities=[],
+            style=body.style,
+            camera_move=body.camera_move,
+            kind=body.kind,
+        )
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
     if body.project_id:
         ensure_owner(session, user, body.project_id)
+    snapshots: list[dict] = []
+    if body.entity_ids or body.reference_frame_id:
+        if not body.project_id:
+            raise HTTPException(400, "entities and start frames need a project")
+        seen: set[str] = set()
+        for eid in body.entity_ids:
+            if eid in seen:
+                continue
+            seen.add(eid)
+            ent = session.get(EntityRow, eid)
+            if (
+                ent is None
+                or ent.project_id != body.project_id
+                or ent.user_id != user.id
+            ):
+                raise HTTPException(400, f"unknown entity: {eid}")
+            snapshots.append(
+                {
+                    "id": ent.id,
+                    "name": ent.name,
+                    "kind": ent.kind,
+                    "anchor": ent.anchor or "",
+                    "frame_id": ent.frame_id,
+                }
+            )
+        if body.reference_frame_id:
+            frame = session.get(FrameRow, body.reference_frame_id)
+            if frame is None or frame.project_id != body.project_id:
+                raise HTTPException(
+                    400, f"unknown frame: {body.reference_frame_id}"
+                )
     cost = COSTS[body.kind]
     if settings.paywall_enabled and get_balance(session, user.id) < cost:
         raise HTTPException(402, f"insufficient credits (need {cost})")
@@ -174,10 +374,18 @@ def generate(
         kind=body.kind,
         prompt=body.prompt,
         provider=body.provider,
+        model=body.model,
         width=min(max(body.width, 64), 2048),
         height=min(max(body.height, 64), 2048),
         seconds=min(max(body.seconds, 0.5), 10.0),
         attach_frame=body.attach_frame,
+        seed=body.seed,
+        negative_prompt=body.negative_prompt,
+        style=body.style,
+        camera_move=body.camera_move,
+        enhance=body.enhance,
+        reference_frame_id=body.reference_frame_id,
+        entities_json=json.dumps(snapshots),
     )
     session.add(job)
     session.commit()
@@ -195,6 +403,73 @@ def get_job(
     if row is None or row.user_id != user.id:
         raise HTTPException(404, "job not found")
     return row.to_schema()
+
+
+@router.get("/ai/models")
+def ai_models(user: UserRow = Depends(get_current_user)):
+    """Curated OpenRouter model catalog + server defaults for the picker."""
+    return list_openrouter_models()
+
+
+@router.get("/projects/{project_id}/entities", response_model=list[Entity])
+def list_entities(
+    project_id: str,
+    session: Session = Depends(get_session),
+    user: UserRow = Depends(get_current_user),
+):
+    ensure_owner(session, user, project_id)
+    res = session.execute(
+        select(EntityRow)
+        .where(EntityRow.project_id == project_id, EntityRow.user_id == user.id)
+        .order_by(EntityRow.id)
+    )
+    return [r.to_schema() for r in res.scalars().all()]
+
+
+@router.post(
+    "/projects/{project_id}/entities", response_model=Entity, status_code=201
+)
+def create_entity(
+    project_id: str,
+    body: EntityCreate,
+    session: Session = Depends(get_session),
+    user: UserRow = Depends(get_current_user),
+):
+    ensure_owner(session, user, project_id)
+    if body.kind not in ENTITY_KINDS:
+        raise HTTPException(400, f"unknown entity kind: {body.kind}")
+    name = body.name.strip()
+    if not name:
+        raise HTTPException(400, "entity name is required")
+    if body.frame_id:
+        frame = session.get(FrameRow, body.frame_id)
+        if frame is None or frame.project_id != project_id:
+            raise HTTPException(400, f"unknown frame: {body.frame_id}")
+    row = EntityRow(
+        user_id=user.id,
+        project_id=project_id,
+        kind=body.kind,
+        name=name[:80],
+        anchor=body.anchor.strip(),
+        frame_id=body.frame_id,
+    )
+    session.add(row)
+    session.commit()
+    session.refresh(row)
+    return row.to_schema()
+
+
+@router.delete("/entities/{entity_id}", status_code=204)
+def delete_entity(
+    entity_id: str,
+    session: Session = Depends(get_session),
+    user: UserRow = Depends(get_current_user),
+):
+    row = session.get(EntityRow, entity_id)
+    if row is None or row.user_id != user.id:
+        raise HTTPException(404, "entity not found")
+    session.delete(row)
+    session.commit()
 
 
 @router.get("/ai/jobs", response_model=list[Job])

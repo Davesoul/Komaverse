@@ -29,6 +29,7 @@ from komaverse.api.auth import router as auth_router
 from komaverse.api.media import router as media_router
 from komaverse.api.ops import router as ops_router
 from komaverse.api.scans import router as scans_router
+from komaverse.api.subtitles import router as subtitles_router
 from komaverse.config import settings
 from komaverse.db import init_db
 from komaverse.observability import (
@@ -174,6 +175,7 @@ def ping() -> dict[str, bool]:
 app.include_router(v1)
 app.include_router(auth_router)
 app.include_router(scans_router)
+app.include_router(subtitles_router)
 app.include_router(animate_router)
 app.include_router(audio_router)
 app.include_router(ai_router)

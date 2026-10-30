@@ -64,6 +64,8 @@ export interface AudioCue {
   audio_id: string;
   start_sec: number;
   offset_sec: number;
+  end_sec: number | null;
+  lane: number;
   volume: number;
   fade_in: number;
   fade_out: number;
@@ -108,6 +110,20 @@ export interface ExportReport {
   width: number;
   height: number;
   audio_cues: number;
+  subtitles_vtt_url: string | null;
+}
+
+export interface SubtitleSegment {
+  start_sec: number;
+  end_sec: number;
+  text: string;
+}
+
+export interface SubtitleTrack {
+  id: string;
+  scene_id: string;
+  lang: string;
+  segments: SubtitleSegment[];
 }
 
 export interface Job {
@@ -115,11 +131,41 @@ export interface Job {
   user_id: string;
   project_id: string | null;
   kind: string;
+  model: string | null;
   prompt: string;
+  seed: number | null;
+  negative_prompt: string;
+  style: string;
+  camera_move: string;
+  enhance: boolean;
+  reference_frame_id: string | null;
+  final_prompt: string;
+  entities_json: string;
   status: "queued" | "running" | "done" | "failed";
   progress: number;
   result_url: string | null;
   error: string | null;
+}
+
+export interface Entity {
+  id: string;
+  project_id: string;
+  kind: "character" | "field" | "prop";
+  name: string;
+  anchor: string;
+  frame_id: string | null;
+}
+
+export interface AiModelOption {
+  id: string;
+  label: string;
+  badge: "cheap" | "popular";
+}
+
+export interface AiModelCatalog {
+  image: AiModelOption[];
+  video: AiModelOption[];
+  defaults: { image: string; video: string };
 }
 
 export interface CreditEntry {
@@ -360,6 +406,12 @@ export const api = {
     req<void>(`/api/v1/frames/${frameId}`, { method: "DELETE" }),
   duplicateFrame: (frameId: string) =>
     req<DrawFrame>(`/api/v1/frames/${frameId}/duplicate`, { method: "POST" }),
+  orderFrames: (projectId: string, frameIds: string[]) =>
+    req<DrawFrame[]>(`/api/v1/projects/${projectId}/frames/order`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ frame_ids: frameIds }),
+    }),
   /** Composited contact-sheet thumbnail (cookie auth, usable in <img>).
    * `px` grows the longest side for the preview player; thumbs use default. */
   frameThumbnailUrl: (frameId: string, px?: number) =>
@@ -427,6 +479,8 @@ export const api = {
       audio_id: string;
       start_sec?: number;
       offset_sec?: number;
+      end_sec?: number | null;
+      lane?: number;
       volume?: number;
       fade_in?: number;
       fade_out?: number;
@@ -445,22 +499,57 @@ export const api = {
     }),
   deleteCue: (cueId: string) =>
     req<void>(`/api/v1/cues/${cueId}`, { method: "DELETE" }),
+  uploadSubtitles: (sceneId: string, file: File) => {
+    const form = new FormData();
+    form.append("file", file, file.name);
+    return req<SubtitleTrack>(`/api/v1/scenes/${sceneId}/subtitles`, {
+      method: "POST",
+      body: form,
+    });
+  },
+  getSubtitles: (sceneId: string) =>
+    req<SubtitleTrack | null>(`/api/v1/scenes/${sceneId}/subtitles`),
+  deleteSubtitles: (sceneId: string) =>
+    req<void>(`/api/v1/scenes/${sceneId}/subtitles`, { method: "DELETE" }),
 
   generate: (body: {
     kind: string;
     prompt: string;
     project_id?: string;
     provider?: string;
+    model?: string;
     width?: number;
     height?: number;
+    seconds?: number;
+    seed?: number;
+    negative_prompt?: string;
+    enhance?: boolean;
+    style?: string;
+    camera_move?: string;
+    entity_ids?: string[];
+    reference_frame_id?: string;
   }) =>
     req<Job>("/api/v1/ai/generate", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     }),
+  listEntities: (projectId: string) =>
+    req<Entity[]>(`/api/v1/projects/${projectId}/entities`),
+  createEntity: (
+    projectId: string,
+    body: { kind: string; name: string; anchor?: string; frame_id?: string | null },
+  ) =>
+    req<Entity>(`/api/v1/projects/${projectId}/entities`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }),
+  deleteEntity: (entityId: string) =>
+    req<void>(`/api/v1/entities/${entityId}`, { method: "DELETE" }),
   getJob: (jobId: string) => req<Job>(`/api/v1/ai/jobs/${jobId}`),
   listJobs: () => req<Job[]>("/api/v1/ai/jobs"),
+  listAiModels: () => req<AiModelCatalog>("/api/v1/ai/models"),
   me: () => req<User>("/api/v1/auth/me"),
   register: (body: { email: string; password: string; name?: string }) =>
     req<User>("/api/v1/auth/register", {

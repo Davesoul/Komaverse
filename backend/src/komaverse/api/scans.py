@@ -46,7 +46,7 @@ class StorageOut(BaseModel):
 
 
 class DetectRequest(BaseModel):
-    detector: str = "heuristic"  # heuristic | yolo | yolo-leoxs22 | cloud (fall back to heuristic)
+    detector: str = "heuristic"  # heuristic | yolo | yolo-leoxs22 | cloud | meta | openrouter (fall back to heuristic)
     direction: str = "rtl"  # rtl (manga) | ltr (western)
     confirm: bool = False  # required when the page already has panels
 
@@ -275,7 +275,14 @@ def detect_panels(
     user: UserRow = Depends(get_current_user),
 ):
     page = _get_page(session, user, page_id)
-    if body.detector not in ("heuristic", "yolo", "yolo-leoxs22", "cloud"):
+    if body.detector not in (
+        "heuristic",
+        "yolo",
+        "yolo-leoxs22",
+        "cloud",
+        "meta",
+        "openrouter",
+    ):
         raise HTTPException(400, f"unknown detector: {body.detector}")
     if body.direction not in ("rtl", "ltr"):
         raise HTTPException(400, f"unknown direction: {body.direction}")
@@ -287,12 +294,12 @@ def detect_panels(
             409,
             f"page already has {len(existing)} panel(s); set confirm to replace them",
         )
-    if body.detector == "cloud":
+    if body.detector in ("cloud", "meta", "openrouter"):
         retry = limiter.check(f"cloud-detect:{user.id}", 10, 60)
         if retry is not None:
             raise HTTPException(
                 429,
-                "cloud detect rate limited",
+                f"{body.detector} detect rate limited",
                 headers={"Retry-After": str(int(retry) + 1)},
             )
     try:

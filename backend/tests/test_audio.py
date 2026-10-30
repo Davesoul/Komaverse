@@ -272,6 +272,55 @@ def test_cue_validation(factory, user):
     assert exc.value.status_code == 400
 
 
+def test_cue_end_trim(factory, user):
+    project_id, scene_id = _panel_project(factory, user)
+    with factory() as s:
+        take = upload(s, user, project_id, duration=6.0)
+    with factory() as s:
+        cue = add_cue(
+            scene_id,
+            CueCreate(audio_id=take.id, start_sec=1.0, end_sec=4.0),
+            s,
+            user,
+        )
+    assert cue.end_sec == 4.0
+    # Right-edge trim persists; clearing restores take-end playback.
+    with factory() as s:
+        patched = patch_cue(cue.id, CuePatch(end_sec=2.5), s, user)
+    assert patched.end_sec == 2.5
+    with factory() as s:
+        cleared = patch_cue(cue.id, CuePatch(end_sec=None), s, user)
+    assert cleared.end_sec is None
+    # Untouched patch keeps the trim.
+    with factory() as s:
+        patch_cue(cue.id, CuePatch(end_sec=3.0), s, user)
+    with factory() as s:
+        kept = patch_cue(cue.id, CuePatch(volume=0.7), s, user)
+    assert kept.end_sec == 3.0
+    # Degenerate trims rejected.
+    with factory() as s, pytest.raises(HTTPException) as exc:
+        patch_cue(cue.id, CuePatch(end_sec=1.0), s, user)
+    assert exc.value.status_code == 400
+    with factory() as s, pytest.raises(HTTPException) as exc:
+        add_cue(scene_id, CueCreate(audio_id=take.id, end_sec=0.05), s, user)
+    assert exc.value.status_code == 400
+
+
+def test_cue_lane(factory, user):
+    project_id, scene_id = _panel_project(factory, user)
+    with factory() as s:
+        take = upload(s, user, project_id)
+    with factory() as s:
+        cue = add_cue(scene_id, CueCreate(audio_id=take.id, lane=2), s, user)
+    assert cue.lane == 2
+    with factory() as s:
+        moved = patch_cue(cue.id, CuePatch(lane=1), s, user)
+    assert moved.lane == 1
+    with factory() as s, pytest.raises(HTTPException) as exc:
+        patch_cue(cue.id, CuePatch(lane=9), s, user)
+    assert exc.value.status_code == 400
+
+
 def test_delete_take_blocked_when_cued(factory, user):
     project_id, scene_id = _panel_project(factory, user)
     with factory() as s:

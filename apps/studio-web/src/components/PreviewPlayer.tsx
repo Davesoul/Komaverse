@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Btn } from "./ui";
+import { Btn, IconBtn } from "./ui";
 
 export interface PreviewClip {
   id: string;
@@ -8,6 +8,16 @@ export interface PreviewClip {
   image: string;
   duration: number;
   motion: string;
+}
+
+/** One audible take on the preview: plays [start, end) from take offset. */
+export interface PreviewAudio {
+  id: string;
+  url: string;
+  start: number;
+  end: number;
+  offset: number;
+  volume: number;
 }
 
 /** Ken Burns approximation of the server motions (zoom + pan on the still). */
@@ -27,8 +37,12 @@ function motionStyle(motion: string, p: number, reduceMotion: boolean): React.CS
   }
 }
 
-const fmt = (t: number) =>
-  `${Math.floor(t / 60)}:${String(Math.floor(t % 60)).padStart(2, "0")}`;
+const fmt = (t: number) => {
+  const clamped = Math.max(0, t);
+  const m = Math.floor(clamped / 60);
+  const s = clamped % 60;
+  return `${m}:${s < 10 ? "0" : ""}${s.toFixed(1)}`;
+};
 
 export function PreviewPlayer({
   clips,
@@ -38,6 +52,7 @@ export function PreviewPlayer({
   loop = false,
   autoPlay = false,
   playRequest = 0,
+  audio = [],
 }: {
   clips: PreviewClip[];
   /** External seek requests (filmstrip clicks). */
@@ -52,6 +67,8 @@ export function PreviewPlayer({
   autoPlay?: boolean;
   /** Restart from the first clip and play whenever this counter increases. */
   playRequest?: number;
+  /** Cued takes, mixed live under the preview while it plays. */
+  audio?: PreviewAudio[];
 }) {
   const [playing, setPlaying] = useState(autoPlay);
   const [time, setTime] = useState(0);
@@ -59,17 +76,114 @@ export function PreviewPlayer({
   const onTimeRef = useRef(onTime);
   onTimeRef.current = onTime;
   const emitRef = useRef(0);
-  const reduceMotion = useMemo(
+  const timeRef = useRef(0);
+  timeRef.current = time;
+  const playingRef = useRef(playing);
+  playingRef.current = playing;
+  const audioRef = useRef(audio);
+  audioRef.current = audio;
+
+  // Live mix: hidden <audio> elements started/stopped in sync with the
+  // playhead. Refs (not state) drive the transitions so rapid
+  // play/seek sequences can't strand a stale closure.
+  const audioEls = useRef(new Map<string, HTMLAudioElement>());
+  const audioTimers = useRef<number[]>([]);
+
+  const stopAllAudio = () => {
+    audioTimers.current.forEach((t) => window.clearTimeout(t));
+    audioTimers.current = [];
+    audioEls.current.forEach((el) => {
+      el.pause();
+    });
+  };
+
+  const syncAudio = (at: number, shouldPlay: boolean) => {
+    audioTimers.current.forEach((t) => window.clearTimeout(t));
+    audioTimers.current = [];
+    const live = new Set(audioRef.current.map((t) => t.id));
+    audioEls.current.forEach((el, id) => {
+      if (!live.has(id)) {
+        el.pause();
+        el.removeAttribute("src");
+        audioEls.current.delete(id);
+      }
+    });
+    for (const track of audioRef.current) {
+      let el = audioEls.current.get(track.id);
+      if (!el) {
+        el = new Audio();
+        el.preload = "auto";
+        audioEls.current.set(track.id, el);
+      }
+      // getAttribute: el.src resolves absolute, track.url is app-relative.
+      if (el.getAttribute("src") !== track.url) el.setAttribute("src", track.url);
+      el.volume = Math.min(Math.max(track.volume, 0), 1);
+      if (!shouldPlay || at >= track.end) {
+        el.pause();
+        continue;
+      }
+      const want = track.offset + Math.max(0, at - track.start);
+      if (at < track.start) {
+        el.pause();
+        try {
+          el.currentTime = track.offset;
+        } catch {
+          // Metadata not loaded yet; the timer below re-syncs on start.
+        }
+        const ms = (track.start - at) * 1000;
+        const target = track.id;
+        audioTimers.current.push(
+          window.setTimeout(() => {
+            const node = audioEls.current.get(target);
+            if (node && playingRef.current) node.play().catch(() => undefined);
+          }, ms),
+        );
+      } else {
+        try {
+          if (Math.abs(el.currentTime - want) > 0.35) el.currentTime = want;
+        } catch {
+          // Not seekable yet; playback still starts from the top.
+        }
+        if (el.paused) el.play().catch(() => undefined);
+      }
+    }
+  };
+  const [reduceMotion, setReduceMotion] = useState(
     () =>
       typeof window.matchMedia === "function" &&
       window.matchMedia("(prefers-reduced-motion: reduce)").matches,
-    [],
   );
+  // Explicit user override: one click forces camera moves even when the
+  // OS asks for reduced motion. Export ignores both and always animates.
+  const [forceMotion, setForceMotion] = useState(false);
+  const motionOff = reduceMotion && !forceMotion;
+  useEffect(() => {
+    if (typeof window.matchMedia !== "function") return;
+    const mq = window.matchMedia("(prefers-reduced-motion: reduce)");
+    const onChange = () => setReduceMotion(mq.matches);
+    mq.addEventListener("change", onChange);
+    return () => mq.removeEventListener("change", onChange);
+  }, []);
 
   useEffect(() => {
+    stopAllAudio();
     setTime(0);
     setPlaying(autoPlay);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [clips, autoPlay]);
+
+  useEffect(() => {
+    syncAudio(timeRef.current, playing);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [playing]);
+
+  useEffect(
+    () => () => {
+      stopAllAudio();
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [],
+  );
 
   // External play button: restart from the first clip and play. Declared
   // after the clips reset so it wins when both change in one commit.
@@ -81,13 +195,19 @@ export function PreviewPlayer({
   }, [playRequest]);
 
   useEffect(() => {
-    if (seek) setTime(Math.min(Math.max(seek.time, 0), total));
+    if (seek) {
+      const t = Math.min(Math.max(seek.time, 0), total);
+      setTime(t);
+      syncAudio(t, playingRef.current);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [seek, total]);
 
   useEffect(() => {
     if (!playing) return;
     let raf = 0;
     let last = performance.now();
+    let lastSync = performance.now();
     const tick = (now: number) => {
       const dt = (now - last) / 1000;
       last = now;
@@ -96,10 +216,16 @@ export function PreviewPlayer({
         if (nt >= total) {
           if (loop) return nt - total;
           setPlaying(false);
+          stopAllAudio();
           return total;
         }
         return nt;
       });
+      // Re-sync the mix every couple of seconds against clock drift.
+      if (now - lastSync > 2000) {
+        lastSync = now;
+        syncAudio(timeRef.current, true);
+      }
       raf = requestAnimationFrame(tick);
     };
     raf = requestAnimationFrame(tick);
@@ -159,7 +285,7 @@ export function PreviewPlayer({
             // stage letterboxes the rest, which the Ken Burns drift plays on.
             objectFit: "contain",
             background: "#000",
-            ...motionStyle(current.motion, local, reduceMotion),
+            ...motionStyle(current.motion, local, motionOff),
           }}
         />
         <span
@@ -180,10 +306,25 @@ export function PreviewPlayer({
             : `${current.label} · ${current.motion}`}
         </span>
       </div>
+      {reduceMotion && !hideMotion && current.motion && current.motion !== "none" && (
+        <div style={{ display: "flex", gap: 8, alignItems: "center", margin: "0 0 8px" }}>
+          <p style={{ fontSize: 12, color: "var(--kv-muted)", margin: 0, flex: 1 }}>
+            {forceMotion
+              ? `Previewing ${current.motion} despite your system motion setting.`
+              : "Preview holds still — your system asks for reduced motion. The MP4 export still animates."}
+          </p>
+          <Btn small onClick={() => setForceMotion((v) => !v)}>
+            {forceMotion ? "Motion: on" : "Motion: off"}
+          </Btn>
+        </div>
+      )}
       <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 8 }}>
-        <Btn small onClick={() => (time >= total ? (setTime(0), setPlaying(true)) : setPlaying(!playing))}>
-          {playing ? "Pause" : time >= total ? "Replay" : "Play"}
-        </Btn>
+        <IconBtn
+          onClick={() => (time >= total ? (setTime(0), setPlaying(true)) : setPlaying(!playing))}
+          label={playing ? "Pause" : time >= total ? "Replay from the start" : "Play"}
+        >
+          {playing ? "❚❚" : time >= total ? "↺" : "▶"}
+        </IconBtn>
         <input
           type="range"
           min={0}
@@ -212,6 +353,20 @@ export function PreviewPlayer({
           >
             {i + 1}
           </Btn>
+        ))}
+      </div>
+      <div aria-hidden style={{ display: "none" }}>
+        {audio.map((t) => (
+          <audio
+            key={t.id}
+            ref={(el) => {
+              if (el) audioEls.current.set(t.id, el);
+              else audioEls.current.delete(t.id);
+            }}
+            src={t.url}
+            preload="auto"
+            data-cue={t.id}
+          />
         ))}
       </div>
     </div>

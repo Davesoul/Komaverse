@@ -604,12 +604,19 @@
   .lv-reels { grid-template-columns: 1fr; }
   .lv-reels .lv-reel { grid-column: span 1; }
 }
-#instrument { position: relative; overflow: hidden; }
+#instrument { position: relative; overflow: hidden; pointer-events: none; }
 .lv-instrument {
   display: grid;
   grid-template-columns: minmax(240px, 360px) 1fr;
   gap: var(--kv-space-8);
   align-items: center;
+  /* The docked pen lives behind page content: the grid itself is
+     click-through so drags reach the traveler canvas, while the copy
+     column stays interactive/selectable. */
+  pointer-events: none;
+}
+.lv-instrument > div:first-child {
+  pointer-events: auto;
 }
 .lv-instrument-copy {
   color: var(--kv-muted);
@@ -620,6 +627,53 @@
 }
 @media (max-width: 860px) {
   .lv-instrument { grid-template-columns: 1fr; }
+}
+/* Dock split: pen rest zone (the traveler glides in here) beside the
+   permanent lineup of the other models. Both zones keep the black inset
+   so the set reads as one instrument. */
+.lv-dock {
+  display: flex;
+  gap: 8px;
+  padding: 8px;
+  background: transparent;
+  /* Fall-through for the docked pen: the rest zone is transparent so the
+     behind-content traveler shows through it, and clicks reach the canvas
+     for drag-turn. The lineup zone keeps its own dark backdrop. */
+  pointer-events: none;
+}
+.lv-dock-rest {
+  position: relative;
+  flex: 1.05;
+  min-width: 0;
+  border-radius: calc(var(--kv-radius) - 4px);
+  overflow: hidden;
+  background: transparent;
+  border: 1px dashed var(--kv-border-strong);
+  pointer-events: none;
+}
+.lv-dock-rest .kv-halftone,
+.lv-dock-rest .lv-dock-live {
+  pointer-events: none;
+}
+.lv-dock-others {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+  border-radius: calc(var(--kv-radius) - 4px);
+  overflow: hidden;
+  background: #060608;
+  /* Re-enabled inside the click-through dock so the lineup keeps its
+     drag-to-turn. */
+  pointer-events: auto;
+}
+.lv-dock-models {
+  position: absolute;
+  inset: 0;
+}
+@media (max-width: 640px) {
+  .lv-dock { flex-direction: column; }
+  .lv-dock-rest { min-height: 220px; }
+  .lv-dock-others { min-height: 260px; }
 }
 .lv-reel-tag {
   font-size: 11px;

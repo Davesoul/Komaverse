@@ -101,6 +101,13 @@ export class DrawEngine {
   private drawing = false;
 
   activeId: string | null = null;
+  // Onion skin: neighbor-frame bitmaps drawn under the live layers while
+  // drawing (never exported, never saved, never shown during playback).
+  private onionPrev: HTMLCanvasElement[] = []; // farthest-first
+  private onionNext: HTMLCanvasElement[] = []; // nearest-first
+  private onionOpacity = 0.3;
+  private onionEnabled = false;
+  private onionScratch: HTMLCanvasElement | null = null;
   tool: ToolId = "brush";
   color = "#111111";
   brush: BrushSettings = {
@@ -710,6 +717,41 @@ export class DrawEngine {
     ctx.restore();
   }
 
+  /** Neighbor frames for onion skin (pre-rendered, farthest-first prev). */
+  setOnionSkins(
+    prev: HTMLCanvasElement[],
+    next: HTMLCanvasElement[],
+    opacity: number,
+    enabled: boolean,
+  ) {
+    this.onionPrev = prev;
+    this.onionNext = next;
+    this.onionOpacity = Math.max(0, Math.min(1, opacity));
+    this.onionEnabled = enabled;
+    this.composite();
+  }
+
+  /** Recolor a skin bitmap through the scratch canvas (keeps its alpha). */
+  private tinted(skin: HTMLCanvasElement, color: string): HTMLCanvasElement {
+    let s = this.onionScratch;
+    if (!s || s.width !== skin.width || s.height !== skin.height) {
+      s = document.createElement("canvas");
+      s.width = Math.max(1, skin.width);
+      s.height = Math.max(1, skin.height);
+      this.onionScratch = s;
+    }
+    const c = s.getContext("2d")!;
+    c.setTransform(1, 0, 0, 1, 0, 0);
+    c.clearRect(0, 0, s.width, s.height);
+    c.globalCompositeOperation = "source-over";
+    c.globalAlpha = 1;
+    c.drawImage(skin, 0, 0);
+    c.globalCompositeOperation = "source-in";
+    c.fillStyle = color;
+    c.fillRect(0, 0, s.width, s.height);
+    return s;
+  }
+
   composite() {
     const ctx = this.display.getContext("2d")!;
     ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
@@ -717,6 +759,21 @@ export class DrawEngine {
     ctx.globalAlpha = 1;
     ctx.fillStyle = PAPER;
     ctx.fillRect(0, 0, this.width, this.height);
+    if (this.onionEnabled && this.onionOpacity > 0) {
+      ctx.globalAlpha = this.onionOpacity;
+      // Krita convention: previous frames red, next frames green.
+      for (const skin of this.onionPrev) {
+        ctx.drawImage(
+          this.tinted(skin, "#ff3b30"), 0, 0, this.width, this.height
+        );
+      }
+      for (const skin of this.onionNext) {
+        ctx.drawImage(
+          this.tinted(skin, "#34c759"), 0, 0, this.width, this.height
+        );
+      }
+      ctx.globalAlpha = 1;
+    }
     for (const id of this.order) {
       const layer = this.layers.get(id)!;
       if (!layer.visible) continue;
@@ -825,13 +882,16 @@ export class DrawEngine {
     layers: SerializedLayer[],
     width: number,
     height: number,
+    withPaper = true,
   ): Promise<HTMLCanvasElement> {
     const out = document.createElement("canvas");
     out.width = Math.max(1, Math.round(width));
     out.height = Math.max(1, Math.round(height));
     const ctx = out.getContext("2d")!;
-    ctx.fillStyle = PAPER;
-    ctx.fillRect(0, 0, out.width, out.height);
+    if (withPaper) {
+      ctx.fillStyle = PAPER;
+      ctx.fillRect(0, 0, out.width, out.height);
+    }
     for (const saved of layers) {
       if (saved.visible === false || !saved.data_url) continue;
       try {

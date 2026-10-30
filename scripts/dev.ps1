@@ -3,10 +3,10 @@
   Quick dev mode: API with auto-reload + Vite HMR, each in its own window.
 .EXAMPLE
   ./scripts/dev.ps1
-  ./scripts/dev.ps1 -ApiPort 8000 -WebPort 5173 -NoBrowser
+  ./scripts/dev.ps1 -ApiPort 8001 -WebPort 5173 -NoBrowser
 #>
 param(
-  [int]$ApiPort = 8000,
+  [int]$ApiPort = 8001,
   [int]$WebPort = 5173,
   [switch]$NoBrowser
 )

@@ -1,25 +1,20 @@
 import { useEffect, useRef, useState } from "react";
 import { prefersReducedMotion } from "./Reveal";
+import { PIXEL, createStage } from "../lib/models3d";
 
-/* Scroll companion: one fixed 3D drawing tool that travels the whole
- * landing page and docks into the instrument panel when it is on screen.
- * Travel pose (drift, turns, model-per-third) follows page scroll; docked
- * pose is a slow turntable the visitor can drag. Authored PBR textures
- * throughout (color/roughness/metal; normals skipped by design), lit in
+/* Scroll companion: the drawing-tablet pen (wacom) traveling the whole
+ * landing page, docking into the instrument panel's pen rest when it is
+ * on screen. One model only — no swaps, so scrolling never parses or
+ * hands off mid-flight. Travel pose (drift, turn, bob) follows page
+ * scroll; docked pose is a slow turntable the visitor can drag. Authored
+ * PBR textures (color/roughness/metal; normals skipped by design), lit in
  * code (paper key + red rim + room environment). Frustum-fit scaling per
- * model and aspect so nothing ever clips a frame edge. Pointer-transparent
- * while traveling, interactive while docked; hidden on narrow screens.
+ * aspect so nothing ever clips a frame edge. Pointer-transparent while
+ * traveling, interactive while docked; hidden on narrow screens.
+ * The other models live permanently inside the instrument section
+ * (InstrumentModels) — the traveler rests beside them, never over them.
  * Any failure removes it quietly. */
-const MODELS = [
-  { src: "/models/pin.fbx", name: "Ballpoint", skin: "pin", tilt: -0.12 },
-  { src: "/models/wacom-pen.fbx", name: "Stylus", skin: "wacom", tilt: -0.3 },
-  { src: "/models/stylo.fbx", name: "Studio pen", skin: "studio", tilt: -0.3 },
-] as const;
-
-// Normal maps are skipped deliberately (micro-relief invisible at this
-// size, ~10MB saved): the loader is pointed at a pixel instead, and the
-// resulting map is dropped during conversion — no 404s, no bad shading.
-const PIXEL = "data:image/gif;base64,R0lGODlhAQABAAAAACw=";
+const PEN = { src: "/models/wacom-pen.fbx", skin: "wacom", tilt: -0.3 };
 
 export default function ScrollCompanion({
   dockRef,
@@ -60,244 +55,49 @@ export default function ScrollCompanion({
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const build = async (THREE: any, FBXLoader: any, RoomEnvironment: any) => {
       const el = hostRef.current!;
-      const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
-      renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5));
-      renderer.setSize(el.clientWidth, el.clientHeight, false);
-      renderer.toneMapping = THREE.ACESFilmicToneMapping;
-      renderer.domElement.style.width = "100%";
-      renderer.domElement.style.height = "100%";
-      renderer.domElement.style.display = "block";
-      renderer.domElement.style.cursor = "grab";
-      renderer.domElement.style.touchAction = "pan-y";
-      el.appendChild(renderer.domElement);
+      const stage = createStage(THREE, RoomEnvironment, el, 1.5);
+      const { renderer, scene, camera, canvas } = stage;
+      canvas.style.cursor = "grab";
+      canvas.style.touchAction = "pan-y";
 
-      const scene = new THREE.Scene();
-      const camera = new THREE.PerspectiveCamera(28, 1, 0.1, 50);
-      camera.position.set(0, 0.2, 7);
-
-      const pmrem = new THREE.PMREMGenerator(renderer);
-      scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
-
-      const key = new THREE.DirectionalLight(0xf4efe4, 3.0);
-      key.position.set(3, 4, 5);
-      scene.add(key);
-      const rim = new THREE.DirectionalLight(0xff6a70, 1.8);
-      rim.position.set(-4, 2, -3);
-      scene.add(rim);
-      scene.add(new THREE.HemisphereLight(0x4a4a55, 0x060608, 1.0));
-
-      const maxAniso = Math.min(8, renderer.capabilities.getMaxAnisotropy());
       const manager = new THREE.LoadingManager();
       manager.setURLModifier((url: string) =>
         /normal\./i.test(String(url)) ? PIXEL : url,
       );
       const loader = new FBXLoader(manager);
-      const texLoader = new THREE.TextureLoader();
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const owned: any[] = [];
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const loadTex = (url: string, srgb: boolean): Promise<any | null> =>
-        texLoader
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          .loadAsync(url)
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          .then((t: any) => {
-            if (srgb) t.colorSpace = THREE.SRGBColorSpace;
-            t.anisotropy = maxAniso;
-            owned.push(t);
-            return t;
-          })
-          .catch(() => null);
-
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const toStandard = (m: any) => {
-        const std = new THREE.MeshStandardMaterial({
-          color: m.map
-            ? new THREE.Color(0xffffff)
-            : (m.color?.clone?.() ?? new THREE.Color(0xffffff)),
-          map: m.map ?? null,
-          roughnessMap: m.roughnessMap ?? null,
-          metalnessMap: m.metalnessMap ?? null,
-          roughness: m.roughnessMap ? 1 : 0.45,
-          metalness: m.metalnessMap ? 1 : 0.08,
-          transparent: !!m.transparent,
-          opacity: m.opacity ?? 1,
-          alphaTest: m.alphaTest ?? 0,
-          side: m.side ?? THREE.FrontSide,
-          envMapIntensity: 1.0,
-        });
-        owned.push(std);
-        m.dispose?.();
-        return std;
-      };
-
-      // Studio fallback (models with no source textures): graphite black
-      // fineliner body, ink-metal details — reads as a real pen.
-      const graphite = new THREE.MeshStandardMaterial({
-        color: 0x17171c,
-        metalness: 0.35,
-        roughness: 0.5,
-        envMapIntensity: 0.9,
-      });
-      const inkMetal = new THREE.MeshStandardMaterial({
-        color: 0x1a1a20,
-        metalness: 0.9,
-        roughness: 0.32,
-        envMapIntensity: 1.1,
-      });
-      owned.push(graphite, inkMetal);
-
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const skin = async (kind: string, object: any) => {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const meshes: any[] = [];
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        object.traverse((child: any) => {
-          if (child.isMesh) meshes.push(child);
-        });
-        if (kind === "studio" || meshes.length === 0) {
-          if (meshes.length > 1) {
-            const volumes = meshes.map(
-              (m) =>
-                new THREE.Box3().setFromObject(m).getSize(new THREE.Vector3()).length(),
-            );
-            const biggest = volumes.indexOf(Math.max(...volumes));
-            meshes.forEach((m, i) => {
-              m.material = i === biggest ? graphite : inkMetal;
-            });
-          } else {
-            meshes.forEach((m) => {
-              m.material = inkMetal;
-            });
-          }
-          return;
-        }
-        if (kind === "pin") {
-          // The micron set resolves its color map itself; roughness and
-          // metal arrive through FBX properties three.js ignores, so they
-          // are bound explicitly — deterministic, no reliance on FBX quirks.
-          for (const mesh of meshes) {
-            const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
-            const next = await Promise.all(
-              // eslint-disable-next-line @typescript-eslint/no-explicit-any
-              mats.map(async (m: any) => {
-                if (!m.map) m.map = await loadTex("/models/canc_color.png", true);
-                if (!m.roughnessMap)
-                  m.roughnessMap = await loadTex("/models/canc_roughness.png", false);
-                if (!m.metalnessMap)
-                  m.metalnessMap = await loadTex("/models/canc_metal.png", false);
-                return toStandard(m);
-              }),
-            );
-            mesh.material = Array.isArray(mesh.material) ? next : next[0];
-          }
-          // The micron set ships as a scattered 3D arrangement, deep in Z
-          // (hostile to turntables and near-plane clipping). Stand every
-          // long piece upright, then stack the pieces in a vertical
-          // lineup: narrow, rotation-safe, upright from the first frame.
-          // Placement is always derived from measured centers, so any
-          // swing from rotating about the mesh origin is absorbed.
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          const measure = () => {
-            object.updateMatrixWorld(true);
-            // eslint-disable-next-line @typescript-eslint/no-explicit-any
-            return meshes.map((mesh: any) => {
-              const b = new THREE.Box3().setFromObject(mesh);
-              return {
-                mesh,
-                size: b.getSize(new THREE.Vector3()),
-                center: b.getCenter(new THREE.Vector3()),
-              };
-            });
-          };
-          measure().forEach((it) => {
-            const longest = Math.max(it.size.x, it.size.y, it.size.z);
-            if (it.size.x >= longest * 0.9 && it.size.x > it.size.y * 1.2) {
-              it.mesh.rotation.z -= Math.PI / 2;
-            } else if (it.size.z >= longest * 0.9 && it.size.z > it.size.y * 1.2) {
-              it.mesh.rotation.x += Math.PI / 2;
-            }
-          });
-          const items = measure();
-          const gap =
-            Math.max(...items.map((it) => Math.max(it.size.x, it.size.y, it.size.z))) *
-            0.1;
-          const total =
-            items.reduce((a, it) => a + it.size.y, 0) + gap * (items.length - 1);
-          let cursor = total / 2;
-          items.forEach((it) => {
-            it.mesh.position.y += cursor - it.size.y / 2 - it.center.y;
-            it.mesh.position.x += -it.center.x;
-            it.mesh.position.z += -it.center.z;
-            cursor -= it.size.y + gap;
-          });
-          object.updateMatrixWorld(true);
-          return;
-        }
-        // "wacom": the FBX ships untextured plus a PBR set per part, matched
-        // by the FBX material names (PenTop, PenUpperBody, …).
-        for (const mesh of meshes) {
-          const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
-          const next = await Promise.all(
-            // eslint-disable-next-line @typescript-eslint/no-explicit-any
-            mats.map(async (m: any) => {
-              const base = `/models/wacom/${m.name}_`;
-              const [map, roughnessMap, metalnessMap] = await Promise.all([
-                loadTex(`${base}BaseColor.png`, true),
-                loadTex(`${base}Roughness.png`, false),
-                loadTex(`${base}Metallic.png`, false),
-              ]);
-              if (map) m.map = map;
-              if (roughnessMap) m.roughnessMap = roughnessMap;
-              if (metalnessMap) m.metalnessMap = metalnessMap;
-              return toStandard(m);
-            }),
-          );
-          mesh.material = Array.isArray(mesh.material) ? next : next[0];
-        }
-      };
 
       const group = new THREE.Group();
       scene.add(group);
 
-      const fitScale = (
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        size: any,
-        aspect: number,
-      ) => {
-        const halfH = Math.tan(THREE.MathUtils.degToRad(14)) * 7;
-        const halfW = halfH * aspect;
-        return Math.min((2 * halfW * 0.72) / size.x, (2 * halfH * 0.72) / size.y);
-      };
-
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const cache = new Map<number, { object: any; baseScale: number; size: any }>();
-      const loadModel = async (i: number, aspect: number) => {
-        const hit = cache.get(i);
-        if (hit) return hit;
-        const object = await loader.loadAsync(MODELS[i].src);
-        await skin(MODELS[i].skin, object);
-        // Stand the set upright for the portrait stage, then measure the
-        // posed bounds so nothing overflows the frame edges.
-        object.rotation.z = MODELS[i].tilt;
-        const box = new THREE.Box3().setFromObject(object);
-        const center = box.getCenter(new THREE.Vector3());
-        const size = box.getSize(new THREE.Vector3());
-        object.position.sub(center);
-        const entry = { object, baseScale: fitScale(size, aspect), size };
-        cache.set(i, entry);
-        return entry;
-      };
-      const refit = (aspect: number) => {
-        cache.forEach((entry) => {
-          entry.baseScale = fitScale(entry.size, aspect);
-        });
-      };
+      // Single pen, loaded once up front: parse + textures happen before
+      // first paint, never mid-scroll.
+      const object = await loader.loadAsync(PEN.src);
+      if (cancelled) {
+        stage.dispose();
+        return () => {};
+      }
+      await stage.skin(PEN.skin, object);
+      if (cancelled) {
+        stage.dispose();
+        return () => {};
+      }
+      object.rotation.z = PEN.tilt;
+      const box = new THREE.Box3().setFromObject(object);
+      const center = box.getCenter(new THREE.Vector3());
+      const size = box.getSize(new THREE.Vector3());
+      object.position.sub(center);
+      group.add(object);
+      // 0.70 fill keeps the whole pen inside the frame at every drift
+      // extreme, ends included.
+      let baseScale = stage.fitScale(size, camera.aspect, 0.7);
+      // Eased toward baseScale every frame: the glide changes the frame
+      // aspect, and stepping the pen size discretely reads as a pop.
+      let scaleCur = baseScale;
+      group.scale.setScalar(scaleCur);
 
       const reduced = prefersReducedMotion();
-      const clock = new THREE.Clock();
+      let lastT = performance.now();
       let raf = 0;
-      let current = -1;
       let spin = 0.5;
       let yawUser = 0;
       let pitchUser = 0;
@@ -306,12 +106,8 @@ export default function ScrollCompanion({
       let dragging = false;
       let lastX = 0;
       let lastY = 0;
-      let swapAt = -1;
-      let pending = -1;
-      let blend = 0;
       let docked = false;
       const geo = { x: 0, y: 0, w: 0, h: 0 };
-      const canvas = renderer.domElement;
       // Compositor-friendly stage: position with transform, never
       // left/top, and skip writes that did not change.
       el.style.willChange = "transform";
@@ -325,82 +121,52 @@ export default function ScrollCompanion({
       };
       refreshPageMax();
 
-      // Dock panel geometry, document-relative so the per-frame viewport
+      // Pen-rest geometry, document-relative so the per-frame viewport
       // position is pure arithmetic (scrollY is layout-free). Refreshed
       // on layout events, never in the hot loop.
-      const dockBox = { top: -1, left: 0, w: 0, h: 0 };
-      const refreshDockBox = () => {
+      const restBox = { top: -1, left: 0, w: 0, h: 0 };
+      const refreshRestBox = () => {
         const d = dockRef.current;
         if (!d) {
-          dockBox.top = -1;
+          restBox.top = -1;
           return;
         }
         const r = d.getBoundingClientRect();
         if (r.width <= 0) {
-          dockBox.top = -1;
+          restBox.top = -1;
           return;
         }
-        dockBox.top = r.top + window.scrollY;
-        dockBox.left = r.left;
-        dockBox.w = r.width;
-        dockBox.h = r.height;
+        restBox.top = r.top + window.scrollY;
+        restBox.left = r.left;
+        restBox.w = r.width;
+        restBox.h = r.height;
       };
-      refreshDockBox();
+      refreshRestBox();
 
       const pageProgress = () =>
         pageMax > 0 ? Math.min(1, Math.max(0, window.scrollY / pageMax)) : 0;
 
-      // Thirds with hysteresis: hovering at a boundary never flickers
-      // between models — a switch needs 0.02 of progress past the line.
-      const thirdFor = (p: number, cur: number) => {
-        const raw = Math.min(MODELS.length - 1, Math.floor(p * MODELS.length));
-        if (raw === cur || cur < 0) return raw;
-        const b = raw > cur ? raw / MODELS.length : (raw + 1) / MODELS.length;
-        const past = raw > cur ? p - b : b - p;
-        return past < 0.02 ? cur : raw;
-      };
-
-      const show = async (i: number) => {
-        if (i === current) return;
-        try {
-          const entry = await loadModel(i, camera.aspect);
-          if (cancelled) return;
-          if (current < 0) {
-            // First paint: place directly, no handoff from nothing.
-            group.add(entry.object);
-            group.scale.setScalar(entry.baseScale);
-            current = i;
-            if (reduced && !cancelled) kickGlide();
-            return;
-          }
-          pending = i;
-          swapAt = performance.now();
-          if (reduced && !cancelled) kickGlide();
-        } catch {
-          // A model that never loads is skipped: release the transition
-          // so the current model (if any) keeps traveling.
-          if (pending === i) {
-            pending = -1;
-            swapAt = -1;
-          }
-        }
-      };
-
-      // Travel rect (right rail) vs dock rect (instrument panel). Returns
-      // the target geometry and whether the panel owns the stage.
+      // Travel rect (right rail) vs rest rect (pen rest zone). Returns
+      // the target geometry and whether the rest owns the stage.
+      // Thresholds have hysteresis: entering needs the panel well inside
+      // the viewport, leaving needs it clearly out — hovering at the edge
+      // never flaps between the two layers.
       const targetGeo = () => {
         const vw = window.innerWidth;
         const vh = window.innerHeight;
-        if (dockBox.top >= 0) {
-          const top = dockBox.top - window.scrollY;
-          const bottom = top + dockBox.h;
-          if (top < vh * 0.7 && bottom > vh * 0.3) {
+        if (restBox.top >= 0) {
+          const top = restBox.top - window.scrollY;
+          const bottom = top + restBox.h;
+          const inside = docked
+            ? !(top > vh * 0.85 || bottom < vh * 0.15)
+            : top < vh * 0.7 && bottom > vh * 0.3;
+          if (inside) {
             return {
               docked: true,
-              x: dockBox.left,
+              x: restBox.left,
               y: top,
-              w: dockBox.w,
-              h: dockBox.h,
+              w: restBox.w,
+              h: restBox.h,
             };
           }
         }
@@ -411,6 +177,13 @@ export default function ScrollCompanion({
       };
       // Last geometry target, for glide-settled checks.
       const tgt = { x: 0, y: 0, w: 0, h: 0 };
+      // One layer forever: the stage stays behind page content and the
+      // rest zone is transparent, so docking needs no z cut and no fade —
+      // the pen simply glides in (passing behind the dark lineup zone on
+      // the way reads as flying behind the set). Pointer events alone
+      // toggle: the transparent zones let clicks fall through to the
+      // canvas while docked.
+      el.style.zIndex = "-1";
       const applyGeo = (instant: boolean) => {
         const t = targetGeo();
         tgt.x = t.x;
@@ -420,9 +193,6 @@ export default function ScrollCompanion({
         if (t.docked !== docked) {
           docked = t.docked;
           el.style.pointerEvents = docked ? "auto" : "none";
-          // Above the opaque dock panel while docked, behind page content
-          // while traveling so text stays readable.
-          el.style.zIndex = docked ? "2" : "-1";
           if (!cancelled) onDock(docked);
         }
         if (instant) {
@@ -431,17 +201,20 @@ export default function ScrollCompanion({
           geo.w = t.w;
           geo.h = t.h;
         } else {
-          // Slow glide so the flight between rail and dock reads as travel.
+          // Slow glide so the flight between rail and rest reads as travel.
           const k = 0.06;
           geo.x += (t.x - geo.x) * k;
           geo.y += (t.y - geo.y) * k;
           geo.w += (t.w - geo.w) * k;
           geo.h += (t.h - geo.h) * k;
         }
+        // Position glides sub-pixel (compositor-only transform); size
+        // steps whole pixels (width/height force layout, and 1px steps are
+        // invisible mid-flight).
         const sx = geo.x.toFixed(1);
         const sy = geo.y.toFixed(1);
-        const sw = geo.w.toFixed(1);
-        const sh = geo.h.toFixed(1);
+        const sw = Math.round(geo.w).toFixed(0);
+        const sh = Math.round(geo.h).toFixed(0);
         if (sx !== written.x || sy !== written.y) {
           written.x = sx;
           written.y = sy;
@@ -455,11 +228,14 @@ export default function ScrollCompanion({
         }
       };
 
+      // Vertical drift stays well inside the frame: full travel at the
+      // page ends plus the idle bob must never push a pen tip past the
+      // canvas edge (the fit leaves ~14% headroom per side).
       const poseTravel = (p: number, t: number) => ({
         ry: 0.5 + p * Math.PI * 4 + spin,
         rx: -0.1 + Math.sin(p * Math.PI * 2) * 0.18,
         x: Math.sin(p * Math.PI * 3) * 0.45,
-        y: (0.5 - p) * 0.9 + (reduced ? 0 : Math.sin(t * 0.8) * 0.1),
+        y: (0.5 - p) * 0.6 + (reduced ? 0 : Math.sin(t * 0.8) * 0.08),
       });
       const poseDock = () => ({
         ry: spin * 2 + yawUser + tiltY,
@@ -468,57 +244,37 @@ export default function ScrollCompanion({
         y: 0,
       });
 
+      const blendRef = { v: 0 };
       const render = () => {
-        const dt = Math.min(clock.getDelta(), 0.05);
-        const t = clock.elapsedTime;
+        const now = performance.now();
+        const dt = Math.min((now - lastT) / 1000, 0.05);
+        lastT = now;
+        const t = now / 1000;
         if (!reduced) spin += dt * 0.22;
         applyGeo(false);
-        blend += ((docked ? 1 : 0) - blend) * (reduced ? 1 : Math.min(1, dt * 5));
         const p = pageProgress();
-        const want = thirdFor(p, current);
-        if (want !== current && pending < 0) void show(want);
-        // Gentle handoff: breathe down to 65% with a soft extra turn and
-        // back — never a vanish, never a whip.
-        if (swapAt >= 0 && pending >= 0) {
-          const k = Math.min((performance.now() - swapAt) / 650, 1);
-          spin += reduced ? 0 : dt * 2.2 * Math.sin(k * Math.PI);
-          if (k >= 0.5 && current !== pending && cache.has(pending)) {
-            const entry = cache.get(pending)!;
-            if (current >= 0) group.remove(group.children[0]);
-            group.add(entry.object);
-            current = pending;
-          }
-          const entry = cache.get(current >= 0 ? current : pending);
-          const s = entry
-            ? entry.baseScale * (1 - 0.35 * Math.sin(k * Math.PI))
-            : 0.0001;
-          group.scale.setScalar(Math.max(s, 0.0001));
-          if (k >= 1 && cache.has(current)) {
-            group.scale.setScalar(cache.get(current)!.baseScale);
-            swapAt = -1;
-            pending = -1;
-          }
-        } else if (current >= 0 && cache.has(current)) {
-          group.scale.setScalar(cache.get(current)!.baseScale);
-        }
         const a = poseTravel(p, t);
         const b = poseDock();
-        group.rotation.y = a.ry + (b.ry - a.ry) * blend;
-        group.rotation.x = a.rx + (b.rx - a.rx) * blend;
-        group.position.x = a.x * (1 - blend);
-        group.position.y = a.y * (1 - blend);
+        // Ease between travel and docked poses over ~0.5s of blend.
+        blendRef.v += ((docked ? 1 : 0) - blendRef.v) * (reduced ? 1 : Math.min(1, dt * 5));
+        const k = blendRef.v;
+        group.rotation.y = a.ry + (b.ry - a.ry) * k;
+        group.rotation.x = a.rx + (b.rx - a.rx) * k;
+        group.position.x = a.x * (1 - k);
+        group.position.y = a.y * (1 - k);
+        scaleCur += (baseScale - scaleCur) * (reduced ? 1 : Math.min(1, dt * 5));
+        group.scale.setScalar(scaleCur);
         renderer.render(scene, camera);
       };
-      // Idle render-skip: after 4s of no scroll, drag, or handoff, park
-      // the loop instead of burning frames on a settled scene.
+      // Idle render-skip: after 4s of no scroll or drag, park the loop
+      // instead of burning frames on a settled scene.
       let lastActive = performance.now();
       let lastRefresh = 0;
       const loop = () => {
         if (!document.hidden) {
           const now = performance.now();
-          const idle =
-            now - lastActive > 4000 && swapAt < 0 && !dragging;
-          if (idle) clock.getDelta();
+          const idle = now - lastActive > 4000 && !dragging;
+          if (idle) lastT = now;
           else {
             // Layout heartbeat while active: late fonts or resizes move
             // the page under us; re-measure at most every 5s, never in
@@ -526,7 +282,7 @@ export default function ScrollCompanion({
             if (now - lastRefresh > 5000) {
               lastRefresh = now;
               refreshPageMax();
-              refreshDockBox();
+              refreshRestBox();
             }
             render();
           }
@@ -551,9 +307,7 @@ export default function ScrollCompanion({
               Math.abs(geo.y - tgt.y) +
               Math.abs(geo.w - tgt.w) +
               Math.abs(geo.h - tgt.h) <
-              0.6 &&
-            Math.abs(blend - (docked ? 1 : 0)) < 0.01 &&
-            pending < 0;
+              0.6 && Math.abs(blendRef.v - (docked ? 1 : 0)) < 0.01;
           if (settled) {
             gliding = false;
             return;
@@ -570,45 +324,9 @@ export default function ScrollCompanion({
       const onResize = () => {
         if (cancelled) return;
         refreshPageMax();
-        refreshDockBox();
+        refreshRestBox();
         if (reduced) kickGlide();
       };
-      // Scroll-path preload: parse and texture the other models shortly
-      // after first paint (staggered, off the scroll path), so crossing a
-      // third mid-fling never runs FBX parsing on the main thread.
-      const warm = () => {
-        let i = 1;
-        const step = () => {
-          if (cancelled || i >= MODELS.length) return;
-          loadModel(i, camera.aspect)
-            .catch(() => {})
-            .finally(() => {
-              i += 1;
-              window.setTimeout(step, 800);
-            });
-        };
-        window.setTimeout(step, 2500);
-      };
-      const renderOnce = () => {
-        applyGeo(true);
-        blend = docked ? 1 : 0;
-        const p = pageProgress();
-        const want = thirdFor(p, current);
-        if (want !== current) {
-          void show(want);
-          return;
-        }
-        const a = poseTravel(p, 0);
-        const b = poseDock();
-        group.rotation.y = a.ry + (b.ry - a.ry) * blend;
-        group.rotation.x = a.rx + (b.rx - a.rx) * blend;
-        group.position.x = a.x * (1 - blend);
-        group.position.y = a.y * (1 - blend);
-        if (current >= 0 && cache.has(current))
-          group.scale.setScalar(cache.get(current)!.baseScale);
-        renderer.render(scene, camera);
-      };
-
       const onPointerMove = (e: PointerEvent) => {
         if (!docked) return;
         const rect = canvas.getBoundingClientRect();
@@ -623,7 +341,7 @@ export default function ScrollCompanion({
           tiltY = nx * 0.22;
           tiltX = ny * 0.15;
         }
-        if (reduced) renderOnce();
+        if (reduced) render();
       };
       const onPointerDown = (e: PointerEvent) => {
         if (!docked) return;
@@ -639,23 +357,35 @@ export default function ScrollCompanion({
         canvas.style.cursor = "grab";
       };
       let camAspect = 0;
+      // The glide resizes the stage every frame: keep the camera aspect
+      // exact (cheap) but reallocate the GPU backing store only on
+      // settled steps (expensive) — a few px of transient upscale is
+      // invisible mid-flight and kills the resize stutter.
+      let backingW = 0;
+      let backingH = 0;
       const ro = new ResizeObserver(() => {
         const w = el.clientWidth;
         const h = el.clientHeight;
         if (!w || !h) return;
-        renderer.setSize(w, h, false);
         const aspect = w / h;
         camera.aspect = aspect;
         camera.updateProjectionMatrix();
+        if (
+          Math.abs(w - backingW) >= 4 ||
+          Math.abs(h - backingH) >= 4
+        ) {
+          backingW = w;
+          backingH = h;
+          renderer.setSize(w, h, false);
+        }
         if (Math.abs(aspect - camAspect) > 0.05) {
           camAspect = aspect;
-          refit(aspect);
+          baseScale = stage.fitScale(size, aspect, 0.7);
         }
-        if (reduced) renderOnce();
       });
       ro.observe(el);
 
-      // First frame: snap onto the travel rail, load the opening model.
+      // First frame: snap onto the travel rail with the pen already aboard.
       applyGeo(true);
       camAspect = el.clientWidth / Math.max(el.clientHeight, 1);
       camera.aspect = camAspect;
@@ -665,15 +395,8 @@ export default function ScrollCompanion({
       canvas.addEventListener("pointerup", onPointerUp);
       window.addEventListener("scroll", onScroll, { passive: true });
       window.addEventListener("resize", onResize);
-      if (reduced) {
-        void show(0).then(() => {
-          if (!cancelled) renderOnce();
-        });
-        warm();
-      } else {
-        loop();
-        warm();
-      }
+      if (reduced) render();
+      else loop();
 
       return () => {
         cancelAnimationFrame(raf);
@@ -683,24 +406,18 @@ export default function ScrollCompanion({
         canvas.removeEventListener("pointermove", onPointerMove);
         canvas.removeEventListener("pointerdown", onPointerDown);
         canvas.removeEventListener("pointerup", onPointerUp);
-        cache.forEach(({ object }) => {
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          object.traverse((child: any) => {
-            if (child.isMesh) child.geometry?.dispose?.();
-          });
+        object.traverse((child: any) => {
+          if (child.isMesh) child.geometry?.dispose?.();
         });
-        owned.forEach((o) => o.dispose?.());
-        pmrem.dispose();
-        renderer.dispose();
-        canvas.remove();
+        stage.dispose();
       };
     };
 
-    // Deferred start: let first paint and hero videos win the first
-    // second instead of racing three.js and FBX parsing against them.
+    // Short deferred start: one model only, so setup is fast — just let
+    // first paint win the race before three.js downloads.
     const timer = window.setTimeout(() => {
       void start();
-    }, 1200);
+    }, 500);
     return () => {
       cancelled = true;
       window.clearTimeout(timer);

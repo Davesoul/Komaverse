@@ -115,7 +115,8 @@ The Komaverse differentiator vs koma-wari (a manual studio): an AI agent
 that operates the app. Tools call the real endpoint functions, so auth
 scoping, validation, metrics, and credits apply identically. Two brains:
 DemoBrain (keyword intents, always available, executes for real) and
-CloudBrain (tool-calling LLM when AI_API_KEY is set, falls back to demo).
+CloudBrain (tool-calling LLM on Meta Model API / OpenRouter / generic
+cloud via AI_PROVIDER when its key is set, falls back to demo).
 Auto-direct (panels → paced, motion-varied timeline) is both an agent tool
 and a one-click endpoint, so the innovation is usable with and without chat.
 
@@ -138,8 +139,9 @@ Permissions-Policy opens microphone=(self) so the served SPA can record.
   credentialed CORS; page pixels load via credentialed fetch → blob URL so
   remote-URL desktop keeps working.
 - Credit refunds only return debited credits (paywall-gated, matching the
-  debit); kind=video is rejected upfront at POST /ai/generate because no
-  provider implements it — the dead debit/fail/refund path is removed.
+  debit); kind=video is accepted only with provider=openrouter (async
+  submit + poll, 25 credits, MP4 artifact, no frame attach) and rejected
+  upfront otherwise — the dead debit/fail/refund path stays removed.
 - Re-detect requires confirm (409 otherwise); reading direction threads
   end-to-end (RTL default + LTR toggle); panel boxes are bounds-validated;
   deletes renumber; cloud boxes scale to original pixels and sort server-side.
@@ -155,5 +157,63 @@ Permissions-Policy opens microphone=(self) so the served SPA can record.
   ask instead of silently using projects[0]; chat exports respect 5/min;
   generate replies carry the job id; AI_PROVIDER is honored by generate
   defaults and the agent; ComfyUI ckpt/seed/timeout are configurable.
-  Deferred (explicit): detector upgrades (YOLO), RQ ingest queues, agent
+  Deferred (explicit): RQ ingest queues, agent
   streaming/history/approval-gated loops, CLIP search, orphan GC scanner.
+
+Amendment: YOLO detectors landed — `yolo` follows `KOMA_YOLO_MODEL`
+(`best-comic-panel-detection.pt` default, `backend/models/`), plus a pinned
+`yolo-leoxs22` option; heuristic stays as fallback. Panel/frame previews take
+`?px=` (64..1600) so the Animate player renders contain-fit hi-res stills.
+Draw grew G-pen/Japanese/modern presets, Ctrl+scroll zoom, a frames strip
+under the canvas with last-open restore, and canvas-native fps playback with
+loop. Agent chat takes `@frame:`/`@media:`/`@panel:` refs.
+
+Amendment: Draw frames reorder by drag (edge drop-hint) + Alt+Left/Right,
+persisted via `PATCH /projects/{id}/frames/order` (exact-set, else 400);
+filmstrip restores the order on reload. Transport/editing buttons across
+tabs are icon-only (`IconBtn`: glyph + `title` + `aria-label`), words kept
+for Generate/Export/Save/modes/filters/nav. Dev stack moved to API `:8001`
+(web `:5173`, proxy `/api,/health,/media`): a stale pre-reload worker can
+squat `:8000` serving old routes (no `frames/order`), so the scripts
+default to 8001 and `stop.ps1`/`restart.ps1` also clear 8000.
+
+Amendment: landing 3D is one traveling tablet pen (`ScrollCompanion`,
+wacom only, hero to footer, docks into the instrument pen-rest zone) —
+no model swaps, so scrolling never parses mid-flight; shared
+`lib/models3d.ts` stage/skins/fit. The micron set + studio pen live
+permanently in the dock's lineup zone (`InstrumentModels`, lazy on
+section approach, renders only while visible, static frame on arrival
+under reduced motion); lineup framing derives from live aspect so both
+pieces sit fully inside the portrait zone. Deferral 1200→500ms, lineup
+pieces join the scene as each loads instead of blocking on the 2MB pen.
+
+Amendment: all landing CTAs read "Create" (was "Start creating").
+Traveler dock handoff dips through transparent for one beat while crossing
+layers (z -1 rail to z 2 rest) with enter/exit hysteresis, so arriving at
+the instrument section never blinks; travel drift narrowed (0.6 amplitude,
+0.70 fit) so the pen never clips its frame at the page ends.
+
+Amendment: the dock transition blink was the layer cut itself (z -1 to 2
+plus a 300ms opacity dip) and per-frame GPU reallocs during the glide.
+The traveler now stays on one layer forever (z -1, opacity untouched):
+the rest zone is transparent with a dashed outline, the dock/section/grid
+are click-through (copy column + lineup stay interactive), so the pen
+glides in with no cut and no fade. Backing-store resizes are quantized to
+4px steps and CSS size writes to whole pixels while positions stay
+sub-pixel — the glide no longer stutters mid-flight. The lineup zone is
+flat black (#060608); the pen rest pad stays transparent (dashed outline)
+because the traveler shows through it — an opaque pad would hide the pen.
+Pen scale now eases toward its fit each frame instead of stepping when
+the glide changes the frame aspect.
+
+Amendment: AI consistency v1. `GenerateRequest` takes seed (random per job
+when blank, stored), negative_prompt ("Avoid:" fold, native node on
+ComfyUI), enhance toggle (one fail-soft chat rewrite), style presets
+(6 + none), camera moves (8 + none, video only), entity_ids and
+reference_frame_id. Entities are a per-project library (character | field
+| prop) with a text anchor + optional draw-frame snapshot; prompts carry
+the anchors on every provider, and OpenRouter gets them as images too
+(`input_references`, verified live docs) — video gets the reference frame
+as `first_frame` (`frame_images`). Contract deltas re-verified against the
+official Image/Video guides on 2026-10-30. Jobs show seed + entities +
+"What was sent" (final prompt) in the UI.

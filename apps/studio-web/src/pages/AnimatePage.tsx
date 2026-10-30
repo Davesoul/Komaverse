@@ -2,14 +2,17 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   api,
   mediaUrl,
+  type AiModelCatalog,
   type AudioTake,
   type Clip,
   type DrawFrame,
+  type Entity,
   type ExportReport,
   type Job,
   type Page,
   type Project,
   type Scene,
+  type SubtitleTrack,
 } from "../api";
 import {
   Btn,
@@ -17,6 +20,7 @@ import {
   Chip,
   ImpactFlash,
   EmptyState,
+  IconBtn,
   Notice,
   PrimaryBtn,
   SectionTitle,
@@ -30,16 +34,41 @@ import {
 import { AudioDeck } from "../components/AudioDeck";
 import { Magnet } from "../components/Magnet";
 import { PreviewPlayer, type PreviewClip } from "../components/PreviewPlayer";
+import { Timeline, fmtTC, type TimelineCueInfo } from "../components/Timeline";
 import { getCurrentProject, setCurrentProject } from "../lib/studio";
 
 const MOTIONS = ["none", "zoom-in", "zoom-out", "pan-left", "pan-right"];
 const POLL_MS = 1500;
-
-const KIND_TONE: Record<string, string> = {
-  panel: "#c1121f",
-  frame: "#6fa373",
-  media: "#7d9cc4",
-  ai: "#ff5a5f",
+// Mirror backend ai/direction.py keys; the server validates unknown ids.
+const STYLES = [
+  ["none", "No style"],
+  ["manga-ink", "Manga ink"],
+  ["cel-anime", "Cel anime"],
+  ["watercolor", "Watercolor"],
+  ["ukiyoe", "Ukiyo-e"],
+  ["noir", "Noir"],
+  ["pencil", "Pencil sketch"],
+] as const;
+const CAMERA_MOVES = [
+  ["none", "Static"],
+  ["dolly-in", "Slow dolly-in"],
+  ["dolly-out", "Slow dolly-out"],
+  ["pan-left", "Pan left"],
+  ["pan-right", "Pan right"],
+  ["crane-up", "Crane up"],
+  ["orbit", "Slow orbit"],
+  ["handheld", "Handheld drift"],
+  ["zoom-snap", "Snap zoom"],
+] as const;
+const ENTITY_KINDS = [
+  ["character", "Character"],
+  ["field", "Field"],
+  ["prop", "Prop"],
+] as const;
+const ENTITY_GLYPH: Record<string, string> = {
+  character: "◉",
+  field: "◈",
+  prop: "⬢",
 };
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -135,11 +164,37 @@ export default function AnimatePage() {
   const [prompt, setPrompt] = useState("");
   const [genProvider, setGenProvider] = useState("cloud");
   const [genSize, setGenSize] = useState("1024");
+  const [genKind, setGenKind] = useState("image");
+  const [genSeconds, setGenSeconds] = useState("4");
+  const [genModel, setGenModel] = useState("");
+  const [aiModels, setAiModels] = useState<AiModelCatalog | null>(null);
+  const [genStartedAt, setGenStartedAt] = useState(0);
+  const [genElapsed, setGenElapsed] = useState(0);
   const [genJob, setGenJob] = useState<Job | null>(null);
+  const [genSeed, setGenSeed] = useState("");
+  const [genNegative, setGenNegative] = useState("");
+  const [genEnhance, setGenEnhance] = useState(false);
+  const [genStyle, setGenStyle] = useState("none");
+  const [genCamera, setGenCamera] = useState("none");
+  const [entities, setEntities] = useState<Entity[]>([]);
+  const [entityIds, setEntityIds] = useState<string[]>([]);
+  const [refFrame, setRefFrame] = useState("");
+  const [showConsistency, setShowConsistency] = useState(false);
+  const [showFinal, setShowFinal] = useState(false);
+  const [newEntName, setNewEntName] = useState("");
+  const [newEntKind, setNewEntKind] = useState("character");
+  const [newEntAnchor, setNewEntAnchor] = useState("");
+  const [newEntFrame, setNewEntFrame] = useState("");
+  const [showNewEnt, setShowNewEnt] = useState(false);
   const [playhead, setPlayhead] = useState(0);
   const [seek, setSeek] = useState<{ time: number; nonce: number } | null>(null);
+  const [playReq, setPlayReq] = useState(0);
+  const [subtitles, setSubtitles] = useState<SubtitleTrack | null>(null);
+  const [subBusy, setSubBusy] = useState(false);
+  const subFileRef = useRef<HTMLInputElement>(null);
   const [renamingScene, setRenamingScene] = useState("");
   const [dragId, setDragId] = useState<string | null>(null);
+  const [selectedClipId, setSelectedClipId] = useState<string | null>(null);
 
   // Reload restores the persisted project (validated against the server
   // list) instead of asking again; manual selection still publishes.
@@ -169,6 +224,13 @@ export default function AnimatePage() {
     setFrames(frameList);
     setTakes(takeList);
     if (bal) setBalance(bal.balance);
+    api
+      .listEntities(projectId)
+      .then((ents) => {
+        setEntities(ents);
+        setEntityIds((ids) => ids.filter((id) => ents.some((e) => e.id === id)));
+      })
+      .catch(() => {});
     const chosen = sceneList.find((s) => s.id === (keepScene ?? sceneId)) ?? sceneList[0];
     setSceneId(chosen?.id ?? "");
   };
@@ -180,6 +242,91 @@ export default function AnimatePage() {
   );
   const total = clips.reduce((sum, c) => sum + c.duration, 0);
   const cueCount = scenes.reduce((sum, s) => sum + s.cues.length, 0);
+  const selectedClip = clips.find((c) => c.id === selectedClipId) ?? clips[0] ?? null;
+
+  const cueInfos: TimelineCueInfo[] = useMemo(
+    () =>
+      (scene?.cues ?? []).flatMap((cue) => {
+        const take = takes.find((t) => t.id === cue.audio_id);
+        if (!take) return [];
+        return [
+          {
+            id: cue.id,
+            name: take.name || "Take",
+            start: Math.max(cue.start_sec, 0),
+            offset: Math.max(cue.offset_sec, 0),
+            takeDur: Math.max(take.duration_sec, 0),
+            endSec: cue.end_sec ?? null,
+            lane: cue.lane ?? 0,
+          },
+        ];
+      }),
+    [scene, takes],
+  );
+
+  // Live preview mix: every cued take positioned like the export mix.
+  const previewAudio = useMemo(
+    () =>
+      (scene?.cues ?? []).flatMap((cue) => {
+        const take = takes.find((t) => t.id === cue.audio_id);
+        if (!take) return [];
+        const start = Math.max(cue.start_sec, 0);
+        const offset = Math.max(cue.offset_sec, 0);
+        let len = Math.max(take.duration_sec - offset, 0.1);
+        if (cue.end_sec != null) len = Math.min(len, Math.max(cue.end_sec - start, 0.1));
+        if (total > 0) len = Math.min(len, Math.max(total - start, 0.2));
+        if (len <= 0) return [];
+        return [
+          {
+            id: cue.id,
+            url: mediaUrl(take.url),
+            start,
+            end: start + len,
+            offset,
+            volume: cue.volume,
+          },
+        ];
+      }),
+    [scene, takes, total],
+  );
+
+  const commitClipPatch = async (
+    id: string,
+    patch: { duration?: number; motion?: string },
+    previewMotion = false,
+  ) => {
+    if (!project || !scene) return;
+    try {
+      await api.patchClip(id, patch);
+      await refresh(project.id, scene.id);
+      if (previewMotion) {
+        // A picked motion is invisible on a paused preview — replay from
+        // this clip so the move shows immediately (motion never retimes,
+        // so the pre-refresh durations still locate the clip start).
+        const idx = clips.findIndex((c) => c.id === id);
+        const start = clips
+          .slice(0, Math.max(idx, 0))
+          .reduce((a, c) => a + c.duration, 0);
+        setSeek({ time: start, nonce: Date.now() });
+        setPlayReq((n) => n + 1);
+      }
+    } catch (e) {
+      setNotice(`Clip update failed: ${(e as Error).message}`);
+    }
+  };
+
+  const commitCuePatch = async (
+    id: string,
+    patch: { start_sec?: number; offset_sec?: number; end_sec?: number | null; lane?: number },
+  ) => {
+    if (!project || !scene) return;
+    try {
+      await api.patchCue(id, patch);
+      await refresh(project.id, scene.id);
+    } catch (e) {
+      setNotice(`Sound trim failed: ${(e as Error).message}`);
+    }
+  };
 
   const previewClips: PreviewClip[] = useMemo(
     () =>
@@ -196,6 +343,56 @@ export default function AnimatePage() {
 
   const onTime = useCallback((t: number) => setPlayhead(t), []);
 
+  // Subtitle track follows the active scene.
+  useEffect(() => {
+    if (!sceneId) {
+      setSubtitles(null);
+      return;
+    }
+    api.getSubtitles(sceneId).then(setSubtitles).catch(() => setSubtitles(null));
+  }, [sceneId]);
+
+  const caption =
+    subtitles?.segments.find((s) => playhead >= s.start_sec && playhead < s.end_sec)?.text ?? "";
+
+  const startVoiceover = useCallback(
+    (atTime: number) => {
+      setSeek({ time: atTime, nonce: Date.now() });
+      setPlayReq((n) => n + 1);
+    },
+    [],
+  );
+
+  const dropTake = async (takeId: string, atTime: number, lane: number) => {
+    if (!project || !scene) return;
+    try {
+      await api.addCue(scene.id, {
+        audio_id: takeId,
+        start_sec: Math.round(atTime * 10) / 10,
+        lane,
+      });
+      await refresh(project.id, scene.id);
+      setNotice(`Take cued at ${atTime.toFixed(1)}s — see the A1 lane.`);
+    } catch (e) {
+      setNotice(`Couldn't cue it: ${(e as Error).message}`);
+    }
+  };
+
+  const uploadSrt = async (file: File | undefined) => {
+    if (!file || !scene) return;
+    setSubBusy(true);
+    try {
+      const track = await api.uploadSubtitles(scene.id, file);
+      setSubtitles(track);
+      setNotice(`Subtitles loaded — ${track.segments.length} captions on the S1 lane.`);
+    } catch (e) {
+      setNotice(`Couldn't load subtitles: ${(e as Error).message}`);
+    } finally {
+      setSubBusy(false);
+      if (subFileRef.current) subFileRef.current.value = "";
+    }
+  };
+
   const pollJob = async (jobId: string, tries = 40): Promise<Job | null> => {
     for (let i = 0; i < tries; i++) {
       await sleep(POLL_MS);
@@ -204,6 +401,27 @@ export default function AnimatePage() {
     }
     return null;
   };
+
+  // Model catalog for the OpenRouter picker (single source: GET /ai/models).
+  useEffect(() => {
+    if (genProvider === "openrouter" && !aiModels) {
+      api.listAiModels().then(setAiModels).catch(() => {});
+    }
+  }, [genProvider, aiModels]);
+
+  // Elapsed-seconds ticker so long renders (video) show honest progress.
+  useEffect(() => {
+    if (busy !== "generate" || !genStartedAt) return;
+    setGenElapsed(0);
+    const t = setInterval(
+      () => setGenElapsed(Math.floor((Date.now() - genStartedAt) / 1000)),
+      1000
+    );
+    return () => clearInterval(t);
+  }, [busy, genStartedAt]);
+
+  const fmtElapsed = (s: number) =>
+    `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
 
   const doExport = async () => {
     if (!project || !scene || clips.length === 0 || exporting) return;
@@ -313,22 +531,95 @@ export default function AnimatePage() {
     await refresh(project.id);
   };
 
+  const toggleEntity = (id: string) =>
+    setEntityIds((ids) =>
+      ids.includes(id) ? ids.filter((x) => x !== id) : [...ids, id],
+    );
+
+  const saveEntity = async () => {
+    if (!project || !newEntName.trim() || busy) return;
+    setBusy("entity");
+    try {
+      const ent = await api.createEntity(project.id, {
+        kind: newEntKind,
+        name: newEntName.trim(),
+        anchor: newEntAnchor.trim(),
+        frame_id: newEntFrame || null,
+      });
+      setEntities((ents) => [...ents, ent]);
+      setEntityIds((ids) => [...ids, ent.id]);
+      setNewEntName("");
+      setNewEntAnchor("");
+      setNewEntFrame("");
+      setShowNewEnt(false);
+    } catch (e) {
+      setNotice(`Save entity failed: ${(e as Error).message}`);
+    } finally {
+      setBusy("");
+    }
+  };
+
+  const removeEntity = async (id: string) => {
+    if (busy) return;
+    setBusy("entity");
+    try {
+      await api.deleteEntity(id);
+      setEntities((ents) => ents.filter((e) => e.id !== id));
+      setEntityIds((ids) => ids.filter((x) => x !== id));
+    } catch (e) {
+      setNotice(`Delete entity failed: ${(e as Error).message}`);
+    } finally {
+      setBusy("");
+    }
+  };
+
+  const entityNames = (job: Job | null): string[] => {
+    if (!job?.entities_json) return [];
+    try {
+      const arr = JSON.parse(job.entities_json);
+      return Array.isArray(arr)
+        ? arr.map((e) => `${e.name} (${e.kind})`)
+        : [];
+    } catch {
+      return [];
+    }
+  };
+
   const doGenerate = async () => {
     if (!project || !prompt.trim() || busy) return;
     setBusy("generate");
     setNotice("");
     try {
       const size = Number(genSize) || 1024;
+      const isVideo = genKind === "video";
+      const seedNum = genSeed.trim() === "" ? undefined : Number(genSeed);
+      if (seedNum !== undefined && !Number.isInteger(seedNum)) {
+        setNotice("Seed must be a whole number (or blank for random).");
+        setBusy("");
+        return;
+      }
       const job = await api.generate({
-        kind: "image",
+        kind: genKind,
         prompt: prompt.trim(),
         project_id: project.id,
         provider: genProvider,
+        model:
+          genProvider === "openrouter" && genModel ? genModel : undefined,
         width: size,
         height: size,
+        seconds: isVideo ? Number(genSeconds) || 4 : undefined,
+        seed: seedNum,
+        negative_prompt: genNegative.trim() || undefined,
+        enhance: genEnhance || undefined,
+        style: genStyle !== "none" ? genStyle : undefined,
+        camera_move: isVideo && genCamera !== "none" ? genCamera : undefined,
+        entity_ids: entityIds.length ? entityIds : undefined,
+        reference_frame_id: refFrame || undefined,
       });
       setGenJob(job);
-      const done = await pollJob(job.id, 120);
+      setGenStartedAt(Date.now());
+      // Video renders for minutes: poll up to ~10 min (backend caps there too).
+      const done = await pollJob(job.id, isVideo ? 200 : 120);
       if (!done) {
         setNotice("Generation timed out — check back shortly.");
         return;
@@ -341,7 +632,11 @@ export default function AnimatePage() {
       const bal = await api.getBalance().catch(() => null);
       if (bal) setBalance(bal.balance);
       await refresh(project.id, scene?.id);
-      setNotice("Shot attached as a frame — add it to the timeline below.");
+      setNotice(
+        isVideo
+          ? "Video ready — preview it below."
+          : "Shot attached as a frame — add it to the timeline below."
+      );
     } catch (e) {
       setNotice(`Generation failed: ${(e as Error).message}`);
     } finally {
@@ -427,8 +722,8 @@ export default function AnimatePage() {
                 <Btn small disabled={!scene} onClick={() => setRenamingScene(sceneId)}>
                   Rename
                 </Btn>
-                <Btn small disabled={!scene} title="Move scene earlier" onClick={() => moveScene(-1)}>↑</Btn>
-                <Btn small disabled={!scene} title="Move scene later" onClick={() => moveScene(1)}>↓</Btn>
+                <IconBtn disabled={!scene} label="Move scene earlier" onClick={() => moveScene(-1)}>↑</IconBtn>
+                <IconBtn disabled={!scene} label="Move scene later" onClick={() => moveScene(1)}>↓</IconBtn>
                 <Btn small danger disabled={!scene} onClick={removeScene}>
                   Delete
                 </Btn>
@@ -523,57 +818,393 @@ export default function AnimatePage() {
 
         {project && (
           <div>
-            <SectionTitle>Generate image (AI)</SectionTitle>
+            <SectionTitle>Generate (AI)</SectionTitle>
             <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
               <SelectInput
                 style={{ width: "100%" }}
                 value={genProvider}
                 onChange={(e) => setGenProvider(e.target.value)}
                 aria-label="AI provider"
+                disabled={!!busy}
               >
-                <option value="cloud">Cloud</option>
+                <option value="cloud">Cloud (custom endpoint)</option>
+                <option value="meta">Meta Muse (agent + detect)</option>
+                <option value="openrouter">OpenRouter (image + video)</option>
                 <option value="comfyui">ComfyUI (local)</option>
                 <option value="fake">Fake (demo)</option>
               </SelectInput>
               <div style={{ display: "flex", gap: 6 }}>
+                <SelectInput
+                  value={genKind}
+                  onChange={(e) => setGenKind(e.target.value)}
+                  aria-label="Generation kind"
+                  disabled={!!busy}
+                >
+                  <option value="image">Image</option>
+                  <option value="video">Video (OpenRouter)</option>
+                </SelectInput>
+                {genKind === "video" ? (
+                  <SelectInput
+                    value={genSeconds}
+                    onChange={(e) => setGenSeconds(e.target.value)}
+                    aria-label="Video length"
+                    disabled={!!busy}
+                  >
+                    <option value="2">2s</option>
+                    <option value="4">4s</option>
+                    <option value="8">8s</option>
+                  </SelectInput>
+                ) : (
+                  <SelectInput
+                    value={genSize}
+                    onChange={(e) => setGenSize(e.target.value)}
+                    aria-label="Image size"
+                    disabled={!!busy}
+                  >
+                    <option value="512">512</option>
+                    <option value="1024">1024</option>
+                  </SelectInput>
+                )}
+              </div>
+              {genProvider === "openrouter" && (
+                <SelectInput
+                  style={{ width: "100%" }}
+                  value={genModel}
+                  onChange={(e) => setGenModel(e.target.value)}
+                  aria-label="AI model"
+                  disabled={!!busy}
+                >
+                  <option value="">
+                    Server default (
+                    {genKind === "video"
+                      ? aiModels?.defaults.video ?? "…"
+                      : aiModels?.defaults.image ?? "…"}
+                    )
+                  </option>
+                  {(genKind === "video" ? aiModels?.video : aiModels?.image)?.map(
+                    (m) => (
+                      <option key={m.id} value={m.id}>
+                        {m.label} — {m.badge === "cheap" ? "budget" : "popular"}
+                      </option>
+                    )
+                  )}
+                </SelectInput>
+              )}
+              <Btn
+                small
+                onClick={() => setShowConsistency((v) => !v)}
+                aria-expanded={showConsistency}
+                title="Seeds, styles, entities and start frames"
+              >
+                {showConsistency ? "▾ Consistency" : "▸ Consistency"}
+              </Btn>
+              {showConsistency && (
+                <div
+                  style={{
+                    display: "flex",
+                    flexDirection: "column",
+                    gap: 6,
+                    border: "1px solid var(--kv-border)",
+                    borderRadius: 8,
+                    padding: 8,
+                  }}
+                >
+                  <div style={{ display: "flex", gap: 6 }}>
+                    <TextInput
+                      placeholder="Seed (random)"
+                      value={genSeed}
+                      onChange={(e) => setGenSeed(e.target.value)}
+                      aria-label="Seed"
+                      style={{ flex: 1, minWidth: 0 }}
+                      disabled={!!busy}
+                    />
+                    <SelectInput
+                      value={genStyle}
+                      onChange={(e) => setGenStyle(e.target.value)}
+                      aria-label="Style preset"
+                      disabled={!!busy}
+                    >
+                      {STYLES.map(([v, label]) => (
+                        <option key={v} value={v}>
+                          {label}
+                        </option>
+                      ))}
+                    </SelectInput>
+                  </div>
+                  <TextInput
+                    placeholder="Avoid… (negative prompt)"
+                    value={genNegative}
+                    onChange={(e) => setGenNegative(e.target.value)}
+                    aria-label="Negative prompt"
+                    style={{ width: "100%" }}
+                    disabled={!!busy}
+                  />
+                  <div
+                    style={{
+                      display: "flex",
+                      gap: 6,
+                      alignItems: "center",
+                      flexWrap: "wrap",
+                    }}
+                  >
+                    {genKind === "video" && (
+                      <SelectInput
+                        value={genCamera}
+                        onChange={(e) => setGenCamera(e.target.value)}
+                        aria-label="Camera move"
+                        disabled={!!busy}
+                      >
+                        {CAMERA_MOVES.map(([v, label]) => (
+                          <option key={v} value={v}>
+                            {label}
+                          </option>
+                        ))}
+                      </SelectInput>
+                    )}
+                    <label
+                      style={{
+                        display: "flex",
+                        gap: 6,
+                        alignItems: "center",
+                        fontSize: 13,
+                      }}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={genEnhance}
+                        onChange={(e) => setGenEnhance(e.target.checked)}
+                        disabled={!!busy}
+                      />
+                      Enhance prompt
+                    </label>
+                  </div>
+                  <SelectInput
+                    value={refFrame}
+                    onChange={(e) => setRefFrame(e.target.value)}
+                    aria-label={
+                      genKind === "video"
+                        ? "Start frame (image to video)"
+                        : "Redraw frame (image to image)"
+                    }
+                    disabled={!!busy}
+                    style={{ width: "100%" }}
+                    title={
+                      genKind === "video"
+                        ? "Animate from this frame"
+                        : "Redraw this frame"
+                    }
+                  >
+                    <option value="">
+                      {genKind === "video" ? "No start frame" : "No redraw frame"}
+                    </option>
+                    {frames.map((f) => (
+                      <option key={f.id} value={f.id}>
+                        {f.name || `Frame ${f.index + 1}`}
+                      </option>
+                    ))}
+                  </SelectInput>
+                  <div
+                    style={{ display: "flex", gap: 6, flexWrap: "wrap" }}
+                    aria-label="Consistency entities"
+                  >
+                    {entities.map((e) => {
+                      const on = entityIds.includes(e.id);
+                      return (
+                        <span
+                          key={e.id}
+                          style={{
+                            display: "inline-flex",
+                            gap: 4,
+                            alignItems: "center",
+                            fontSize: 12,
+                            border: `1px solid ${on ? "var(--kv-accent)" : "var(--kv-border)"}`,
+                            borderRadius: 999,
+                            padding: "2px 4px 2px 8px",
+                            background: on ? "var(--kv-card)" : "transparent",
+                          }}
+                          title={
+                            e.anchor
+                              ? `${e.kind}: ${e.anchor}`
+                              : `${e.kind} (no anchor yet)`
+                          }
+                        >
+                          <button
+                            type="button"
+                            onClick={() => toggleEntity(e.id)}
+                            aria-pressed={on}
+                            title={`${on ? "Remove" : "Use"} ${e.name} in this generation`}
+                            style={{
+                              background: "none",
+                              border: "none",
+                              color: "inherit",
+                              cursor: "pointer",
+                              fontSize: 12,
+                              padding: 0,
+                            }}
+                            disabled={!!busy}
+                          >
+                            {ENTITY_GLYPH[e.kind] ?? "•"} {e.name}
+                          </button>
+                          <IconBtn
+                            label={`Delete entity ${e.name}`}
+                            onClick={() => void removeEntity(e.id)}
+                          >
+                            ×
+                          </IconBtn>
+                        </span>
+                      );
+                    })}
+                    <Btn
+                      small
+                      onClick={() => setShowNewEnt((v) => !v)}
+                      aria-expanded={showNewEnt}
+                      title="Save a character, field or prop"
+                    >
+                      + Entity
+                    </Btn>
+                  </div>
+                  {showNewEnt && (
+                    <div
+                      style={{
+                        display: "flex",
+                        flexDirection: "column",
+                        gap: 6,
+                      }}
+                    >
+                      <div style={{ display: "flex", gap: 6 }}>
+                        <TextInput
+                          placeholder="Name — Rin, Rooftop…"
+                          value={newEntName}
+                          onChange={(e) => setNewEntName(e.target.value)}
+                          aria-label="Entity name"
+                          style={{ flex: 1, minWidth: 0 }}
+                          disabled={!!busy}
+                        />
+                        <SelectInput
+                          value={newEntKind}
+                          onChange={(e) => setNewEntKind(e.target.value)}
+                          aria-label="Entity kind"
+                          disabled={!!busy}
+                        >
+                          {ENTITY_KINDS.map(([v, label]) => (
+                            <option key={v} value={v}>
+                              {label}
+                            </option>
+                          ))}
+                        </SelectInput>
+                      </div>
+                      <TextInput
+                        placeholder="Anchor — always true, e.g. red scarf, rainy neon rooftop"
+                        value={newEntAnchor}
+                        onChange={(e) => setNewEntAnchor(e.target.value)}
+                        aria-label="Entity anchor"
+                        style={{ width: "100%" }}
+                        disabled={!!busy}
+                      />
+                      <div style={{ display: "flex", gap: 6 }}>
+                        <SelectInput
+                          value={newEntFrame}
+                          onChange={(e) => setNewEntFrame(e.target.value)}
+                          aria-label="Entity snapshot frame"
+                          disabled={!!busy}
+                          style={{ flex: 1, minWidth: 0 }}
+                          title="Optional visual snapshot"
+                        >
+                          <option value="">No snapshot</option>
+                          {frames.map((f) => (
+                            <option key={f.id} value={f.id}>
+                              {f.name || `Frame ${f.index + 1}`}
+                            </option>
+                          ))}
+                        </SelectInput>
+                        <Btn small onClick={() => void saveEntity()} disabled={!!busy}>
+                          Save
+                        </Btn>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+              <div style={{ display: "flex", gap: 6 }}>
                 <TextInput
-                  placeholder="A moonlit robot…"
+                  placeholder={genKind === "video" ? "A robot walks through neon rain…" : "A moonlit robot…"}
                   value={prompt}
                   onChange={(e) => setPrompt(e.target.value)}
                   onKeyDown={(e) => e.key === "Enter" && doGenerate()}
                   style={{ flex: 1, minWidth: 0 }}
                 />
-                <SelectInput
-                  value={genSize}
-                  onChange={(e) => setGenSize(e.target.value)}
-                  aria-label="Image size"
-                >
-                  <option value="512">512</option>
-                  <option value="1024">1024</option>
-                </SelectInput>
               </div>
               <PrimaryBtn disabled={!prompt.trim() || !!busy} onClick={doGenerate}>
-                Generate (5 credits)
+                Generate ({genKind === "video" ? "25" : "5"} credits)
               </PrimaryBtn>
               {genJob && genJob.status !== "done" && genJob.status !== "failed" && (
                 <>
                   <span style={{ fontSize: 13, color: "var(--kv-muted)" }}>
-                    <Spinner /> Job {genJob.status}…
+                    <Spinner />{" "}
+                    {genKind === "video"
+                      ? `Rendering video… ${fmtElapsed(genElapsed)} elapsed (usually 2–8 min)`
+                      : `Rendering image… ${fmtElapsed(genElapsed)} elapsed`}
                   </span>
                   <Skeleton width="100%" height={220} />
                 </>
               )}
               {genJob?.status === "done" && genJob.result_url && (
                 <>
-                  <img
-                    crossOrigin="use-credentials"
-                    src={mediaUrl(genJob.result_url)}
-                    alt="Generated"
-                    style={{ width: "100%", borderRadius: 6, border: "1px solid var(--kv-border)" }}
-                  />
-                  <Btn disabled={!scene} onClick={addResultToTimeline}>
-                    Add result to timeline
-                  </Btn>
+                  <span style={{ fontSize: 12, color: "var(--kv-muted)" }}>
+                    Rendered with {genJob.model ?? "server default"}
+                    {genJob.seed != null && ` · seed ${genJob.seed}`}
+                    {entityNames(genJob).length > 0 &&
+                      ` · ${entityNames(genJob).join(", ")}`}
+                    .
+                  </span>
+                  {genJob.final_prompt && (
+                    <>
+                      <Btn
+                        small
+                        onClick={() => setShowFinal((v) => !v)}
+                        aria-expanded={showFinal}
+                        title="The exact prompt sent to the model"
+                      >
+                        {showFinal ? "▾ What was sent" : "▸ What was sent"}
+                      </Btn>
+                      {showFinal && (
+                        <pre
+                          style={{
+                            fontSize: 12,
+                            whiteSpace: "pre-wrap",
+                            background: "var(--kv-inset)",
+                            border: "1px solid var(--kv-border)",
+                            borderRadius: 6,
+                            padding: 8,
+                            margin: 0,
+                            maxHeight: 160,
+                            overflowY: "auto",
+                          }}
+                        >
+                          {genJob.final_prompt}
+                        </pre>
+                      )}
+                    </>
+                  )}
+                  {genJob.result_url.endsWith(".mp4") ? (
+                    <video
+                      src={mediaUrl(genJob.result_url)}
+                      controls
+                      style={{ width: "100%", borderRadius: 6, border: "1px solid var(--kv-border)" }}
+                    />
+                  ) : (
+                    <>
+                      <img
+                        crossOrigin="use-credentials"
+                        src={mediaUrl(genJob.result_url)}
+                        alt="Generated"
+                        style={{ width: "100%", borderRadius: 6, border: "1px solid var(--kv-border)" }}
+                      />
+                      <Btn disabled={!scene} onClick={addResultToTimeline}>
+                        Add result to timeline
+                      </Btn>
+                    </>
+                  )}
                 </>
               )}
             </div>
@@ -694,67 +1325,71 @@ export default function AnimatePage() {
               <>
                 <div style={{ marginBottom: 12 }}>
                   <SectionTitle>Preview — {scene.name}</SectionTitle>
-                  <PreviewPlayer clips={previewClips} seek={seek} onTime={onTime} />
-                </div>
-
-                {clips.length > 0 && (
-                  <div className="kv-filmstrip" style={{ marginBottom: 12, position: "relative" }} role="group" aria-label="Timeline filmstrip">
-                    {total > 0 && (
+                  <div style={{ position: "relative" }}>
+                    <PreviewPlayer
+                      clips={previewClips}
+                      seek={seek}
+                      onTime={onTime}
+                      playRequest={playReq}
+                      audio={previewAudio}
+                    />
+                    {caption && (
                       <div
+                        aria-live="polite"
                         style={{
                           position: "absolute",
-                          top: 0,
-                          bottom: 0,
-                          left: `${Math.min(100, (playhead / total) * 100)}%`,
-                          width: 2,
-                          background: "var(--kv-accent)",
+                          left: "50%",
+                          bottom: 64,
+                          transform: "translateX(-50%)",
+                          maxWidth: "90%",
+                          fontSize: 15,
+                          fontWeight: 600,
+                          textAlign: "center",
+                          color: "#fff",
+                          background: "rgba(0,0,0,0.65)",
+                          borderRadius: 6,
+                          padding: "4px 12px",
                           pointerEvents: "none",
+                          whiteSpace: "pre-line",
                         }}
-                      />
+                      >
+                        {caption}
+                      </div>
                     )}
-                    <div
-                      style={{
-                        display: "flex",
-                        gap: 2,
-                        cursor: "pointer",
-                      }}
-                      role="img"
-                      aria-label={`${clips.length} clips, ${total.toFixed(1)} seconds`}
-                    >
-                      {(() => {
-                        let acc = 0;
-                        return clips.map((clip) => {
-                          const start = acc;
-                          acc += clip.duration;
-                          return (
-                            <button
-                              key={clip.id}
-                              type="button"
-                              title={`${labelFor(clip, project, frames)} (${clip.duration.toFixed(1)}s) — click to preview from here`}
-                              onClick={() => setSeek({ time: start, nonce: Date.now() })}
-                              style={{
-                                width: `${(clip.duration / total) * 100}%`,
-                                minWidth: 24,
-                                height: 44,
-                                borderRadius: 4,
-                                border: "1px solid var(--kv-border-strong)",
-                                background: KIND_TONE[clip.kind] ?? "#888",
-                                opacity: 0.85,
-                                cursor: "pointer",
-                                padding: 2,
-                                overflow: "hidden",
-                              }}
-                            >
-                              <span className="kv-nums" style={{ fontSize: 11, color: "#fff" }}>
-                                {clip.duration.toFixed(1)}s
-                              </span>
-                            </button>
-                          );
-                        });
-                      })()}
-                    </div>
                   </div>
-                )}
+                </div>
+
+                <div style={{ marginBottom: 12 }}>
+                  <Timeline
+                    clips={clips.map((c) => ({
+                      id: c.id,
+                      kind: c.kind,
+                      label: labelFor(c, project, frames),
+                      image: clipImageFor(c, project),
+                      duration: c.duration,
+                      motion: c.motion,
+                    }))}
+                    cues={cueInfos}
+                    total={total}
+                    playhead={playhead}
+                    fps={Number(fps) || 12}
+                    selectedId={selectedClip?.id ?? null}
+                    dragId={dragId}
+                    onSeek={(t) => setSeek({ time: t, nonce: Date.now() })}
+                    onSelect={(id) => setSelectedClipId(id)}
+                    onDragStart={setDragId}
+                    onDrop={(id) => void dropClip(id)}
+                    onDragEnd={() => setDragId(null)}
+                    onTrimClip={(id, duration) => void commitClipPatch(id, { duration })}
+                    onTrimCue={(id, patch) => void commitCuePatch(id, patch)}
+                    subtitles={(subtitles?.segments ?? []).map((s) => ({
+                      start: s.start_sec,
+                      end: s.end_sec,
+                      text: s.text,
+                    }))}
+                    onDropTake={(takeId, atTime, lane) => void dropTake(takeId, atTime, lane)}
+                  />
+                </div>
               </>
             ) : (
               <EmptyState
@@ -763,98 +1398,108 @@ export default function AnimatePage() {
               />
             )}
 
-            {scene && (
-              <div style={{ marginBottom: 12 }}>
-                <SectionTitle>
-                  Clips ({clips.length}, {total.toFixed(1)}s)
-                </SectionTitle>
-                <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-                  {clips.map((clip) => (
-                    <div
-                      key={clip.id}
-                      draggable
-                      onDragStart={(e) => {
-                        e.dataTransfer.effectAllowed = "move";
-                        setDragId(clip.id);
-                      }}
-                      onDragOver={(e) => e.preventDefault()}
-                      onDrop={() => void dropClip(clip.id)}
-                      onDragEnd={() => setDragId(null)}
-                      style={{
-                        display: "flex",
-                        gap: 8,
-                        alignItems: "center",
-                        border: "1px solid var(--kv-border)",
-                        borderRadius: 6,
-                        padding: 6,
-                        opacity: dragId === clip.id ? 0.5 : 1,
-                        cursor: "grab",
-                        background: "var(--kv-panel)",
-                      }}
-                      title="Drag to reorder"
-                    >
-                      <img
-                        crossOrigin="use-credentials"
-                        src={clipImageFor(clip, project)}
-                        alt=""
-                        width={64}
-                        height={36}
-                        style={{ borderRadius: 4, objectFit: "cover", background: "#f6f1e8", flexShrink: 0 }}
-                        loading="lazy"
-                      />
-                      <span
-                        style={{
-                          width: 10,
-                          height: 10,
-                          borderRadius: 999,
-                          background: KIND_TONE[clip.kind] ?? "#888",
-                          flexShrink: 0,
-                        }}
-                      />
-                      <span style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", fontSize: 13 }}>
-                        {labelFor(clip, project, frames)}
-                      </span>
-                      <SelectInput
-                        value={clip.motion}
-                        onChange={async (e) => {
-                          if (!project) return;
-                          await api.patchClip(clip.id, { motion: e.target.value });
-                          await refresh(project.id, scene.id);
-                        }}
-                        aria-label="Clip motion"
-                      >
-                        {MOTIONS.map((m) => (
-                          <option key={m} value={m}>{m}</option>
-                        ))}
-                      </SelectInput>
-                      <DurationInput
-                        value={clip.duration}
-                        onCommit={async (v) => {
-                          if (!project) return;
-                          await api.patchClip(clip.id, { duration: v });
-                          await refresh(project.id, scene.id);
-                        }}
-                      />
-                      <Btn small title="Move earlier" onClick={() => moveClip(clip.id, -1)}>↑</Btn>
-                      <Btn small title="Move later" onClick={() => moveClip(clip.id, 1)}>↓</Btn>
-                      <Btn
-                        small
-                        danger
-                        onClick={async () => {
-                          if (!project) return;
-                          await api.deleteClip(clip.id);
-                          await refresh(project.id, scene.id);
-                        }}
-                      >
-                        Delete
-                      </Btn>
+            {scene && selectedClip && (
+              <div
+                style={{
+                  marginBottom: 12,
+                  border: "1px solid var(--kv-border)",
+                  borderRadius: 8,
+                  padding: 12,
+                  background: "var(--kv-surface)",
+                }}
+              >
+                <div style={{ display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
+                  <img
+                    crossOrigin="use-credentials"
+                    src={clipImageFor(selectedClip, project)}
+                    alt=""
+                    width={96}
+                    height={54}
+                    style={{ borderRadius: 6, objectFit: "cover", background: "#f6f1e8", flexShrink: 0 }}
+                  />
+                  <div style={{ minWidth: 0 }}>
+                    <div style={{ fontWeight: 700 }}>
+                      {clips.indexOf(selectedClip) + 1} · {labelFor(selectedClip, project, frames)}
                     </div>
-                  ))}
-                  {clips.length === 0 && (
-                    <span style={{ fontSize: 13, color: "var(--kv-muted)" }}>
-                      No clips — auto-direct the timeline or add panels, frames, and stills.
-                    </span>
-                  )}
+                    <div className="kv-nums" style={{ fontSize: 12, color: "var(--kv-muted)" }}>
+                      starts {fmtTC(clips.slice(0, clips.indexOf(selectedClip)).reduce((a, c) => a + c.duration, 0))} ·{" "}
+                      {selectedClip.kind} · {selectedClip.motion}
+                    </div>
+                  </div>
+                  <div style={{ display: "flex", gap: 6, alignItems: "center", marginLeft: "auto", flexWrap: "wrap" }}>
+                    <span style={{ fontSize: 12, color: "var(--kv-muted)" }}>Duration</span>
+                    <Btn
+                      small
+                      title="Shorter by half a second"
+                      onClick={() => void commitClipPatch(selectedClip.id, {
+                        duration: Math.max(0.1, Math.round((selectedClip.duration - 0.5) * 10) / 10),
+                      })}
+                    >
+                      −
+                    </Btn>
+                    <DurationInput
+                      value={selectedClip.duration}
+                      onCommit={(v) => void commitClipPatch(selectedClip.id, { duration: v })}
+                    />
+                    <Btn
+                      small
+                      title="Longer by half a second"
+                      onClick={() => void commitClipPatch(selectedClip.id, {
+                        duration: Math.round((selectedClip.duration + 0.5) * 10) / 10,
+                      })}
+                    >
+                      +
+                    </Btn>
+                    {[0.5, 1, 2, 5].map((d) => (
+                      <Btn
+                        key={d}
+                        small
+                        active={selectedClip.duration === d}
+                        title={`Set exactly ${d}s`}
+                        onClick={() => void commitClipPatch(selectedClip.id, { duration: d })}
+                      >
+                        {d}s
+                      </Btn>
+                    ))}
+                  </div>
+                </div>
+                <div style={{ display: "flex", gap: 6, alignItems: "center", marginTop: 10, flexWrap: "wrap" }}>
+                  <span style={{ fontSize: 12, color: "var(--kv-muted)" }}>Motion</span>
+                  <SelectInput
+                    value={selectedClip.motion}
+                    onChange={(e) =>
+                      void commitClipPatch(selectedClip.id, { motion: e.target.value }, true)
+                    }
+                    aria-label="Clip motion"
+                  >
+                    {MOTIONS.map((m) => (
+                      <option key={m} value={m}>{m}</option>
+                    ))}
+                  </SelectInput>
+                  <span style={{ fontSize: 11, color: "var(--kv-faint)" }}>
+                    Picking a motion replays the preview from this clip;
+                    it also burns into the MP4 export.
+                  </span>
+                  <span style={{ marginLeft: "auto", display: "flex", gap: 6 }}>
+                    <IconBtn label="Move clip earlier" onClick={() => moveClip(selectedClip.id, -1)}>↑</IconBtn>
+                    <IconBtn label="Move clip later" onClick={() => moveClip(selectedClip.id, 1)}>↓</IconBtn>
+                    <Btn
+                      small
+                      danger
+                      onClick={async () => {
+                        if (!project || !scene) return;
+                        try {
+                          await api.deleteClip(selectedClip.id);
+                          setSelectedClipId(null);
+                          await refresh(project.id, scene.id);
+                        } catch (e) {
+                          setNotice(`Delete failed: ${(e as Error).message}`);
+                        }
+                      }}
+                    >
+                      Delete
+                    </Btn>
+                  </span>
                 </div>
               </div>
             )}
@@ -865,9 +1510,58 @@ export default function AnimatePage() {
                   projectId={project.id}
                   scene={scene ?? null}
                   takes={takes}
+                  playhead={playhead}
                   onTakes={() => void refresh(project.id, scene?.id)}
                   onScene={() => void refresh(project.id, scene?.id)}
+                  onVoiceoverStart={startVoiceover}
                   notify={setNotice}
+                />
+              </div>
+            )}
+
+            {project && scene && (
+              <div style={{ marginBottom: 12 }}>
+                <SectionTitle>Subtitles</SectionTitle>
+                {subtitles ? (
+                  <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                    <Chip>.srt · {subtitles.segments.length} captions</Chip>
+                    <span style={{ fontSize: 13, color: "var(--kv-muted)" }}>
+                      On the S1 lane, over the preview, and burned into the MP4.
+                    </span>
+                    <Btn
+                      small
+                      danger
+                      disabled={subBusy}
+                      onClick={async () => {
+                        try {
+                          await api.deleteSubtitles(scene.id);
+                          setSubtitles(null);
+                        } catch (e) {
+                          setNotice(`Couldn't remove subtitles: ${(e as Error).message}`);
+                        }
+                      }}
+                      style={{ marginLeft: "auto" }}
+                    >
+                      Remove
+                    </Btn>
+                  </div>
+                ) : (
+                  <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                    <Btn small disabled={subBusy} onClick={() => subFileRef.current?.click()}>
+                      {subBusy ? "Loading…" : "Upload .srt…"}
+                    </Btn>
+                    <span style={{ fontSize: 13, color: "var(--kv-muted)" }}>
+                      Captions land on the S1 lane and burn into the export.
+                    </span>
+                  </div>
+                )}
+                <input
+                  ref={subFileRef}
+                  type="file"
+                  accept=".srt"
+                  style={{ display: "none" }}
+                  aria-label="Upload subtitles"
+                  onChange={(e) => void uploadSrt(e.target.files?.[0])}
                 />
               </div>
             )}
@@ -880,7 +1574,17 @@ export default function AnimatePage() {
                   src={api.exportDownloadUrl(result.jobId)}
                   controls
                   style={{ width: "100%", borderRadius: 6, border: "1px solid var(--kv-border)", marginBottom: 8 }}
-                />
+                >
+                  {result.subtitles_vtt_url && (
+                    <track
+                      kind="subtitles"
+                      srcLang="en"
+                      label="English"
+                      src={mediaUrl(result.subtitles_vtt_url)}
+                      default
+                    />
+                  )}
+                </video>
                 <p style={{ fontSize: 13, margin: "0 0 8px" }}>
                   <span className="kv-nums">
                     {result.width}×{result.height} @ {result.fps}fps · {result.rendered_sec.toFixed(1)}s ·{" "}

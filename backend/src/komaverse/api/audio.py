@@ -39,6 +39,8 @@ class CueCreate(BaseModel):
     audio_id: str = ""
     start_sec: float = 0.0
     offset_sec: float = 0.0
+    end_sec: float | None = None
+    lane: int = 0
     volume: float = 1.0
     fade_in: float = 0.0
     fade_out: float = 0.0
@@ -47,6 +49,8 @@ class CueCreate(BaseModel):
 class CuePatch(BaseModel):
     start_sec: float | None = None
     offset_sec: float | None = None
+    end_sec: float | None = None
+    lane: int | None = None
     volume: float | None = None
     fade_in: float | None = None
     fade_out: float | None = None
@@ -69,15 +73,19 @@ def _get_take(session: Session, user: UserRow, audio_id: str) -> AudioTakeRow:
 
 
 def _check_cue_timing(
-    start: float, offset: float, volume: float, fade_in: float, fade_out: float,
-    duration: float,
+    start: float, offset: float, end: float | None, lane: int, volume: float,
+    fade_in: float, fade_out: float, duration: float,
 ) -> None:
     if start < 0 or start > MAX_TAKE_SEC:
         raise HTTPException(400, f"start_sec out of range: {start}")
+    if lane < 0 or lane > 7:
+        raise HTTPException(400, f"lane out of range: {lane}")
     if offset < 0:
         raise HTTPException(400, f"offset_sec out of range: {offset}")
     if duration > 0 and offset > duration:
         raise HTTPException(400, "offset_sec is past the end of the take")
+    if end is not None and end - start < 0.1:
+        raise HTTPException(400, "end_sec must leave at least 0.1s of audio")
     if not 0 <= volume <= MAX_VOLUME:
         raise HTTPException(400, f"volume must be 0..{MAX_VOLUME}, got {volume}")
     if fade_in < 0 or fade_out < 0:
@@ -193,7 +201,7 @@ def add_cue(
     if audio.project_id != scene.project_id:
         raise HTTPException(400, "audio belongs to another project")
     _check_cue_timing(
-        body.start_sec, body.offset_sec, body.volume,
+        body.start_sec, body.offset_sec, body.end_sec, body.lane, body.volume,
         body.fade_in, body.fade_out, audio.duration_sec,
     )
     row = AudioCueRow(
@@ -201,6 +209,8 @@ def add_cue(
         audio_id=audio.id,
         start_sec=body.start_sec,
         offset_sec=body.offset_sec,
+        end_sec=body.end_sec,
+        lane=body.lane,
         volume=body.volume,
         fade_in=body.fade_in,
         fade_out=body.fade_out,
@@ -223,12 +233,19 @@ def patch_cue(
     ensure_owner(session, user, row.scene.project_id)
     start = body.start_sec if body.start_sec is not None else row.start_sec
     offset = body.offset_sec if body.offset_sec is not None else row.offset_sec
+    # Tri-state: provided null clears the trim, absent leaves it alone.
+    end = body.end_sec if "end_sec" in body.model_fields_set else row.end_sec
+    lane = body.lane if body.lane is not None else (row.lane or 0)
     volume = body.volume if body.volume is not None else row.volume
     fade_in = body.fade_in if body.fade_in is not None else row.fade_in
     fade_out = body.fade_out if body.fade_out is not None else row.fade_out
-    _check_cue_timing(start, offset, volume, fade_in, fade_out, row.audio.duration_sec)
-    row.start_sec, row.offset_sec, row.volume = start, offset, volume
-    row.fade_in, row.fade_out = fade_in, fade_out
+    _check_cue_timing(
+        start, offset, end, lane, volume, fade_in, fade_out,
+        row.audio.duration_sec,
+    )
+    row.start_sec, row.offset_sec, row.end_sec = start, offset, end
+    row.lane = lane
+    row.volume, row.fade_in, row.fade_out = volume, fade_in, fade_out
     session.commit()
     return row.to_schema()
 

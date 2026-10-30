@@ -5,6 +5,7 @@ import {
   Btn,
   ChapterHeader,
   EmptyState,
+  IconBtn,
   Notice,
   PrimaryBtn,
   SectionTitle,
@@ -339,7 +340,7 @@ export default function ScanPage() {
       setSelectedId(null);
       setNotice(
         res.fell_back
-          ? `Cloud unavailable — fell back to ${res.detector_used} (${res.panels.length} panels).`
+          ? `${detector} unavailable — fell back to ${res.detector_used} (${res.panels.length} panels).`
           : `Detected ${res.panels.length} panels with ${res.detector_used}.`,
       );
     } catch (e) {
@@ -543,13 +544,13 @@ export default function ScanPage() {
               onKeyDown={(e) => e.key === "Enter" && doCreateProject()}
               style={{ flex: 1 }}
             />
-            <Btn onClick={doCreateProject}>Add</Btn>
+            <IconBtn onClick={doCreateProject} label="Create project">＋</IconBtn>
           </div>
           {project && (
             <div style={{ marginTop: 6 }}>
-              <Btn small danger onClick={doDeleteProject}>
-                Delete “{project.name}”…
-              </Btn>
+              <IconBtn danger onClick={doDeleteProject} label={`Delete project “${project.name}”`}>
+                ×
+              </IconBtn>
             </div>
           )}
         </div>
@@ -641,12 +642,12 @@ export default function ScanPage() {
             </div>
             {selectedId && (
               <div style={{ display: "flex", gap: 4, marginTop: 6 }}>
-                <Btn small onClick={() => moveSelected(-1)}>
-                  ← Earlier
-                </Btn>
-                <Btn small onClick={() => moveSelected(1)}>
-                  Later →
-                </Btn>
+                <IconBtn label="Move panel earlier in reading order" onClick={() => moveSelected(-1)}>
+                  ←
+                </IconBtn>
+                <IconBtn label="Move panel later in reading order" onClick={() => moveSelected(1)}>
+                  →
+                </IconBtn>
               </div>
             )}
           </div>
@@ -679,7 +680,9 @@ export default function ScanPage() {
                 <option value="heuristic">Heuristic (local)</option>
                 <option value="yolo">YOLO best-comic (local)</option>
                 <option value="yolo-leoxs22">YOLO leoxs22 (local, fast)</option>
-                <option value="cloud">Cloud (fallback local)</option>
+                <option value="cloud">Cloud vision (fallback local)</option>
+                <option value="meta">Meta Muse vision (fallback local)</option>
+                <option value="openrouter">OpenRouter vision (fallback local)</option>
               </SelectInput>
               <PrimaryBtn onClick={doDetect} disabled={!!busy}>
                 Detect panels
@@ -711,13 +714,13 @@ export default function ScanPage() {
               <Btn active={mode === "draw"} onClick={() => setMode("draw")} title="Draw a new panel box (D)">
                 Draw box
               </Btn>
-              <Btn onClick={doAdd}>Add panel</Btn>
-              <Btn danger disabled={!selectedId} onClick={doDelete}>
-                Delete
-              </Btn>
-              <Btn danger disabled={!!busy} onClick={doDeletePage} title="Delete this page and its scan file">
-                Delete page…
-              </Btn>
+              <IconBtn onClick={doAdd} label="Add a panel box">＋</IconBtn>
+              <IconBtn danger disabled={!selectedId} onClick={doDelete} label="Delete the selected panel">
+                ×
+              </IconBtn>
+              <IconBtn danger disabled={!!busy} onClick={doDeletePage} label="Delete this page and its scan file">
+                ×
+              </IconBtn>
               <PrimaryBtn
                 onClick={doSendToAnimate}
                 disabled={!!busy || panels.length === 0}
@@ -726,12 +729,12 @@ export default function ScanPage() {
                 Send to Animate →
               </PrimaryBtn>
               <span style={{ display: "inline-flex", gap: 4, alignItems: "center" }}>
-                <Btn small onClick={() => { setTrueSize(false); setZoom((z) => Math.max(z / 1.25, 0.5)); }} aria-label="Zoom out">−</Btn>
+                <IconBtn onClick={() => { setTrueSize(false); setZoom((z) => Math.max(z / 1.25, 0.5)); }} label="Zoom out">−</IconBtn>
                 <span style={{ fontSize: 12, minWidth: 44, textAlign: "center", color: "var(--kv-muted)" }}>
                   {trueSize ? "1:1" : `${Math.round(zoom * 100)}%`}
                 </span>
-                <Btn small onClick={() => { setTrueSize(false); setZoom((z) => Math.min(z * 1.25, 4)); }} aria-label="Zoom in">+</Btn>
-                <Btn small onClick={() => { setTrueSize(false); setZoom(1); }}>Fit</Btn>
+                <IconBtn onClick={() => { setTrueSize(false); setZoom((z) => Math.min(z * 1.25, 4)); }} label="Zoom in">+</IconBtn>
+                <IconBtn onClick={() => { setTrueSize(false); setZoom(1); }} label="Fit page to view">⤢</IconBtn>
                 <Btn small active={trueSize} onClick={() => setTrueSize(true)} title="True size: one image pixel per screen pixel">1:1</Btn>
               </span>
             </div>

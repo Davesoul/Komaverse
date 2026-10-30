@@ -389,6 +389,29 @@ export function ImpactBurst({
   );
 }
 
+/**
+ * Icon-only action button: glyph visible, text exposed via title tooltip
+ * (bubble) and aria-label. Use for unambiguous transport/editing actions;
+ * keep real labels on anything that carries meaning (Generate, Export…).
+ */
+export function IconBtn({
+  label,
+  active,
+  danger,
+  children,
+  ...rest
+}: ButtonHTMLAttributes<HTMLButtonElement> & {
+  label: string;
+  active?: boolean;
+  danger?: boolean;
+}) {
+  return (
+    <Btn small active={active} danger={danger} title={label} aria-label={label} {...rest}>
+      <span aria-hidden="true">{children}</span>
+    </Btn>
+  );
+}
+
 export function SfxBtn({
   small,
   className,

@@ -16,7 +16,12 @@ from typing import Any, Protocol
 import cv2
 from PIL import Image, ImageOps, UnidentifiedImageError
 
-from komaverse.ai.providers import CloudProvider, ProviderError
+from komaverse.ai.providers import (
+    CloudProvider,
+    MetaProvider,
+    OpenRouterProvider,
+    ProviderError,
+)
 from komaverse.config import settings
 
 logger = logging.getLogger("komaverse.detect")
@@ -135,32 +140,55 @@ class HeuristicDetector:
         return sort_reading_order(boxes, w, direction)
 
 
+def _vision_detect(provider, image: Path, direction: str = "rtl") -> list[Box]:
+    """Shared vision-model path: provider boxes → validated pixel boxes."""
+    try:
+        raw = provider.detect_panels(image)
+    except ProviderError as exc:
+        raise DetectorUnavailable(str(exc)) from exc
+    boxes = [
+        Box(x=float(b["x"]), y=float(b["y"]), w=float(b["w"]), h=float(b["h"]))
+        for b in raw
+        if b.get("w", 0) > 0 and b.get("h", 0) > 0
+    ]
+    if not boxes:  # whole-page fallback, same contract as heuristic
+        gray = cv2.imread(str(image), cv2.IMREAD_GRAYSCALE)
+        if gray is None:
+            raise DetectorUnavailable(f"cannot read image: {image}")
+        h, w = gray.shape
+        boxes = [Box(x=0.0, y=0.0, w=float(w), h=float(h))]
+    else:
+        gray = cv2.imread(str(image), cv2.IMREAD_GRAYSCALE)
+        w = gray.shape[1] if gray is not None else 1000
+    # Never trust model ordering — sort server-side like heuristic.
+    return sort_reading_order(boxes, w, direction)
+
+
 class CloudDetector:
-    """Vision-API detector — delegates to the M4 cloud provider."""
+    """Vision-API detector — delegates to the generic cloud provider."""
 
     name = "cloud"
 
     def detect(self, image: Path, direction: str = "rtl") -> list[Box]:
-        try:
-            raw = CloudProvider().detect_panels(image)
-        except ProviderError as exc:
-            raise DetectorUnavailable(str(exc)) from exc
-        boxes = [
-            Box(x=float(b["x"]), y=float(b["y"]), w=float(b["w"]), h=float(b["h"]))
-            for b in raw
-            if b.get("w", 0) > 0 and b.get("h", 0) > 0
-        ]
-        if not boxes:  # whole-page fallback, same contract as heuristic
-            gray = cv2.imread(str(image), cv2.IMREAD_GRAYSCALE)
-            if gray is None:
-                raise DetectorUnavailable(f"cannot read image: {image}")
-            h, w = gray.shape
-            boxes = [Box(x=0.0, y=0.0, w=float(w), h=float(h))]
-        else:
-            gray = cv2.imread(str(image), cv2.IMREAD_GRAYSCALE)
-            w = gray.shape[1] if gray is not None else 1000
-        # Never trust model ordering — sort server-side like heuristic.
-        return sort_reading_order(boxes, w, direction)
+        return _vision_detect(CloudProvider(), image, direction)
+
+
+class MetaDetector:
+    """Vision-API detector — Meta Muse vision (META_API_KEY)."""
+
+    name = "meta"
+
+    def detect(self, image: Path, direction: str = "rtl") -> list[Box]:
+        return _vision_detect(MetaProvider(), image, direction)
+
+
+class OpenRouterDetector:
+    """Vision-API detector — OpenRouter vision model (OPENROUTER_API_KEY)."""
+
+    name = "openrouter"
+
+    def detect(self, image: Path, direction: str = "rtl") -> list[Box]:
+        return _vision_detect(OpenRouterProvider(), image, direction)
 
 
 def _backend_root() -> Path:
@@ -261,18 +289,23 @@ def _run_yolo(name: str, path: Path, image: Path, direction: str):
 def run_detector(
     name: str, image: Path, direction: str = "rtl"
 ) -> tuple[list[Box], str, bool]:
-    """Run detector; yolo/cloud failures fall back to heuristic. Returns (boxes, used, fell_back)."""
+    """Run detector; yolo/vision failures fall back to heuristic. Returns (boxes, used, fell_back)."""
     if name == "yolo":
         return _run_yolo(name, _model_path(), image, direction)
     if name == "yolo-leoxs22":
         raw = Path(YOLO_LEOXS)
         path = raw if raw.is_absolute() else _backend_root() / raw
         return _run_yolo(name, path, image, direction)
-    if name == "cloud":
+    if name in ("cloud", "meta", "openrouter"):
+        detector = {
+            "cloud": CloudDetector,
+            "meta": MetaDetector,
+            "openrouter": OpenRouterDetector,
+        }[name]()
         try:
-            return CloudDetector().detect(image, direction), "cloud", False
+            return detector.detect(image, direction), name, False
         except DetectorUnavailable as exc:
-            logger.warning("cloud detector unavailable (%s); using heuristic", exc)
+            logger.warning("%s detector unavailable (%s); using heuristic", name, exc)
             return HeuristicDetector().detect(image, direction), "heuristic", True
     if name == "heuristic":
         return HeuristicDetector().detect(image, direction), "heuristic", False

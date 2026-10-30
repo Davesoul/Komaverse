@@ -116,6 +116,10 @@ class ClipOrder(BaseModel):
     clip_ids: list[str] = []
 
 
+class FrameOrder(BaseModel):
+    frame_ids: list[str] = []
+
+
 class ClipPatch(BaseModel):
     duration: float | None = None
     motion: str | None = None
@@ -404,6 +408,27 @@ def create_frame(
     return row.to_schema()
 
 
+@router.patch("/projects/{project_id}/frames/order", response_model=list[DrawFrame])
+def order_frames(
+    project_id: str,
+    body: FrameOrder,
+    session: Session = Depends(get_session),
+    user: UserRow = Depends(get_current_user),
+):
+    """Replace the project's frame order with the given id list (exact set)."""
+    project = own_project(session, user, project_id)
+    current = session.execute(
+        select(FrameRow).where(FrameRow.project_id == project.id)
+    ).scalars().all()
+    by_id = {f.id: f for f in current}
+    if set(body.frame_ids) != set(by_id) or len(body.frame_ids) != len(by_id):
+        raise HTTPException(400, "frame_ids must list exactly the project's frames")
+    for index, frame_id in enumerate(body.frame_ids):
+        by_id[frame_id].index = index
+    session.commit()
+    return [by_id[fid].to_schema() for fid in body.frame_ids]
+
+
 @router.get("/projects/{project_id}/frames", response_model=list[DrawFrame])
 def list_frames(
     project_id: str,
@@ -658,6 +683,7 @@ def run_export_job(job_id: str, factory=None) -> None:
                 width=out["width"],
                 height=out["height"],
                 audio_cues=out.get("audio_cues", 0),
+                subtitles_vtt_url=out.get("subtitles_vtt_url"),
             )
         )
         session.commit()

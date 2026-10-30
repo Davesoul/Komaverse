@@ -404,6 +404,39 @@ def test_add_clips_batch(factory, user):
     assert exc.value.status_code == 400
 
 
+def test_order_frames(factory, user):
+    from komaverse.api.animate import (
+        FrameCreate,
+        FrameOrder,
+        create_frame,
+        list_frames,
+        order_frames,
+    )
+
+    with factory() as s:
+        project = create_project(ProjectCreate(name="Reorder"), s, user)
+    with factory() as s:
+        made = [
+            create_frame(project.id, FrameCreate(name=f"F{i}"), s, user)
+            for i in range(3)
+        ]
+    ids = [f.id for f in made]
+    want = [ids[2], ids[0], ids[1]]
+    with factory() as s:
+        out = order_frames(project.id, FrameOrder(frame_ids=want), s, user)
+    assert [f.id for f in out] == want
+    with factory() as s:
+        again = list_frames(project.id, s, user)
+    assert [f.id for f in again] == want
+    # Mismatched sets rejected.
+    with factory() as s, pytest.raises(HTTPException) as exc:
+        order_frames(project.id, FrameOrder(frame_ids=want[:-1]), s, user)
+    assert exc.value.status_code == 400
+    with factory() as s, pytest.raises(HTTPException) as exc:
+        order_frames(project.id, FrameOrder(frame_ids=[*want, "nope"]), s, user)
+    assert exc.value.status_code == 400
+
+
 def test_order_clips(factory, user):
     project_id, scene_id, panels = _scene_with_panels(factory, user)
     with factory() as s:
@@ -635,3 +668,19 @@ def test_blend_modes_honored(factory, user):
         "darken", "lighten", "soft-light", "hard-light",
     ):
         assert composite_with(mode) != (100, 200, 100), mode
+
+
+def test_motion_frame_moves_pixels_for_every_motion():
+    """Motions must visibly drift across a clip; none must hold still."""
+    import numpy as np
+
+    from komaverse.renderer import motion_frame
+
+    rng = np.random.default_rng(7)
+    base = rng.integers(0, 255, (360, 640, 3)).astype("uint8")
+    for motion in ("zoom-in", "zoom-out", "pan-left", "pan-right"):
+        first = motion_frame(base, 320, 180, 0.0, motion)
+        last = motion_frame(base, 320, 180, 1.0, motion)
+        assert not np.array_equal(first, last), motion
+    still = motion_frame(base, 320, 180, 1.0, "none")
+    assert np.array_equal(still, motion_frame(base, 320, 180, 0.0, "none"))

@@ -7,13 +7,13 @@
 #>
 param(
   [ValidateSet("dev", "prod")][string]$Mode = "dev",
-  [int]$ApiPort = 8000,
+  [int]$ApiPort = 8001,
   [int]$WebPort = 5173,
   [switch]$NoBrowser
 )
 $ErrorActionPreference = "Stop"
 
-& "$PSScriptRoot/stop.ps1" -Ports @($ApiPort, $WebPort) -Confirm:$false
+& "$PSScriptRoot/stop.ps1" -Ports @(8000, $ApiPort, $WebPort) -Confirm:$false
 if ($Mode -eq "dev") {
   & "$PSScriptRoot/dev.ps1" -ApiPort $ApiPort -WebPort $WebPort -NoBrowser:$NoBrowser
 } else {

@@ -8,9 +8,11 @@ Web (PWA) first, desktop (Tauri) second, mobile out of scope for v1.
 
 ## 2. Core flows (must all work E2E by v1)
 
-1. **Scan → animate:** import page(s) → detect panels (cloud AI + heuristic
-   fallback) → panels become timeline clips → Ken Burns / AI motion → export MP4.
-2. **Draw:** canvas with layers + brushes → frames → timeline → export.
+1. **Scan → animate:** import page(s) → detect panels (YOLO `yolo` /
+   `yolo-leoxs22`, heuristic fallback, cloud AI) → panels become timeline
+   clips → Ken Burns / AI motion → export MP4.
+2. **Draw:** canvas with layers + brushes → frames (strip under canvas,
+   canvas-native fps playback with loop) → timeline → export.
 3. **AI generate:** text/image prompt → image or clip, billed in credits,
    cached, attached to frame/panel.
 4. **Edit:** timeline reorder, per-clip timing, audio track, export 1080p MP4.
@@ -39,16 +41,23 @@ Invariants:
 - Projects: CRUD `/projects`, nested `/projects/{id}/pages|panels|scenes|frames|clips`.
 - Panels: `POST /scans/{id}/detect` (detector select + params), `PATCH /panels/{id}`.
 - AI: `POST /ai/generate` → job id, `GET /ai/jobs/{id}` poll, `POST /ai/webhook`.
+  Generate takes seed / negative / enhance / style / camera_move /
+  entity_ids / reference_frame_id; jobs store seed + final prompt +
+  entity snapshot. Entities: `GET|POST /projects/{id}/entities`,
+  `DELETE /entities/{id}` (character | field | prop + optional frame).
 - Billing: `GET /billing/me`, `POST /billing/checkout`, `POST /billing/webhook`.
 - Media: `POST /media/upload`, `GET /media/{id}` (local file dev, presigned S3 prod).
 - Export: `POST /projects/{id}/export` → job, `GET /exports/{id}/download`.
 
 ## 5. AI strategy (cloud-first, local-pluggable)
 
-- One `AIProvider` interface: `generate_image`, `generate_video`, `detect_panels`.
-- M1–M3: `CloudProvider` (OpenAI-compatible endpoint, key in env).
-- M4: `ComfyUIProvider` (local GPU at `COMFYUI_URL`), same interface, user picks
-  per job. No code path may assume a specific vendor.
+- One `AIProvider` interface: `generate_image`, `generate_video`, `detect_panels`,
+  plus shared OpenAI-compatible `chat_complete` for the agent brain.
+- Providers: `cloud` (generic endpoint, key in env), `meta` (Meta Model API /
+  Muse Spark: chat + vision detect only), `openrouter` (chat, image models,
+  async video), `comfyui` (local GPU at `COMFYUI_URL`), `fake` (demo).
+  User picks per job via `AI_PROVIDER` / per-job `provider`.
+  No code path may assume a specific vendor.
 - Every generation records model, cost, credits, cache key.
 
 ## 6. Auth / billing / security

@@ -297,6 +297,8 @@ def render_project(
                 start = scene_starts[scene.id] + max(cue.start_sec, 0)
                 trim = max(take.duration_sec - max(cue.offset_sec, 0), 0.1)
                 end = min(video_dur, start + trim) if take.duration_sec > 0 else video_dur
+                if cue.end_sec is not None:
+                    end = min(end, max(cue.end_sec, start + 0.1))
                 tracks.append(
                     {
                         "path": apath,
@@ -309,36 +311,88 @@ def render_project(
                     }
                 )
 
+    # Subtitles: merge every scene track onto the export timeline. The VTT
+    # sidecar always ships for the in-app player; the libass burn is
+    # best-effort (missing system fonts fail the filter) with a warning.
+    from komaverse.subtitles import (  # noqa: PLC0415 — heavy sibling, render only
+        SubSegment,
+        parse_srt,
+        segments_to_srt,
+        segments_to_vtt,
+    )
+
+    merged_subs: list[SubSegment] = []
+    for scene in scenes:
+        track = scene.subtitle_track
+        if track is None:
+            continue
+        try:
+            srt_path = storage.resolve(track.file_path)
+            parsed = parse_srt(srt_path.read_text(encoding="utf-8-sig"))
+        except (OSError, ValueError) as exc:
+            warnings.append(f"subtitles on '{scene.name}' skipped ({exc})")
+            continue
+        base = scene_starts[scene.id]
+        merged_subs.extend(
+            SubSegment(start=s.start + base, end=s.end + base, text=s.text)
+            for s in parsed
+        )
+    merged_subs.sort(key=lambda s: s.start)
+
+    vtt_url: str | None = None
+    if merged_subs:
+        vtt_rel = Path("exports") / project_id / f"{uuid_short()}.vtt"
+        vtt_dest = settings.media_dir / vtt_rel
+        vtt_dest.parent.mkdir(parents=True, exist_ok=True)
+        vtt_dest.write_text(segments_to_vtt(merged_subs), encoding="utf-8")
+        vtt_url = f"/media/{vtt_rel.as_posix()}"
+
     export_id = uuid_short()
     rel = Path("exports") / project_id / f"{export_id}.mp4"
     dest = settings.media_dir / rel
     dest.parent.mkdir(parents=True, exist_ok=True)
     silent = dest.with_name(f"{dest.stem}_silent.mp4") if tracks else dest
 
-    writer = imageio_ffmpeg.write_frames(
-        str(silent),
-        (w, h),
-        pix_fmt_in="bgr24",
-        pix_fmt_out="yuv420p",
-        fps=fps,
-        codec="libx264",
-        quality=8,
-        macro_block_size=None,
-        output_params=["-movflags", "+faststart"],
-    )
-    writer.send(None)
-    done = 0
-    try:
-        for clip, src, n in planned:
-            base = cover_resize(src, w * 2, h * 2)
-            for i in range(n):
-                t = i / max(n - 1, 1)
-                writer.send(motion_frame(base, w, h, t, clip.motion))
-                done += 1
-                if on_progress is not None:
-                    on_progress(done, total_frames)
-    finally:
-        writer.close()
+    def render_video(extra_params: list[str]) -> None:
+        writer = imageio_ffmpeg.write_frames(
+            str(silent),
+            (w, h),
+            pix_fmt_in="bgr24",
+            pix_fmt_out="yuv420p",
+            fps=fps,
+            codec="libx264",
+            quality=8,
+            macro_block_size=None,
+            output_params=["-movflags", "+faststart", *extra_params],
+        )
+        writer.send(None)
+        done = 0
+        try:
+            for clip, src, n in planned:
+                base = cover_resize(src, w * 2, h * 2)
+                for i in range(n):
+                    t = i / max(n - 1, 1)
+                    writer.send(motion_frame(base, w, h, t, clip.motion))
+                    done += 1
+                    if on_progress is not None:
+                        on_progress(done, total_frames)
+        finally:
+            writer.close()
+
+    burned_subs = False
+    if merged_subs:
+        merged_srt = dest.with_name(f"{dest.stem}_subs.srt")
+        merged_srt.write_text(segments_to_srt(merged_subs), encoding="utf-8")
+        escaped = merged_srt.as_posix().replace("\\", "/").replace(":", "\\:")
+        try:
+            render_video(["-vf", f"subtitles='{escaped}'"])
+            burned_subs = True
+        except Exception as exc:
+            warnings.append(f"subtitle burn-in failed ({exc}); VTT sidecar still ships")
+        finally:
+            merged_srt.unlink(missing_ok=True)
+    if not burned_subs:
+        render_video([])
 
     audio_cues = 0
     if tracks:
@@ -360,4 +414,5 @@ def render_project(
         "height": h,
         "warnings": warnings,
         "audio_cues": audio_cues,
+        "subtitles_vtt_url": vtt_url,
     }

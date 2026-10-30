@@ -39,6 +39,42 @@ class Settings(BaseSettings):
     ai_vision_model: str | None = Field(
         default=None, validation_alias="AI_VISION_MODEL"
     )
+    # Meta Model API (Muse Spark) — agent brain + vision detection.
+    # https://api.meta.ai/v1, OpenAI-compatible; key from dev.meta.ai.
+    meta_api_key: str | None = Field(default=None, validation_alias="META_API_KEY")
+    meta_base_url: str = Field(
+        default="https://api.meta.ai/v1", validation_alias="META_BASE_URL"
+    )
+    meta_chat_model: str = Field(
+        default="muse-spark-1.3", validation_alias="META_CHAT_MODEL"
+    )
+    meta_vision_model: str | None = Field(
+        default=None, validation_alias="META_VISION_MODEL"
+    )
+    # OpenRouter — chat, image models, async video models, one key.
+    openrouter_api_key: str | None = Field(
+        default=None, validation_alias="OPENROUTER_API_KEY"
+    )
+    openrouter_base_url: str = Field(
+        default="https://openrouter.ai/api/v1",
+        validation_alias="OPENROUTER_BASE_URL",
+    )
+    openrouter_chat_model: str = Field(
+        default="openai/gpt-4o-mini", validation_alias="OPENROUTER_CHAT_MODEL"
+    )
+    openrouter_vision_model: str = Field(
+        default="google/gemini-2.5-flash", validation_alias="OPENROUTER_VISION_MODEL"
+    )
+    openrouter_image_model: str = Field(
+        default="black-forest-labs/flux-3-image-klein",
+        validation_alias="OPENROUTER_IMAGE_MODEL",
+    )
+    openrouter_video_model: str = Field(
+        default="bytedance/seedance-2.0", validation_alias="OPENROUTER_VIDEO_MODEL"
+    )
+    openrouter_referer: str = Field(
+        default="https://komaverse.studio", validation_alias="OPENROUTER_REFERER"
+    )
     comfyui_url: str = Field(
         default="http://127.0.0.1:8188", validation_alias="COMFYUI_URL"
     )

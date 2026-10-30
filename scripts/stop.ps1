@@ -7,7 +7,7 @@
 #>
 [CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = "Medium")]
 param(
-  [int[]]$Ports = @(8000, 5173)
+  [int[]]$Ports = @(8000, 8001, 5173)
 )
 
 $found = $false

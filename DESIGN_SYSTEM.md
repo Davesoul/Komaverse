@@ -105,8 +105,10 @@ States live in the primitive.
 
 - Studio lists: flex rows, name left (ellipsis), tabular count right.
 - Layouts differ per surface: Scan = left rail + canvas; Draw = canvas +
-  right rail + floating glass toolbar; Cut = stacked command deck, filmstrip
-  timeline, clip rows; Home = dashboard.
+  right rail + floating glass toolbar, frames strip (horizontal thumbnails,
+  FR numbering, New/Duplicate/Delete + fps + Loop + Play) under the canvas,
+  playback on the canvas itself with a small frame chip (no second pane);
+  Cut = stacked command deck, filmstrip timeline, clip rows; Home = dashboard.
 - Landing backdrop: one full-bleed reel at a time, crossfading to the
   next every 4.5s; hidden reels pause so only one decodes. Playback
   always runs (content, not chrome motion).

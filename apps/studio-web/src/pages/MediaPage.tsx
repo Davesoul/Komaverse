@@ -15,6 +15,7 @@ import {
   Btn,
   ChapterHeader,
   EmptyState,
+  IconBtn,
   Notice,
   SectionTitle,
   SelectInput,
@@ -119,9 +120,9 @@ function Lightbox({
               {meta}
             </div>
           </div>
-          <Btn small onClick={onClose} aria-label="Close viewer">
+          <IconBtn onClick={onClose} label="Close viewer">
             ✕
-          </Btn>
+          </IconBtn>
         </div>
         {children}
       </div>
@@ -408,9 +409,9 @@ export default function MediaPage() {
                         {pg.width}×{pg.height} · {pg.panels.length} panel{pg.panels.length === 1 ? "" : "s"}
                       </div>
                       <div style={{ marginTop: 6 }}>
-                        <Btn small danger onClick={() => doDeletePage(pg, i)}>
-                          Delete
-                        </Btn>
+                        <IconBtn danger onClick={() => doDeletePage(pg, i)} label="Delete page and its scan file">
+                          ×
+                        </IconBtn>
                       </div>
                     </div>
                   </div>
@@ -444,9 +445,9 @@ export default function MediaPage() {
                       {t.duration_sec > 0 ? `${t.duration_sec.toFixed(1)}s` : "live"} · {t.mime || "audio"}
                       {t.created_at ? ` · ${new Date(t.created_at).toLocaleDateString()}` : ""}
                     </span>
-                    <Btn small danger onClick={() => doDeleteTake(t)} style={{ marginLeft: "auto" }}>
-                      Delete
-                    </Btn>
+                    <IconBtn danger onClick={() => doDeleteTake(t)} style={{ marginLeft: "auto" }} label="Delete take">
+                      ×
+                    </IconBtn>
                   </div>
                 ))}
               </div>

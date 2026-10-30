@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from sqlalchemy import DateTime, ForeignKey, String, Text
+from sqlalchemy import DateTime, Float, ForeignKey, String, Text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 from komaverse import models as schemas
@@ -179,6 +179,12 @@ class SceneRow(Base):
         order_by="AudioCueRow.start_sec",
         lazy="selectin",
     )
+    subtitle_track: Mapped["SubtitleTrackRow | None"] = relationship(
+        back_populates="scene",
+        cascade="all, delete-orphan",
+        lazy="selectin",
+        uselist=False,
+    )
 
     def to_schema(self) -> schemas.Scene:
         return schemas.Scene(
@@ -253,6 +259,8 @@ class AudioCueRow(Base):
     audio_id: Mapped[str] = mapped_column(ForeignKey("audio_takes.id"), index=True)
     start_sec: Mapped[float] = mapped_column(default=0)
     offset_sec: Mapped[float] = mapped_column(default=0)
+    end_sec: Mapped[float | None] = mapped_column(Float, nullable=True, default=None)
+    lane: Mapped[int] = mapped_column(default=0)
     volume: Mapped[float] = mapped_column(default=1.0)
     fade_in: Mapped[float] = mapped_column(default=0)
     fade_out: Mapped[float] = mapped_column(default=0)
@@ -267,9 +275,35 @@ class AudioCueRow(Base):
             audio_id=self.audio_id,
             start_sec=self.start_sec,
             offset_sec=self.offset_sec,
+            end_sec=self.end_sec,
+            lane=self.lane or 0,
             volume=self.volume,
             fade_in=self.fade_in,
             fade_out=self.fade_out,
+        )
+
+
+class SubtitleTrackRow(Base):
+    __tablename__ = "subtitle_tracks"
+
+    id: Mapped[str] = mapped_column(String(12), primary_key=True, default=uuid_short)
+    scene_id: Mapped[str] = mapped_column(
+        ForeignKey("scenes.id"), index=True, unique=True
+    )
+    lang: Mapped[str] = mapped_column(String(16), default="en")
+    file_path: Mapped[str] = mapped_column(String(500), default="")
+
+    scene: Mapped[SceneRow] = relationship(back_populates="subtitle_track")
+
+    def to_schema(self, segments: list | None = None) -> schemas.SubtitleTrack:
+        return schemas.SubtitleTrack(
+            id=self.id,
+            scene_id=self.scene_id,
+            lang=self.lang,
+            segments=[
+                schemas.SubtitleSegment(start_sec=s.start, end_sec=s.end, text=s.text)
+                for s in (segments or [])
+            ],
         )
 
 
@@ -338,10 +372,19 @@ class JobRow(Base):
     kind: Mapped[str] = mapped_column(String(32), default="image")
     prompt: Mapped[str] = mapped_column(Text, default="")
     provider: Mapped[str] = mapped_column(String(32), default="cloud")
+    model: Mapped[str | None] = mapped_column(String(200), default=None)
     width: Mapped[int] = mapped_column(default=1024)
     height: Mapped[int] = mapped_column(default=1024)
     seconds: Mapped[float] = mapped_column(default=2.0)
     attach_frame: Mapped[bool] = mapped_column(default=True)
+    seed: Mapped[int | None] = mapped_column(default=None)
+    negative_prompt: Mapped[str] = mapped_column(Text, default="")
+    style: Mapped[str] = mapped_column(String(32), default="none")
+    camera_move: Mapped[str] = mapped_column(String(32), default="none")
+    enhance: Mapped[bool] = mapped_column(default=False)
+    reference_frame_id: Mapped[str | None] = mapped_column(String(12), default=None)
+    final_prompt: Mapped[str] = mapped_column(Text, default="")
+    entities_json: Mapped[str] = mapped_column(Text, default="[]")
     status: Mapped[str] = mapped_column(String(16), default="queued")
     progress: Mapped[float] = mapped_column(default=0)
     result_url: Mapped[str | None] = mapped_column(String(500), default=None)
@@ -354,10 +397,45 @@ class JobRow(Base):
             project_id=self.project_id,
             kind=self.kind,
             prompt=self.prompt or "",
+            model=self.model,
+            seed=self.seed,
+            negative_prompt=self.negative_prompt or "",
+            style=self.style or "none",
+            camera_move=self.camera_move or "none",
+            enhance=self.enhance,
+            reference_frame_id=self.reference_frame_id,
+            final_prompt=self.final_prompt or "",
+            entities_json=self.entities_json or "[]",
             status=self.status,  # type: ignore[arg-type]
             progress=self.progress,
             result_url=self.result_url,
             error=self.error,
+        )
+
+
+class EntityRow(Base):
+    """Named consistency anchor (character, field, prop) + frame snapshot."""
+
+    __tablename__ = "entities"
+
+    id: Mapped[str] = mapped_column(String(12), primary_key=True, default=uuid_short)
+    user_id: Mapped[str] = mapped_column(String(64), index=True, default="local")
+    project_id: Mapped[str] = mapped_column(
+        String(12), ForeignKey("projects.id"), index=True
+    )
+    kind: Mapped[str] = mapped_column(String(16), default="character")
+    name: Mapped[str] = mapped_column(String(80), default="")
+    anchor: Mapped[str] = mapped_column(Text, default="")
+    frame_id: Mapped[str | None] = mapped_column(String(12), default=None)
+
+    def to_schema(self) -> schemas.Entity:
+        return schemas.Entity(
+            id=self.id,
+            project_id=self.project_id,
+            kind=self.kind,
+            name=self.name,
+            anchor=self.anchor or "",
+            frame_id=self.frame_id,
         )
 
 
@@ -375,6 +453,7 @@ class ExportReportRow(Base):
     width: Mapped[int] = mapped_column(default=1280)
     height: Mapped[int] = mapped_column(default=720)
     audio_cues: Mapped[int] = mapped_column(default=0)
+    subtitles_vtt_url: Mapped[str | None] = mapped_column(String(500), default=None)
 
     def to_schema(self) -> schemas.ExportReport:
         import json
@@ -393,6 +472,7 @@ class ExportReportRow(Base):
             width=self.width,
             height=self.height,
             audio_cues=self.audio_cues,
+            subtitles_vtt_url=self.subtitles_vtt_url,
         )
 
 

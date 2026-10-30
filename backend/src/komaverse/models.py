@@ -93,9 +93,28 @@ class AudioCue(BaseModel):
     audio_id: str
     start_sec: float = 0.0  # scene-timeline position
     offset_sec: float = 0.0  # skip into the take
+    end_sec: float | None = None  # stop early on the timeline; null = take end
+    lane: int = 0  # audio lane (A1, A2, ...) on the timeline
     volume: float = 1.0  # 0..2 gain
     fade_in: float = 0.0
     fade_out: float = 0.0
+
+
+class SubtitleSegment(BaseModel):
+    """One parsed caption (seconds on the scene timeline)."""
+
+    start_sec: float = 0.0
+    end_sec: float = 0.0
+    text: str = ""
+
+
+class SubtitleTrack(BaseModel):
+    """One SRT track per scene, with parsed segments for the timeline."""
+
+    id: str = Field(default_factory=uuid_short)
+    scene_id: str
+    lang: str = "en"
+    segments: list[SubtitleSegment] = Field(default_factory=list)
 
 
 class Scene(BaseModel):
@@ -132,20 +151,41 @@ class ExportReport(BaseModel):
     width: int = 1280
     height: int = 720
     audio_cues: int = 0
+    subtitles_vtt_url: str | None = None
 
 
 class Job(BaseModel):
     id: str = Field(default_factory=uuid_short)
     user_id: str
     project_id: str | None = None
-    kind: str  # detect | generate-image | export (video gen not available)
+    kind: str  # image | video (openrouter only) | export
+    model: str | None = None  # vendor model id (openrouter jobs); None = server default
     prompt: str = ""  # generation prompt (image jobs); serialized so the
     # library can caption and search generations without a schema migration
     # (the column already exists on JobRow)
+    seed: int | None = None  # seed sent to the provider (random when unset)
+    negative_prompt: str = ""
+    style: str = "none"
+    camera_move: str = "none"
+    enhance: bool = False
+    reference_frame_id: str | None = None
+    final_prompt: str = ""  # exact text sent after entities/style/camera/negative
+    entities_json: str = "[]"  # snapshot [{name, kind}] for the UI
     status: Literal["queued", "running", "done", "failed"] = "queued"
     progress: float = 0.0
     result_url: str | None = None
     error: str | None = None
+
+
+class Entity(BaseModel):
+    """A named consistency anchor: character, field (setting), or prop."""
+
+    id: str = Field(default_factory=uuid_short)
+    project_id: str
+    kind: str = "character"  # character | field | prop
+    name: str = ""
+    anchor: str = ""  # stable description reused in every prompt
+    frame_id: str | None = None  # optional visual snapshot (draw frame)
 
 
 class CreditEntry(BaseModel):

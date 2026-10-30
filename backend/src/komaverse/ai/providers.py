@@ -1,7 +1,8 @@
-"""Pluggable AI providers (M4): cloud-first, local ComfyUI, fake for tests/demo.
+"""Pluggable AI providers: cloud, local ComfyUI, Meta Muse, OpenRouter, fake.
 
-One interface for image / video / panel-detection. No vendor types may leak
-outside this module — callers use names ("cloud", "comfyui", "fake") only.
+One interface for image / video / panel-detection, plus a shared
+OpenAI-compatible chat helper for the agent brain. No vendor types may leak
+outside this module — callers use names only.
 """
 
 from __future__ import annotations
@@ -14,6 +15,7 @@ import re
 import time
 from pathlib import Path
 from typing import Protocol
+from urllib.parse import urljoin
 
 import httpx
 from PIL import Image
@@ -36,14 +38,37 @@ class ProviderUnavailable(ProviderError):
 class AIProvider(Protocol):
     name: str
 
-    def generate_image(self, prompt: str, width: int, height: int) -> bytes:
+    def generate_image(
+        self,
+        prompt: str,
+        width: int,
+        height: int,
+        model: str | None = None,
+        *,
+        seed: int | None = None,
+        negative_prompt: str = "",
+        reference_images: tuple[bytes, ...] = (),
+    ) -> bytes:
         ...
 
-    def generate_video(self, prompt: str, seconds: float) -> bytes:
+    def generate_video(
+        self,
+        prompt: str,
+        seconds: float,
+        model: str | None = None,
+        *,
+        seed: int | None = None,
+        start_frame: bytes | None = None,
+        reference_images: tuple[bytes, ...] = (),
+    ) -> bytes:
         ...
 
     def detect_panels(self, image: Path) -> list[dict]:
         ...
+
+
+def _data_url(png: bytes) -> str:
+    return "data:image/png;base64," + base64.b64encode(png).decode()
 
 
 def _num_0_1000(value) -> float | None:
@@ -96,7 +121,20 @@ class CloudProvider:
         if not settings.ai_api_key or not settings.ai_base_url:
             raise ProviderUnavailable("AI_BASE_URL / AI_API_KEY not configured")
 
-    def generate_image(self, prompt: str, width: int, height: int) -> bytes:
+    def generate_image(
+        self,
+        prompt: str,
+        width: int,
+        height: int,
+        model: str | None = None,
+        *,
+        seed: int | None = None,
+        negative_prompt: str = "",
+        reference_images: tuple[bytes, ...] = (),
+    ) -> bytes:
+        # OpenAI-style /images/generations has no seed/negative/reference
+        # fields: seed and references are intentionally not sent (the call
+        # would 400). Negatives already ride in the prompt text ("Avoid: …").
         self._check()
         try:
             res = httpx.post(
@@ -117,7 +155,16 @@ class CloudProvider:
         except Exception as exc:
             raise ProviderUnavailable(f"cloud image call failed: {exc}") from exc
 
-    def generate_video(self, prompt: str, seconds: float) -> bytes:
+    def generate_video(
+        self,
+        prompt: str,
+        seconds: float,
+        model: str | None = None,
+        *,
+        seed: int | None = None,
+        start_frame: bytes | None = None,
+        reference_images: tuple[bytes, ...] = (),
+    ) -> bytes:
         raise UnsupportedOp("generic cloud endpoint has no video model configured")
 
     def detect_panels(self, image: Path) -> list[dict]:
@@ -178,7 +225,19 @@ class ComfyUIProvider:
         except Exception as exc:
             raise ProviderUnavailable(f"ComfyUI unreachable: {exc}") from exc
 
-    def generate_image(self, prompt: str, width: int, height: int) -> bytes:
+    def generate_image(
+        self,
+        prompt: str,
+        width: int,
+        height: int,
+        model: str | None = None,
+        *,
+        seed: int | None = None,
+        negative_prompt: str = "",
+        reference_images: tuple[bytes, ...] = (),
+    ) -> bytes:
+        # Txt2img workflow: seed + negative wire into the sampler nodes.
+        # References need an img2img workflow (not configured) — ignored.
         workflow = {
             "4": {
                 "class_type": "CheckpointLoaderSimple",
@@ -190,7 +249,10 @@ class ComfyUIProvider:
             },
             "7": {
                 "class_type": "CLIPTextEncode",
-                "inputs": {"text": "blurry, low quality", "clip": ["4", 1]},
+                "inputs": {
+                    "text": negative_prompt.strip() or "blurry, low quality",
+                    "clip": ["4", 1],
+                },
             },
             "5": {
                 "class_type": "EmptyLatentImage",
@@ -199,7 +261,7 @@ class ComfyUIProvider:
             "3": {
                 "class_type": "KSampler",
                 "inputs": {
-                    "seed": settings.comfyui_seed,
+                    "seed": seed if seed is not None else settings.comfyui_seed,
                     "steps": 20,
                     "cfg": 8,
                     "sampler_name": "euler",
@@ -243,7 +305,16 @@ class ComfyUIProvider:
             time.sleep(2)
         raise ProviderUnavailable("ComfyUI render timed out")
 
-    def generate_video(self, prompt: str, seconds: float) -> bytes:
+    def generate_video(
+        self,
+        prompt: str,
+        seconds: float,
+        model: str | None = None,
+        *,
+        seed: int | None = None,
+        start_frame: bytes | None = None,
+        reference_images: tuple[bytes, ...] = (),
+    ) -> bytes:
         raise UnsupportedOp("ComfyUI video workflow not configured")
 
     def detect_panels(self, image: Path) -> list[dict]:
@@ -255,13 +326,48 @@ class FakeProvider:
 
     name = "fake"
 
-    def generate_image(self, prompt: str, width: int, height: int) -> bytes:
+    def __init__(self) -> None:
+        self.last_image: dict | None = None
+        self.last_video: dict | None = None
+
+    def generate_image(
+        self,
+        prompt: str,
+        width: int,
+        height: int,
+        model: str | None = None,
+        *,
+        seed: int | None = None,
+        negative_prompt: str = "",
+        reference_images: tuple[bytes, ...] = (),
+    ) -> bytes:
+        self.last_image = {
+            "prompt": prompt,
+            "seed": seed,
+            "negative_prompt": negative_prompt,
+            "references": len(reference_images),
+        }
         img = Image.new("RGB", (max(width, 8), max(height, 8)), (32, 32, 48))
         buf = io.BytesIO()
         img.save(buf, format="PNG")
         return buf.getvalue()
 
-    def generate_video(self, prompt: str, seconds: float) -> bytes:
+    def generate_video(
+        self,
+        prompt: str,
+        seconds: float,
+        model: str | None = None,
+        *,
+        seed: int | None = None,
+        start_frame: bytes | None = None,
+        reference_images: tuple[bytes, ...] = (),
+    ) -> bytes:
+        self.last_video = {
+            "prompt": prompt,
+            "seed": seed,
+            "start_frame": start_frame is not None,
+            "references": len(reference_images),
+        }
         raise UnsupportedOp("fake provider has no video")
 
     def detect_panels(self, image: Path) -> list[dict]:
@@ -275,6 +381,511 @@ def get_provider(name: str) -> AIProvider:
         return CloudProvider()
     if name == "comfyui":
         return ComfyUIProvider()
+    if name == "meta":
+        return MetaProvider()
+    if name == "openrouter":
+        return OpenRouterProvider()
     if name == "fake" and not settings.is_production:
         return FakeProvider()
     raise ValueError(f"unknown provider: {name}")
+
+
+# ---------------------------------------------------------------------------
+# Shared OpenAI-compatible chat (agent brain + vision panel detection).
+# ---------------------------------------------------------------------------
+
+_CHAT_TIMEOUT = 60.0
+
+
+def chat_complete(
+    *,
+    base_url: str,
+    api_key: str,
+    model: str,
+    messages: list[dict],
+    tools: list[dict] | None = None,
+    extra_headers: dict[str, str] | None = None,
+) -> dict:
+    """POST one chat-completions call; return the first choice message dict.
+
+    Works against any OpenAI-compatible endpoint (generic cloud, Meta Model
+    API, OpenRouter). Transport errors propagate as httpx.HTTPError so the
+    agent can fall back to its demo brain; answered HTTP errors and
+    malformed payloads raise ProviderError with an actionable message.
+    """
+    headers = {"Authorization": f"Bearer {api_key}"}
+    if extra_headers:
+        headers.update(extra_headers)
+    body: dict = {"model": model, "messages": messages, "temperature": 0.2}
+    if tools:
+        body["tools"] = tools
+        body["tool_choice"] = "auto"
+    res = httpx.post(
+        f"{base_url.rstrip('/')}/chat/completions",
+        json=body,
+        headers=headers,
+        timeout=_CHAT_TIMEOUT,
+    )
+    if res.status_code == 401:
+        raise ProviderError("chat rejected the API key (401) — check the key")
+    if res.status_code == 429:
+        raise ProviderError("chat rate limit exceeded (429) — retry later")
+    if res.status_code >= 400:
+        raise ProviderError(f"chat failed ({res.status_code}): {res.text[:200]}")
+    try:
+        message = res.json()["choices"][0]["message"]
+    except (ValueError, KeyError, IndexError, TypeError) as exc:
+        raise ProviderError(
+            f"chat returned an unreadable response: {exc}"
+        ) from exc
+    if not isinstance(message, dict):
+        raise ProviderError("chat returned an unreadable response")
+    return message
+
+
+def get_chat_config(*, vision: bool = False) -> tuple[str, str, str]:
+    """(base_url, api_key, model) for the configured agent chat provider.
+
+    AI_PROVIDER selects the brain: "meta" (Meta Model API / Muse Spark),
+    "openrouter", or legacy "cloud" (AI_* settings). Raises ProviderError
+    naming the missing key when unconfigured.
+    """
+    name = settings.ai_provider
+    if name == "meta":
+        model = settings.meta_vision_model or settings.meta_chat_model
+        if not vision:
+            model = settings.meta_chat_model
+        if not settings.meta_api_key:
+            raise ProviderError("meta chat needs META_API_KEY (dev.meta.ai)")
+        return settings.meta_base_url, settings.meta_api_key, model
+    if name == "openrouter":
+        model = (
+            settings.openrouter_vision_model
+            if vision
+            else settings.openrouter_chat_model
+        )
+        if not settings.openrouter_api_key:
+            raise ProviderError("openrouter chat needs OPENROUTER_API_KEY")
+        return (
+            settings.openrouter_base_url,
+            settings.openrouter_api_key,
+            model,
+        )
+    if name == "cloud":
+        if not settings.ai_api_key or not settings.ai_base_url:
+            raise ProviderError("cloud chat needs AI_BASE_URL and AI_API_KEY")
+        model = settings.ai_chat_model
+        if vision and settings.ai_vision_model:
+            model = settings.ai_vision_model
+        return settings.ai_base_url, settings.ai_api_key, model
+    raise ProviderError(
+        f'unknown AI_PROVIDER "{name}" (want meta, openrouter, cloud, '
+        "comfyui, fake)"
+    )
+
+
+def chat_configured() -> bool:
+    """True when the configured chat provider has its key."""
+    try:
+        get_chat_config()
+    except ProviderError:
+        return False
+    return True
+
+
+def _vision_boxes(
+    image: Path,
+    *,
+    base_url: str,
+    api_key: str,
+    model: str,
+    prompt: str,
+    extra_headers: dict[str, str] | None = None,
+) -> list[dict]:
+    """Ask a vision model for panel boxes; parse into pixel-space dicts."""
+    with Image.open(image) as img:
+        # Scale to ORIGINAL pixels: the model returns 0-1000 coords relative
+        # to the sent (thumbnail) image, which keeps aspect.
+        orig_w, orig_h = img.size
+        img.thumbnail((1024, 1024))
+        buf = io.BytesIO()
+        img.save(buf, format="PNG")
+    b64 = base64.b64encode(buf.getvalue()).decode()
+    try:
+        message = chat_complete(
+            base_url=base_url,
+            api_key=api_key,
+            model=model,
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": prompt},
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": f"data:image/png;base64,{b64}"},
+                        },
+                    ],
+                }
+            ],
+            extra_headers=extra_headers,
+        )
+        text = message.get("content") or ""
+    except ProviderError:
+        raise
+    except Exception as exc:
+        raise ProviderUnavailable(f"vision call failed: {exc}") from exc
+    if isinstance(text, list):  # some gateways return content parts
+        text = " ".join(
+            part.get("text", "") for part in text if isinstance(part, dict)
+        )
+    boxes = _boxes_from_text(str(text), orig_w, orig_h)
+    if not boxes:
+        raise ProviderUnavailable("vision model returned no parseable boxes")
+    return boxes
+
+
+# ---------------------------------------------------------------------------
+# Meta Model API (Muse Spark): agent chat + vision detection.
+# No public Meta image/video generation endpoint exists, so those raise with
+# a routing hint instead of silently faking output.
+# ---------------------------------------------------------------------------
+
+
+class MetaProvider:
+    """Meta Model API (https://api.meta.ai/v1). Chat + vision only."""
+
+    name = "meta"
+
+    def generate_image(
+        self,
+        prompt: str,
+        width: int,
+        height: int,
+        model: str | None = None,
+        *,
+        seed: int | None = None,
+        negative_prompt: str = "",
+        reference_images: tuple[bytes, ...] = (),
+    ) -> bytes:
+        raise UnsupportedOp(
+            "meta has no public image-generation endpoint: use provider "
+            '"openrouter" (or cloud/comfyui) for image jobs'
+        )
+
+    def generate_video(
+        self,
+        prompt: str,
+        seconds: float,
+        model: str | None = None,
+        *,
+        seed: int | None = None,
+        start_frame: bytes | None = None,
+        reference_images: tuple[bytes, ...] = (),
+    ) -> bytes:
+        raise UnsupportedOp(
+            "meta has no public video-generation endpoint: use provider "
+            '"openrouter" for video jobs'
+        )
+
+    def detect_panels(self, image: Path) -> list[dict]:
+        if not settings.meta_api_key:
+            raise ProviderError("meta vision needs META_API_KEY (dev.meta.ai)")
+        base_url = settings.meta_base_url
+        model = settings.meta_vision_model or settings.meta_chat_model
+        return _vision_boxes(
+            image,
+            base_url=base_url,
+            api_key=settings.meta_api_key,
+            model=model,
+            prompt=CloudProvider._detect_prompt,
+        )
+
+
+# ---------------------------------------------------------------------------
+# OpenRouter: chat, image models, async video models behind one key.
+# ---------------------------------------------------------------------------
+
+# Curated per-kind model catalog served to the UI (GET /ai/models) and
+# enforced at POST /ai/generate. Badges: "cheap" (budget/fast) and
+# "popular" (best-known quality). Keep this short and verified — an
+# unknown id fails loudly at the provider, billed or not.
+# IDs verified against the live OpenRouter catalogs
+# (GET /api/v1/images/models, GET /api/v1/videos/models): unknown ids
+# fail loudly at the provider, billed or not — never guess new ones.
+OPENROUTER_IMAGE_MODELS = (
+    {
+        "id": "black-forest-labs/flux-3-image-klein",
+        "label": "Flux 3 Klein",
+        "badge": "cheap",
+    },
+    {
+        "id": "qwen/qwen-image-2.1-turbo",
+        "label": "Qwen Image 2.1 Turbo",
+        "badge": "cheap",
+    },
+    {
+        "id": "google/gemini-nano-banana-2.1",
+        "label": "Nano Banana 2.1",
+        "badge": "popular",
+    },
+    {"id": "meta/muse-image", "label": "Meta Muse Image", "badge": "popular"},
+)
+OPENROUTER_VIDEO_MODELS = (
+    {"id": "bytedance/seedance-2.0", "label": "Seedance 2.0", "badge": "popular"},
+    {"id": "google/veo-3.1", "label": "Veo 3.1", "badge": "popular"},
+    {"id": "alibaba/wan-2.6", "label": "Wan 2.6", "badge": "cheap"},
+)
+
+
+def list_openrouter_models() -> dict:
+    """Catalog + server defaults for the model picker UI."""
+    return {
+        "image": [dict(m) for m in OPENROUTER_IMAGE_MODELS],
+        "video": [dict(m) for m in OPENROUTER_VIDEO_MODELS],
+        "defaults": {
+            "image": settings.openrouter_image_model,
+            "video": settings.openrouter_video_model,
+        },
+    }
+
+
+def check_openrouter_model(kind: str, model: str) -> None:
+    """Raise ProviderError unless model is catalogued for kind."""
+    catalog = (
+        OPENROUTER_IMAGE_MODELS if kind == "image" else OPENROUTER_VIDEO_MODELS
+    )
+    if model not in [m["id"] for m in catalog]:
+        want = ", ".join(m["id"] for m in catalog)
+        raise ProviderError(f'unknown {kind} model "{model}" (want: {want})')
+
+
+def _openrouter_headers() -> dict[str, str]:
+    return {
+        "Authorization": f"Bearer {settings.openrouter_api_key}",
+        "HTTP-Referer": settings.openrouter_referer,
+        "X-Title": "Komaverse Studio",
+    }
+
+
+def _fetch_bytes(url: str) -> bytes:
+    try:
+        resp = httpx.get(url, headers=_openrouter_headers(), timeout=_CHAT_TIMEOUT)
+    except httpx.HTTPError as exc:
+        raise ProviderError(f"download failed: {exc}") from exc
+    if resp.status_code >= 400:
+        raise ProviderError(f"download failed ({resp.status_code})")
+    return resp.content
+
+
+def _image_bytes_from_result(data: dict) -> bytes:
+    """Unwrap b64_json / data-URL / remote URL from an image result payload."""
+    b64 = data.get("b64_json") or data.get("b64")
+    if isinstance(b64, str):
+        try:
+            return base64.b64decode(b64)
+        except ValueError as exc:
+            raise ProviderError(f"image payload is not valid base64: {exc}") from exc
+    url = data.get("url")
+    if isinstance(url, str) and url:
+        if url.startswith("data:") and "," in url:
+            try:
+                return base64.b64decode(url.split(",", 1)[1])
+            except ValueError as exc:
+                raise ProviderError(
+                    f"image data-URL is not valid base64: {exc}"
+                ) from exc
+        return _fetch_bytes(url)
+    raise ProviderError("image response carried no b64_json or url")
+
+
+class OpenRouterProvider:
+    """OpenRouter gateway: chat models, image models, async video models."""
+
+    name = "openrouter"
+
+    def _check(self) -> None:
+        if not settings.openrouter_api_key:
+            raise ProviderUnavailable("OPENROUTER_API_KEY not configured")
+
+    def generate_image(
+        self,
+        prompt: str,
+        width: int,
+        height: int,
+        model: str | None = None,
+        *,
+        seed: int | None = None,
+        negative_prompt: str = "",
+        reference_images: tuple[bytes, ...] = (),
+    ) -> bytes:
+        # Dedicated Image API (docs/guides/overview/multimodal/image-generation):
+        # POST /images {model, prompt, resolution, aspect_ratio, seed?,
+        # input_references?} -> {"data": [{"b64_json": ...}]}. All catalogued
+        # models live here. No negative field exists — negatives ride in the
+        # prompt text ("Avoid: …") via build_final_prompt.
+        self._check()
+        model = model or settings.openrouter_image_model
+        longest = max(width, height)
+        resolution = "512" if longest <= 512 else "768" if longest <= 768 else "1K"
+        payload: dict = {
+            "model": model,
+            "prompt": prompt,
+            "resolution": resolution,
+            "aspect_ratio": "1:1",
+        }
+        if seed is not None:
+            payload["seed"] = seed
+        if reference_images:
+            payload["input_references"] = [
+                {"type": "image_url", "image_url": {"url": _data_url(png)}}
+                for png in reference_images
+            ]
+        try:
+            resp = httpx.post(
+                f"{settings.openrouter_base_url.rstrip('/')}/images",
+                json=payload,
+                headers=_openrouter_headers(),
+                timeout=180.0,
+            )
+        except httpx.HTTPError as exc:
+            raise ProviderUnavailable(
+                f"openrouter image request failed: {exc}"
+            ) from exc
+        if resp.status_code >= 400:
+            raise ProviderError(
+                f"openrouter image failed ({resp.status_code}): {resp.text[:200]}"
+            )
+        try:
+            first = resp.json()["data"][0]
+        except (ValueError, KeyError, IndexError, TypeError) as exc:
+            raise ProviderError(
+                f"openrouter image returned an unreadable response: {exc}"
+            ) from exc
+        return _image_bytes_from_result(first)
+
+    def generate_video(
+        self,
+        prompt: str,
+        seconds: float,
+        model: str | None = None,
+        *,
+        seed: int | None = None,
+        start_frame: bytes | None = None,
+        reference_images: tuple[bytes, ...] = (),
+    ) -> bytes:
+        # Async Video API (docs/.../multimodal/video-generation): POST
+        # /videos {model, prompt, duration, seed?, frame_images?,
+        # input_references?}; frame_images entries carry frame_type
+        # first_frame/last_frame (image-to-video), input_references guide
+        # style (reference-to-video). No negative field — see images.
+        self._check()
+        base = settings.openrouter_base_url.rstrip("/")
+        headers = _openrouter_headers()
+        payload: dict = {
+            "model": model or settings.openrouter_video_model,
+            "prompt": prompt,
+            "duration": int(seconds),
+        }
+        if seed is not None:
+            payload["seed"] = seed
+        if start_frame is not None:
+            payload["frame_images"] = [
+                {
+                    "type": "image_url",
+                    "image_url": {"url": _data_url(start_frame)},
+                    "frame_type": "first_frame",
+                }
+            ]
+        if reference_images:
+            payload["input_references"] = [
+                {"type": "image_url", "image_url": {"url": _data_url(png)}}
+                for png in reference_images
+            ]
+        try:
+            submit = httpx.post(
+                f"{base}/videos",
+                json=payload,
+                headers=headers,
+                timeout=_CHAT_TIMEOUT,
+            )
+        except httpx.HTTPError as exc:
+            raise ProviderUnavailable(
+                f"openrouter video submit failed: {exc}"
+            ) from exc
+        if submit.status_code >= 400:
+            raise ProviderError(
+                f"openrouter video submit failed "
+                f"({submit.status_code}): {submit.text[:200]}"
+            )
+        try:
+            job = submit.json()
+            job_id = job.get("id")
+            polling_url = job.get("polling_url") or f"{base}/videos/{job_id}"
+        except ValueError as exc:
+            raise ProviderError(f"openrouter video gave no job: {exc}") from exc
+        if not job_id:
+            raise ProviderError("openrouter video gave no job id")
+        polling_url = urljoin(base + "/", str(polling_url))
+        # Sync waiting is fine: run_ai_job already runs in a background task
+        # while POST /ai/generate returned 202 at once.
+        deadline = time.monotonic() + 600.0
+        while time.monotonic() < deadline:
+            try:
+                poll = httpx.get(polling_url, headers=headers, timeout=30.0)
+            except httpx.HTTPError:
+                # A failed status *request* is not a failed *job*: retry it.
+                time.sleep(10.0)
+                continue
+            if poll.status_code == 429:
+                time.sleep(10.0)
+                continue
+            if poll.status_code >= 400:
+                raise ProviderError(
+                    f"openrouter video poll failed ({poll.status_code})"
+                )
+            try:
+                state = poll.json()
+            except ValueError as exc:
+                raise ProviderError(
+                    f"openrouter video poll unreadable: {exc}"
+                ) from exc
+            status = str(state.get("status", "")).lower()
+            if status == "completed":
+                urls = state.get("unsigned_urls") or []
+                first = urls[0] if urls else ""
+                url = (
+                    first.get("url", "")
+                    if isinstance(first, dict)
+                    else str(first or "")
+                )
+                url = url or f"{base}/videos/{job_id}/content?index=0"
+                try:
+                    resp = httpx.get(url, headers=headers, timeout=120.0)
+                except httpx.HTTPError as exc:
+                    raise ProviderError(
+                        f"video download failed: {exc}"
+                    ) from exc
+                if resp.status_code >= 400:
+                    raise ProviderError(
+                        f"video download failed ({resp.status_code})"
+                    )
+                return resp.content
+            if status in ("failed", "cancelled", "expired", "error"):
+                raise ProviderError(
+                    f"openrouter video {status}: "
+                    f"{str(state.get('error'))[:200]}"
+                )
+            time.sleep(10.0)
+        raise ProviderError("openrouter video timed out after 10 minutes")
+
+    def detect_panels(self, image: Path) -> list[dict]:
+        self._check()
+        return _vision_boxes(
+            image,
+            base_url=settings.openrouter_base_url,
+            api_key=settings.openrouter_api_key or "",
+            model=settings.openrouter_vision_model,
+            prompt=CloudProvider._detect_prompt,
+            extra_headers=_openrouter_headers(),
+        )

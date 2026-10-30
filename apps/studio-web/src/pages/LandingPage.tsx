@@ -8,6 +8,7 @@ import ShowcaseReels from "../components/ShowcaseReels";
 import "./LandingPage.css";
 
 const ScrollCompanion = lazy(() => import("../components/ScrollCompanion"));
+const InstrumentModels = lazy(() => import("../components/InstrumentModels"));
 const LOGO = "/koma-wari-logo-sm.png";
 
 function Icon({ paths }: { paths: string[] }) {
@@ -110,7 +111,7 @@ export default function LandingPage({
   const [scrolled, setScrolled] = useState(false);
   const [muted, setMuted] = useState(true);
   const splashRef = useRef<HTMLVideoElement>(null);
-  const dockRef = useRef<HTMLDivElement>(null);
+  const restRef = useRef<HTMLDivElement>(null);
   const [docked, setDocked] = useState(false);
   const pageRef = useRef<HTMLDivElement>(null);
   const heroTitleRef = useRef<HTMLHeadingElement>(null);
@@ -240,7 +241,7 @@ export default function LandingPage({
 
       <div className="lv" ref={pageRef}>
         <Suspense fallback={null}>
-          <ScrollCompanion dockRef={dockRef} onDock={setDocked} />
+          <ScrollCompanion dockRef={restRef} onDock={setDocked} />
         </Suspense>
         <nav className={`lv-nav${scrolled ? " scrolled" : ""}`}>
           <span className="lv-brand">
@@ -253,7 +254,7 @@ export default function LandingPage({
             <a href="#how" className="lv-link">How it works</a>
             <a href="#pricing" className="lv-link">Pricing</a>
             <Btn small onClick={onSignIn}>Sign in</Btn>
-            <PrimaryBtn small onClick={onRegister}>Start creating</PrimaryBtn>
+            <PrimaryBtn small onClick={onRegister}>Create</PrimaryBtn>
           </div>
         </nav>
 
@@ -273,7 +274,7 @@ export default function LandingPage({
           </p>
           <div className="lv-cta-row" data-hero>
             <Magnet>
-              <SfxBtn onClick={onRegister}>Start creating</SfxBtn>
+              <SfxBtn onClick={onRegister}>Create</SfxBtn>
             </Magnet>
             <Btn onClick={onSignIn} style={{ fontSize: 15, padding: "10px 24px" }}>
               Sign in
@@ -300,8 +301,9 @@ export default function LandingPage({
               <h2 className="lv-h2">Drawn with real tools in mind</h2>
               <p className="lv-instrument-copy">
                 The studio treats the pen as the hero — pressure, tilt, and
-                ink all the way to export. It travels with you down this page,
-                and rests here when you arrive.
+                ink all the way to export. The tablet pen travels with you
+                down this page, and rests beside the rest of the set when
+                you arrive.
               </p>
               <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 16 }}>
                 <Chip>Pressure-sensitive</Chip>
@@ -310,36 +312,44 @@ export default function LandingPage({
               </div>
             </div>
             <div
-              ref={dockRef}
-              className="kv-panel-frame"
-              role="img"
-              aria-label="Instrument dock — the traveling pen rests here"
+              className="kv-panel-frame lv-dock"
               style={{
                 position: "relative",
                 aspectRatio: "16 / 10",
                 minHeight: 360,
-                background: "var(--kv-inset)",
                 borderRadius: "var(--kv-radius)",
                 overflow: "hidden",
               }}
             >
-              {!docked && (
-                <div
-                  className="kv-halftone"
-                  style={{
-                    position: "absolute",
-                    inset: 0,
-                    display: "flex",
-                    alignItems: "center",
-                    justifyContent: "center",
-                  }}
-                >
-                  <span className="lv-dock-live" aria-hidden="true">
-                    <span className="lv-dock-live-dot" />
-                    Traveling
-                  </span>
-                </div>
-              )}
+              <div
+                ref={restRef}
+                className="lv-dock-rest"
+                role="img"
+                aria-label="Pen rest — the traveling tablet pen docks here"
+              >
+                {!docked && (
+                  <div
+                    className="kv-halftone"
+                    style={{
+                      position: "absolute",
+                      inset: 0,
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "center",
+                    }}
+                  >
+                    <span className="lv-dock-live" aria-hidden="true">
+                      <span className="lv-dock-live-dot" />
+                      Traveling
+                    </span>
+                  </div>
+                )}
+              </div>
+              <div className="lv-dock-others">
+                <Suspense fallback={null}>
+                  <InstrumentModels />
+                </Suspense>
+              </div>
             </div>
           </div>
           <Kanji char="筆" />
@@ -453,9 +463,9 @@ export default function LandingPage({
                 </ul>
                 <span style={{ marginTop: "auto" }}>
                   {p.featured ? (
-                    <SfxBtn small onClick={onRegister}>Start creating</SfxBtn>
+                    <SfxBtn small onClick={onRegister}>Create</SfxBtn>
                   ) : (
-                    <Btn small onClick={onRegister}>Start creating</Btn>
+                    <Btn small onClick={onRegister}>Create</Btn>
                   )}
                 </span>
               </div>
@@ -478,7 +488,7 @@ export default function LandingPage({
               <ImpactBurst text="GO!" size={104} />
             </div>
             <Magnet>
-              <SfxBtn onClick={onRegister}>Start creating</SfxBtn>
+              <SfxBtn onClick={onRegister}>Create</SfxBtn>
             </Magnet>
           </div>
         </section>

@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { api, mediaUrl, type AudioTake, type Scene } from "../api";
 import { probeDuration } from "../lib/audio/peaks";
-import { Btn, SectionTitle, SelectInput, TextInput } from "./ui";
+import { Btn, IconBtn, SectionTitle, SelectInput, TextInput } from "./ui";
 import { Waveform } from "./Waveform";
 
 function pickMime(): string {
@@ -36,18 +36,25 @@ export function AudioDeck({
   projectId,
   scene,
   takes,
+  playhead,
   onTakes,
   onScene,
+  onVoiceoverStart,
   notify,
 }: {
   projectId: string;
   scene: Scene | null;
   takes: AudioTake[];
+  /** Current preview position: quick-cues and voiceovers land here. */
+  playhead: number;
   onTakes: () => void;
   onScene: () => void;
+  /** The page seeks the preview here and presses play for a voiceover. */
+  onVoiceoverStart: (atTime: number) => void;
   notify: (msg: string) => void;
 }) {
   const [recording, setRecording] = useState(false);
+  const [voiceoverAt, setVoiceoverAt] = useState<number | null>(null);
   const [busy, setBusy] = useState(false);
   const [level, setLevel] = useState(0);
   const [elapsed, setElapsed] = useState(0);
@@ -57,6 +64,7 @@ export function AudioDeck({
   const [cueStart, setCueStart] = useState("0");
   const [cueVolume, setCueVolume] = useState("1");
   const recRef = useRef<RecState | null>(null);
+  const voiceoverRef = useRef<number | null>(null);
   const playersRef = useRef(new Map<string, HTMLAudioElement>());
   const fileRef = useRef<HTMLInputElement>(null);
 
@@ -99,17 +107,18 @@ export function AudioDeck({
     setBusy(true);
     try {
       const duration = await probeDuration(blob);
-      await api.uploadTake(projectId, blob, filename, duration);
+      const take = await api.uploadTake(projectId, blob, filename, duration);
       onTakes();
-      notify(`Saved ${filename} (${duration.toFixed(1)}s).`);
+      return { take, duration };
     } catch (e) {
       notify(`Couldn't save the take: ${(e as Error).message}`);
+      return null;
     } finally {
       setBusy(false);
     }
   };
 
-  const startRecording = async () => {
+  const startRecording = async (voiceover: boolean) => {
     if (!navigator.mediaDevices?.getUserMedia) {
       notify("Recording needs a secure context (localhost or HTTPS).");
       return;
@@ -165,6 +174,11 @@ export function AudioDeck({
     recRef.current.raf = requestAnimationFrame(loop);
     setElapsed(0);
     setRecording(true);
+    if (voiceover) {
+      voiceoverRef.current = playhead;
+      setVoiceoverAt(playhead);
+      onVoiceoverStart(playhead);
+    }
   };
 
   const stopRecording = () => {
@@ -183,9 +197,47 @@ export function AudioDeck({
         notify("Nothing was captured — try again.");
         return;
       }
-      void saveBlob(blob, `take-${takes.length + 1}.${extFor(mime)}`);
+      const at = voiceoverRef.current;
+      voiceoverRef.current = null;
+      setVoiceoverAt(null);
+      void (async () => {
+        const saved = await saveBlob(blob, `take-${takes.length + 1}.${extFor(mime)}`);
+        if (!saved) return;
+        if (at !== null && scene) {
+          try {
+            await api.addCue(scene.id, { audio_id: saved.take.id, start_sec: at });
+            onScene();
+            scrollToLane();
+            notify(`Voiceover placed at ${at.toFixed(1)}s — see the A1 lane.`);
+          } catch (e) {
+            notify(`Saved ${saved.take.name} but couldn't place it: ${(e as Error).message}`);
+          }
+        } else if (at !== null) {
+          notify(`Saved ${saved.take.name} — pick a scene to cue it.`);
+        } else {
+          notify(`Saved ${saved.take.name} (${saved.duration.toFixed(1)}s).`);
+        }
+      })();
     };
     st.recorder.stop();
+  };
+
+  const scrollToLane = () => {
+    document
+      .querySelector('[aria-label="Audio track"]')
+      ?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+  };
+
+  const quickCue = async (take: AudioTake) => {
+    if (!scene) return;
+    try {
+      await api.addCue(scene.id, { audio_id: take.id, start_sec: Math.max(playhead, 0) });
+      onScene();
+      scrollToLane();
+      notify(`“${take.name || "Take"}” cued at ${Math.max(playhead, 0).toFixed(1)}s — see the A1 lane.`);
+    } catch (e) {
+      notify(`Couldn't cue it: ${(e as Error).message}`);
+    }
   };
 
   const onFile = async (file: File | undefined) => {
@@ -229,13 +281,20 @@ export function AudioDeck({
     <div>
       <SectionTitle>Voice &amp; audio</SectionTitle>
       {!recording ? (
-        <div style={{ display: "flex", gap: 6, marginBottom: 8 }}>
-          <Btn small onClick={startRecording} disabled={busy}>
-            ● Record
-          </Btn>
-          <Btn small onClick={() => fileRef.current?.click()} disabled={busy}>
-            Upload
-          </Btn>
+        <div style={{ display: "flex", gap: 6, marginBottom: 8, flexWrap: "wrap" }}>
+          <IconBtn onClick={() => void startRecording(false)} disabled={busy} label="Record a take into the library">
+            ●
+          </IconBtn>
+          <IconBtn
+            onClick={() => void startRecording(true)}
+            disabled={busy || !scene}
+            label={scene ? "Voiceover — play the preview and record over it; the take lands on the A1 lane where you started" : "Pick a scene first"}
+          >
+            ◉
+          </IconBtn>
+          <IconBtn onClick={() => fileRef.current?.click()} disabled={busy} label="Upload audio from disk">
+            ⤒
+          </IconBtn>
           <input
             ref={fileRef}
             type="file"
@@ -247,9 +306,9 @@ export function AudioDeck({
         </div>
       ) : (
         <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 8 }}>
-          <Btn small danger onClick={stopRecording}>
-            ■ Stop
-          </Btn>
+          <IconBtn danger onClick={stopRecording} label="Stop recording">
+            ■
+          </IconBtn>
           <div
             style={{
               flex: 1,
@@ -271,6 +330,11 @@ export function AudioDeck({
           <span className="kv-nums" style={{ fontSize: 13 }}>
             {elapsed.toFixed(1)}s
           </span>
+          {voiceoverAt !== null && (
+            <span style={{ fontSize: 12, color: "var(--kv-muted)" }} title="The take lands here when you stop">
+              🎙 from {voiceoverAt.toFixed(1)}s
+            </span>
+          )}
         </div>
       )}
 
@@ -278,6 +342,12 @@ export function AudioDeck({
         {takes.map((t, i) => (
           <div
             key={t.id}
+            draggable
+            onDragStart={(e) => {
+              e.dataTransfer.effectAllowed = "copy";
+              e.dataTransfer.setData("text/kv-take", t.id);
+            }}
+            title="Drag onto the A1 lane to cue it there"
             style={{
               display: "flex",
               gap: 8,
@@ -285,11 +355,19 @@ export function AudioDeck({
               border: "1px solid var(--kv-border)",
               borderRadius: 6,
               padding: 6,
+              cursor: "grab",
             }}
           >
-            <Btn small onClick={() => togglePlay(t)} title={playingId === t.id ? "Stop" : "Play"}>
+            <IconBtn onClick={() => togglePlay(t)} label={playingId === t.id ? "Stop take" : "Play take"}>
               {playingId === t.id ? "■" : "▶"}
-            </Btn>
+            </IconBtn>
+            <IconBtn
+              disabled={!scene}
+              onClick={() => void quickCue(t)}
+              label={scene ? `Cue take at the playhead (${Math.max(playhead, 0).toFixed(1)}s)` : "Pick a scene first"}
+            >
+              ＋
+            </IconBtn>
             <div style={{ flex: 1, minWidth: 0 }}>
               {renaming === t.id ? (
                 <TextInput
@@ -324,9 +402,9 @@ export function AudioDeck({
               )}
               <Waveform src={mediaUrl(t.url)} width={200} height={32} />
             </div>
-            <Btn small danger onClick={() => void removeTake(t)}>
-              Delete
-            </Btn>
+            <IconBtn danger onClick={() => void removeTake(t)} label="Delete take">
+              ×
+            </IconBtn>
           </div>
         ))}
         {takes.length === 0 && (
@@ -350,14 +428,14 @@ export function AudioDeck({
                   <span className="kv-nums" style={{ color: "var(--kv-muted)" }}>
                     @{c.start_sec.toFixed(1)}s ×{c.volume.toFixed(1)}
                   </span>
-                  <Btn
-                    small
+                  <IconBtn
                     onClick={() => {
                       void api.deleteCue(c.id).then(onScene);
                     }}
+                    label="Remove cue from the timeline"
                   >
-                    Remove
-                  </Btn>
+                    ×
+                  </IconBtn>
                 </div>
               );
             })}
@@ -395,10 +473,40 @@ export function AudioDeck({
               title="Volume (0–2)"
               style={{ width: 52 }}
             />
-            <Btn small disabled={!cueTake} onClick={() => void addCue()}>
-              Cue it
-            </Btn>
+            <IconBtn disabled={!cueTake} onClick={() => void addCue()} label="Cue the selected take at the playhead">
+              ＋
+            </IconBtn>
           </div>
+        </div>
+      )}
+
+      {recording && (
+        <div
+          role="status"
+          aria-label={voiceoverAt !== null ? "Recording voiceover" : "Recording take"}
+          style={{
+            position: "fixed",
+            bottom: 16,
+            left: "50%",
+            transform: "translateX(-50%)",
+            zIndex: 60,
+            display: "flex",
+            gap: 10,
+            alignItems: "center",
+            background: "var(--kv-surface)",
+            border: "1px solid var(--kv-accent)",
+            borderRadius: 999,
+            padding: "8px 8px 8px 16px",
+            boxShadow: "var(--kv-shadow-hard)",
+          }}
+        >
+          <span className="kv-nums" style={{ fontSize: 13 }}>
+            🎙 REC {elapsed.toFixed(1)}s
+            {voiceoverAt !== null ? ` · lands at ${voiceoverAt.toFixed(1)}s` : ""}
+          </span>
+          <IconBtn danger onClick={stopRecording} label={voiceoverAt !== null ? "Stop and place the take on the timeline" : "Stop recording"}>
+            ■
+          </IconBtn>
         </div>
       )}
     </div>

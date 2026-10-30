@@ -4,6 +4,7 @@ import {
   Btn,
   ChapterHeader,
   EmptyState,
+  IconBtn,
   Notice,
   PrimaryBtn,
   SectionTitle,
@@ -173,6 +174,27 @@ export default function DrawPage() {
   const playIdxRef = useRef(0);
   const playBitmapsRef = useRef<HTMLCanvasElement[]>([]);
   const playLabelsRef = useRef<string[]>([]);
+  // Onion skin (Krita-style): translucent red previous / green next frames
+  // under the live layers while drawing.
+  const [onion, setOnion] = useState(true);
+  const [onionPrevN, setOnionPrevN] = useState(1);
+  const [onionNextN, setOnionNextN] = useState(1);
+  const [onionOpacity, setOnionOpacity] = useState(30);
+  // Frame drag-reorder: dragged id + insertion hint {before/after thumb}.
+  const dragFrameRef = useRef<string | null>(null);
+  const [dragId, setDragId] = useState<string | null>(null);
+  const [dropHint, setDropHint] = useState<{ id: string; after: boolean } | null>(null);
+  const setDragFrameId = (id: string | null) => {
+    dragFrameRef.current = id;
+    setDragId(id);
+  };
+  const onionCacheRef = useRef<{ prev: HTMLCanvasElement[]; next: HTMLCanvasElement[] }>({
+    prev: [],
+    next: [],
+  });
+  const onionGenRef = useRef(0);
+  const onionOpacityRef = useRef(30);
+  onionOpacityRef.current = onionOpacity;
 
   const placeFileRef = useRef<HTMLInputElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -277,9 +299,16 @@ export default function DrawPage() {
     const engine = engineRef.current;
     if (!el || !engine) return;
     const pad = 24;
+    // Stable budget, NOT the viewport's own height: the viewport has no
+    // fixed height, so clientHeight tracks the canvas and every fit would
+    // ratchet zoom down a little further on each frame switch.
+    const heightBudget = Math.max(
+      200,
+      document.documentElement.clientHeight * 0.7 - pad,
+    );
     const z = Math.min(
       (el.clientWidth - pad) / engine.width,
-      (el.clientHeight - pad) / engine.height,
+      heightBudget / engine.height,
     );
     const nz = clamp(z > 0 && isFinite(z) ? z : 1, 0.1, 4);
     zoomRef.current = nz;
@@ -334,6 +363,9 @@ export default function DrawPage() {
     const target = frames.find((f) => f.id === frameId);
     const canvas = canvasRef.current;
     if (!target || !canvas || openedRef.current === frameId) return;
+    // Auto-fit once per tab lifetime: switching frames keeps the user's
+    // zoom instead of resizing the canvas under them.
+    const firstOpen = !openedRef.current;
     openedRef.current = frameId;
     const engine = new DrawEngine(
       canvas,
@@ -354,7 +386,7 @@ export default function DrawPage() {
         setLayers(engine.getLayers());
         setUndoDepth(0);
         setRedoDepth(0);
-        window.setTimeout(() => fitZoom(), 60);
+        if (firstOpen) window.setTimeout(() => fitZoom(), 60);
       });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [frameId, frames]);
@@ -615,6 +647,50 @@ export default function DrawPage() {
     }
   };
 
+  // Drag (or Alt+Arrow) reorder: optimistic locally, exact-set PATCH
+  // server-side; a failure re-lists to revert.
+  const moveFrameTo = useCallback(
+    async (dragId: string, overId: string | null, after: boolean) => {
+      if (!projectId) return;
+      if (!frames.some((f) => f.id === dragId)) return;
+      const ids = frames.map((f) => f.id).filter((id) => id !== dragId);
+      if (overId !== null && !ids.includes(overId)) return;
+      const pos =
+        overId === null ? ids.length : ids.indexOf(overId) + (after ? 1 : 0);
+      const finalIds = [...ids.slice(0, pos), dragId, ...ids.slice(pos)];
+      const byId = new Map(frames.map((f) => [f.id, f]));
+      const next = finalIds.map((id) => byId.get(id)!).filter(Boolean);
+      if (next.length !== frames.length) return;
+      setFrames(next);
+      setDropHint(null);
+      try {
+        await api.orderFrames(projectId, finalIds);
+      } catch (e) {
+        setNotice(`Reorder failed: ${(e as Error).message}`);
+        try {
+          setFrames(await api.listFrames(projectId));
+        } catch {
+          // Keep the optimistic order when even the revert fails.
+        }
+      }
+    },
+    [frames, projectId],
+  );
+
+  const moveFrameStep = useCallback(
+    (id: string, delta: -1 | 1) => {
+      const idx = frames.findIndex((f) => f.id === id);
+      if (idx < 0) return;
+      if (delta < 0 && idx === 0) return;
+      if (delta > 0 && idx === frames.length - 1) return;
+      // Post-removal array: inserting at idx+delta lands on that slot.
+      const ids = frames.map((f) => f.id).filter((x) => x !== id);
+      const pos = Math.max(0, Math.min(ids.length, idx + delta));
+      void moveFrameTo(id, ids[pos] ?? null, false);
+    },
+    [frames, moveFrameTo],
+  );
+
   const duplicateFrame = async () => {
     stopPlayback();
     const f = frames.find((x) => x.id === frameId);
@@ -676,7 +752,7 @@ export default function DrawPage() {
     let rendered: HTMLCanvasElement[];
     try {
       rendered = await Promise.all(
-        list.map((f) => engine.renderStack(f.layers, f.width, f.height)),
+        list.map((f) => engine.renderStack(f.layers ?? [], f.width, f.height)),
       );
     } catch {
       setNotice("Playback failed to render the frames.");
@@ -707,6 +783,53 @@ export default function DrawPage() {
     },
     [],
   );
+
+  // Onion skin bitmaps: pre-render neighbor frames through the engine.
+  // Skipped while playing (the flipbook owns the canvas); the stop path
+  // repaints via composite() and this effect refreshes on the next run.
+  useEffect(() => {
+    const engine = engineRef.current;
+    if (!engine) return;
+    if (playing || !onion) {
+      onionGenRef.current++;
+      onionCacheRef.current = { prev: [], next: [] };
+      engine.setOnionSkins([], [], onionOpacityRef.current / 100, false);
+      return;
+    }
+    const idx = frames.findIndex((f) => f.id === frameIdRef.current);
+    if (idx < 0) return;
+    const gen = ++onionGenRef.current;
+    const renderable = (f: DrawFrame) =>
+      // Transparent skins: only strokes get tinted, no paper wash.
+      engine.renderStack(
+        stashRef.current.get(f.id) ?? f.layers ?? [],
+        f.width,
+        f.height,
+        false,
+      );
+    void (async () => {
+      try {
+        const [prev, next] = await Promise.all([
+          Promise.all(frames.slice(Math.max(0, idx - onionPrevN), idx).map(renderable)),
+          Promise.all(frames.slice(idx + 1, idx + 1 + onionNextN).map(renderable)),
+        ]);
+        if (onionGenRef.current !== gen || playingRef.current) return;
+        onionCacheRef.current = { prev, next };
+        engine.setOnionSkins(prev, next, onionOpacityRef.current / 100, true);
+      } catch {
+        // A corrupt neighbor layer simply yields no skin for it.
+      }
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [frameId, frames, onion, onionPrevN, onionNextN, playing, layers]);
+
+  // Opacity applies instantly without re-rendering the skins.
+  useEffect(() => {
+    const engine = engineRef.current;
+    if (!engine || playingRef.current) return;
+    const { prev, next } = onionCacheRef.current;
+    engine.setOnionSkins(prev, next, onionOpacity / 100, onion && (prev.length > 0 || next.length > 0));
+  }, [onionOpacity, onion]);
 
   const downloadPNG = () => {
     const engine = engineRef.current;
@@ -836,20 +959,20 @@ export default function DrawPage() {
           <div>
             <SectionTitle>Canvas</SectionTitle>
             <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 8 }}>
-              <Btn small disabled={undoDepth === 0} onClick={doUndo} title="Undo (Ctrl+Z)">Undo</Btn>
-              <Btn small disabled={redoDepth === 0} onClick={doRedo} title="Redo (Ctrl+Shift+Z)">Redo</Btn>
+              <IconBtn label="Undo (Ctrl+Z)" disabled={undoDepth === 0} onClick={doUndo}>↩</IconBtn>
+              <IconBtn label="Redo (Ctrl+Shift+Z)" disabled={redoDepth === 0} onClick={doRedo}>↪</IconBtn>
               <PrimaryBtn small onClick={() => save(false)} disabled={busy}>
                 {busy ? "Saving…" : dirty ? "● Save" : "Save"}
               </PrimaryBtn>
-              <Btn small onClick={downloadPNG} title="Download the composite as PNG">PNG</Btn>
+              <IconBtn label="Download the composite as PNG" onClick={downloadPNG}>⤓</IconBtn>
             </div>
             <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
-              <Btn small onClick={() => { const nz = clamp(zoomRef.current / 1.25, 0.1, 8); zoomRef.current = nz; setZoom(nz); }} title="Zoom out">−</Btn>
+              <IconBtn label="Zoom out" onClick={() => { const nz = clamp(zoomRef.current / 1.25, 0.1, 8); zoomRef.current = nz; setZoom(nz); }}>−</IconBtn>
               <span className="kv-nums" style={{ minWidth: 48, textAlign: "center", fontSize: 13 }}>
                 {Math.round(zoom * 100)}%
               </span>
-              <Btn small onClick={() => { const nz = clamp(zoomRef.current * 1.25, 0.1, 8); zoomRef.current = nz; setZoom(nz); }} title="Zoom in">+</Btn>
-              <Btn small onClick={fitZoom} title="Fit to view">Fit</Btn>
+              <IconBtn label="Zoom in" onClick={() => { const nz = clamp(zoomRef.current * 1.25, 0.1, 8); zoomRef.current = nz; setZoom(nz); }}>+</IconBtn>
+              <IconBtn label="Fit to view" onClick={fitZoom}>⤢</IconBtn>
               <Btn small onClick={() => { zoomRef.current = 1; setZoom(1); }} title="Actual size">1:1</Btn>
               <span style={{ fontSize: 11, color: "var(--kv-faint)" }} title="Hold Ctrl (or pinch) while scrolling to zoom; plain scroll moves the page">
                 Ctrl+scroll zooms
@@ -894,16 +1017,15 @@ export default function DrawPage() {
                       {l.visible ? "◉" : "○"} {l.locked ? "[locked] " : ""}{l.name}
                     </Btn>
                   )}
-                  <Btn
-                    small
-                    title="Toggle visibility"
+                  <IconBtn
+                    label={l.visible ? "Hide layer" : "Show layer"}
                     onClick={() => {
                       engineRef.current?.setVisible(l.id, !l.visible);
                       refreshLayers();
                     }}
                   >
-                    {l.visible ? "Hide" : "Show"}
-                  </Btn>
+                    {l.visible ? "◉" : "○"}
+                  </IconBtn>
                 </div>
               ))}
             </div>
@@ -949,25 +1071,25 @@ export default function DrawPage() {
               </div>
             )}
             <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-              <Btn
-                small
+              <IconBtn
+                label="Add layer"
                 onClick={() => {
                   engineRef.current?.addLayer(`Layer ${layers.length + 1}`);
                   refreshLayers();
                 }}
               >
-                Add
-              </Btn>
-              <Btn
-                small
+                ＋
+              </IconBtn>
+              <IconBtn
                 disabled={!activeLayer}
+                label="Duplicate layer"
                 onClick={() => {
                   if (activeLayer) engineRef.current?.duplicateLayer(activeLayer.id);
                   refreshLayers();
                 }}
               >
-                Dup
-              </Btn>
+                ⧉
+              </IconBtn>
               <Btn
                 small
                 disabled={!activeLayer}
@@ -981,9 +1103,9 @@ export default function DrawPage() {
               >
                 Merge↓
               </Btn>
-              <Btn
-                small
+              <IconBtn
                 disabled={!activeLayer}
+                label="Clear this layer's paint"
                 onClick={() => {
                   const id = engineRef.current?.activeId;
                   if (id && window.confirm("Clear this layer's paint? This can't be undone.")) {
@@ -993,12 +1115,11 @@ export default function DrawPage() {
                   refreshLayers();
                 }}
               >
-                Clear
-              </Btn>
-              <Btn
-                small
+                ×
+              </IconBtn>
+              <IconBtn
                 disabled={!activeLayer}
-                title="Move up"
+                label="Move layer up"
                 onClick={() => {
                   if (!activeLayer) return;
                   if (!engineRef.current?.moveLayer(activeLayer.id, 1))
@@ -1007,11 +1128,10 @@ export default function DrawPage() {
                 }}
               >
                 ↑
-              </Btn>
-              <Btn
-                small
+              </IconBtn>
+              <IconBtn
                 disabled={!activeLayer}
-                title="Move down"
+                label="Move layer down"
                 onClick={() => {
                   if (!activeLayer) return;
                   if (!engineRef.current?.moveLayer(activeLayer.id, -1))
@@ -1020,11 +1140,11 @@ export default function DrawPage() {
                 }}
               >
                 ↓
-              </Btn>
-              <Btn
-                small
+              </IconBtn>
+              <IconBtn
                 danger
                 disabled={!activeLayer || layers.length <= 1}
+                label="Delete this layer"
                 onClick={() => {
                   const id = engineRef.current?.activeId;
                   if (id && window.confirm("Delete this layer? This can't be undone.")) {
@@ -1033,8 +1153,8 @@ export default function DrawPage() {
                   refreshLayers();
                 }}
               >
-                Delete
-              </Btn>
+                ×
+              </IconBtn>
             </div>
           </div>
         )}
@@ -1174,7 +1294,7 @@ export default function DrawPage() {
                 aria-label="Brush color"
               />
               <span className="kv-nums" style={{ fontSize: 13 }}>{live.color}</span>
-              <Btn small title="Stash the current color" onClick={() => pushRecent(live.color)}>+ Keep</Btn>
+              <IconBtn label="Stash the current color in recents" onClick={() => pushRecent(live.color)}>＋</IconBtn>
             </div>
             <div style={{ display: "flex", gap: 4, flexWrap: "wrap", marginBottom: 6 }}>
               {INKS.map((c) => (
@@ -1362,27 +1482,74 @@ export default function DrawPage() {
                     <option key={r} value={r}>{r} fps</option>
                   ))}
                 </SelectInput>
-                <Btn
-                  small
+                <IconBtn
                   active={loop}
                   onClick={() => setLoop(!loop)}
-                  title="Replay from the first frame when the end is reached"
+                  label="Loop playback — replay from the first frame at the end"
                 >
-                  ↻ Loop
-                </Btn>
-                <PrimaryBtn
-                  small
+                  ⟳
+                </IconBtn>
+                <IconBtn
                   onClick={() => {
                     if (playing) stopPlayback();
                     else void startPlayback();
                   }}
-                  title={playing ? "Stop and return to the open frame" : "Play the animation on the canvas"}
+                  label={playing ? "Stop and return to the open frame" : "Play the animation on the canvas"}
                 >
-                  {playing ? "■ Stop" : "▶ Play"}
-                </PrimaryBtn>
-                <Btn small onClick={newFrame}>New</Btn>
-                <Btn small disabled={!frame} onClick={duplicateFrame}>Duplicate</Btn>
-                <Btn small danger disabled={!frame} onClick={removeFrame}>Delete</Btn>
+                  {playing ? "■" : "▶"}
+                </IconBtn>
+                <IconBtn onClick={newFrame} label="New frame">＋</IconBtn>
+                <IconBtn disabled={!frame} onClick={duplicateFrame} label="Duplicate frame">⧉</IconBtn>
+                <IconBtn danger disabled={!frame} onClick={removeFrame} label="Delete frame">×</IconBtn>
+              </div>
+              <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8, fontSize: 13 }}>
+                <Btn
+                  small
+                  active={onion}
+                  onClick={() => setOnion(!onion)}
+                  title="Show neighboring frames under the canvas (red: previous, green: next)"
+                >
+                  ◑ Onion
+                </Btn>
+                <label style={{ display: "flex", alignItems: "center", gap: 4 }}>
+                  <span style={{ color: "#ff3b30" }}>●</span> Prev
+                  <SelectInput
+                    value={String(onionPrevN)}
+                    onChange={(e) => setOnionPrevN(Number(e.target.value))}
+                    aria-label="Onion skin previous frames"
+                    style={{ padding: "2px 4px" }}
+                  >
+                    {[0, 1, 2, 3].map((n) => (
+                      <option key={n} value={n}>{n}</option>
+                    ))}
+                  </SelectInput>
+                </label>
+                <label style={{ display: "flex", alignItems: "center", gap: 4 }}>
+                  <span style={{ color: "#34c759" }}>●</span> Next
+                  <SelectInput
+                    value={String(onionNextN)}
+                    onChange={(e) => setOnionNextN(Number(e.target.value))}
+                    aria-label="Onion skin next frames"
+                    style={{ padding: "2px 4px" }}
+                  >
+                    {[0, 1, 2, 3].map((n) => (
+                      <option key={n} value={n}>{n}</option>
+                    ))}
+                  </SelectInput>
+                </label>
+                <label style={{ display: "flex", alignItems: "center", gap: 4 }}>
+                  Opacity
+                  <input
+                    type="range"
+                    min={5}
+                    max={80}
+                    value={onionOpacity}
+                    onChange={(e) => setOnionOpacity(Number(e.target.value))}
+                    aria-label="Onion skin opacity"
+                    style={{ width: 90 }}
+                  />
+                  <span className="kv-nums">{onionOpacity}%</span>
+                </label>
               </div>
               <div
                 role="listbox"
@@ -1396,26 +1563,85 @@ export default function DrawPage() {
               >
                 {frames.map((f, i) => {
                   const selected = f.id === frameId;
+                  const hinted = dropHint?.id === f.id;
                   return (
                     <button
                       key={f.id}
                       type="button"
                       role="option"
                       aria-selected={selected}
-                      title={f.name || `Frame ${i + 1}`}
+                      title={`${f.name || `Frame ${i + 1}`} — drag to reorder (Alt+←/→ also moves)`}
                       onClick={() => openFrame(f.id)}
+                      draggable
+                      onDragStart={(e) => {
+                        setDragFrameId(f.id);
+                        const dt = e.dataTransfer;
+                        if (dt) {
+                          dt.effectAllowed = "move";
+                          try {
+                            dt.setData("text/plain", f.id);
+                          } catch {
+                            // Ref carries the id; payload is best-effort.
+                          }
+                        }
+                      }}
+                      onDragOver={(e) => {
+                        e.preventDefault();
+                        e.dataTransfer.dropEffect = "move";
+                        if (dragFrameRef.current === f.id) return;
+                        const r = e.currentTarget.getBoundingClientRect();
+                        const after = e.clientX > r.left + r.width / 2;
+                        setDropHint((prev) =>
+                          prev?.id === f.id && prev.after === after
+                            ? prev
+                            : { id: f.id, after },
+                        );
+                      }}
+                      onDragLeave={() => {
+                        setDropHint((prev) => (prev?.id === f.id ? null : prev));
+                      }}
+                      onDrop={(e) => {
+                        e.preventDefault();
+                        const dragId = dragFrameRef.current;
+                        setDragFrameId(null);
+                        setDropHint(null);
+                        if (dragId && dragId !== f.id) {
+                          const r = e.currentTarget.getBoundingClientRect();
+                          void moveFrameTo(dragId, f.id, e.clientX > r.left + r.width / 2);
+                        }
+                      }}
+                      onDragEnd={() => {
+                        setDragFrameId(null);
+                        setDropHint(null);
+                      }}
+                      onKeyDown={(e) => {
+                        if (e.altKey && e.key === "ArrowLeft") {
+                          e.preventDefault();
+                          moveFrameStep(f.id, -1);
+                        } else if (e.altKey && e.key === "ArrowRight") {
+                          e.preventDefault();
+                          moveFrameStep(f.id, 1);
+                        }
+                      }}
                       style={{
                         flexShrink: 0,
                         width: 132,
                         textAlign: "left",
                         padding: 6,
                         borderRadius: 10,
-                        cursor: "pointer",
+                        cursor: "grab",
                         background: selected ? "var(--kv-card)" : "transparent",
                         border: selected
                           ? "2px solid var(--kv-accent)"
                           : "1px solid var(--kv-border)",
+                        borderLeft: hinted && !dropHint.after
+                          ? "3px solid var(--kv-accent)"
+                          : undefined,
+                        borderRight: hinted && dropHint.after
+                          ? "3px solid var(--kv-accent)"
+                          : undefined,
                         color: "inherit",
+                        opacity: dragId === f.id ? 0.5 : 1,
                       }}
                     >
                       <img
@@ -1463,3 +1689,4 @@ export default function DrawPage() {
     </>
   );
 }
+
