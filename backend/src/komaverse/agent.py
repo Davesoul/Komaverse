@@ -16,11 +16,12 @@ import base64
 import io
 import json
 import logging
+import math
 import re
 import threading
 
 from fastapi import HTTPException
-from PIL import Image
+from PIL import Image, ImageDraw
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -35,16 +36,27 @@ from komaverse.ai.providers import (
 )
 from komaverse.api.ai import COSTS, PROVIDERS, add_entry, get_balance, list_entities, run_ai_job
 from komaverse.api.animate import (
+    BLEND_MODES,
+    MAX_LAYERS,
     MOTIONS,
     ClipCreate,
+    ClipOrder,
+    ClipPatch,
     FrameCreate,
+    FrameOrder,
     frame_from_media_source,
+    load_media_image,
     SceneCreate,
     add_clip,
     create_frame,
     create_scene,
+    delete_clip,
+    delete_frame,
     duplicate_frame,
     list_scenes,
+    order_clips,
+    order_frames,
+    patch_clip,
     run_export_job,
 )
 from komaverse.api.audio import CueCreate, add_cue, list_takes
@@ -171,6 +183,8 @@ CAPABILITIES = (
     "images (\"generate a moonlit robot\") and videos (\"add the video "
     "to the timeline\" once done), cue voice takes "
     "(\"put the take at 2s\"), frame scan pages (\"put page 1 on a frame\"), "
+    "manage draw layers (\"add a tone layer\", \"hide the ink layer\"), "
+    "reorder frames and clips, "
     "and check on running jobs (\"check job abc123\")."
 )
 
@@ -683,6 +697,9 @@ def tool_add_clip(
     duration=2.0,
     motion="none",
 ) -> str:
+    # Fresh reads: this session may have cached relations from an
+    # earlier tool call in the same turn.
+    session.expire_all()
     if kind not in ("panel", "frame", "media", "video"):
         return f"Timeline clips must be panel, frame, media, or video (not {kind})."
     if motion not in MOTIONS:
@@ -979,6 +996,556 @@ def tool_frame_from_media(session, user, project_id, source, name=None):
     return f"Created frame '{schema.name}' [frame {schema.id}]."
 
 
+# ------------------------------------------------- draw-studio control ---
+
+
+def _project_frames(session, user, project_id):
+    """Owned frames in flipbook order (ownership or 404)."""
+    get_project(project_id, session, user)
+    return (
+        session.execute(
+            select(FrameRow)
+            .where(FrameRow.project_id == project_id)
+            .order_by(FrameRow.index)
+        )
+        .scalars()
+        .all()
+    )
+
+
+def _resolve_frame(session, user, project_id, frame):
+    """FrameRow by @frame: mention, id, or name (single-frame shortcut)."""
+    frames = _project_frames(session, user, project_id)
+    if not frames:
+        return "No draw frames yet - create one first ('new frame')."
+    ref = str(frame or "").strip()
+    m = re.search(r"@frame:([A-Za-z0-9_-]+)", ref)
+    if m:
+        ref = m.group(1)
+    for f in frames:
+        if f.id == ref:
+            return f
+    lowered = ref.lower()
+    for f in frames:
+        if (f.name or "").lower() == lowered:
+            return f
+    if len(frames) == 1:
+        return frames[0]
+    cands = sorted(
+        (
+            f for f in frames
+            if f.name and len(f.name) > 2 and f.name.lower() in ref.lower()
+        ),
+        key=lambda f: len(f.name),
+        reverse=True,
+    )
+    if cands:
+        return cands[0]
+    names = "; ".join(f"'{f.name or 'Untitled'}' [frame {f.id}]" for f in frames)
+    return f"Unknown frame '{frame}'. Frames: {names}."
+
+
+def _layer_desc(layer) -> str:
+    flags = []
+    if not layer.visible:
+        flags.append("hidden")
+    if layer.locked:
+        flags.append("locked")
+    extra = f" ({', '.join(flags)})" if flags else ""
+    return f"'{layer.name}' [{layer.id}] {layer.opacity}% {layer.blend_mode}{extra}"
+
+
+def _layer_list(frame) -> str:
+    layers = sorted(frame.layers, key=lambda l: l.layer_order)
+    if not layers:
+        return "no layers"
+    return "; ".join(_layer_desc(l) for l in layers)
+
+
+def _resolve_layer(frame, layer):
+    """LayerRow by id or name, or an error string naming the layers."""
+    layers = sorted(frame.layers, key=lambda l: l.layer_order)
+    if not layers:
+        return "That frame has no layers yet."
+    ref = str(layer or "").strip()
+    for l in layers:
+        if l.id == ref:
+            return l
+    lowered = ref.lower()
+    for l in layers:
+        if (l.name or "").lower() == lowered:
+            return l
+    names = "; ".join(f"'{l.name}' [{l.id}]" for l in layers)
+    return f"Unknown layer '{layer}'. Layers: {names}."
+
+
+def _parse_opacity(value):
+    try:
+        v = int(round(float(value)))
+    except (TypeError, ValueError):
+        return f"Opacity must be 0..100, got {value}."
+    if not 0 <= v <= 100:
+        return f"Opacity must be 0..100, got {value}."
+    return v
+
+
+def _parse_blend(value):
+    """(blend, error): error is None on success (names are strings too)."""
+    b = str(value or "normal").strip().lower().replace("_", "-")
+    if b not in BLEND_MODES:
+        return None, f"Unknown blend mode '{value}'. Valid: {', '.join(BLEND_MODES)}."
+    return b, None
+
+
+def _png_data_url(img) -> str:
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    return "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode()
+
+
+def _blank_png_data_url(width, height) -> str:
+    return _png_data_url(
+        Image.new("RGBA", (max(8, width), max(8, height)), (0, 0, 0, 0))
+    )
+
+
+def _layer_rgba(layer, width, height):
+    """Layer pixels as RGBA at frame size (transparent when empty)."""
+    if layer.data_url and "," in layer.data_url:
+        try:
+            raw = base64.b64decode(layer.data_url.split(",", 1)[1])
+            img = Image.open(io.BytesIO(raw)).convert("RGBA")
+            if img.size != (width, height):
+                img = img.resize((width, height))
+            return img
+        except Exception:
+            logger.debug("unreadable layer pixels", exc_info=True)
+    return Image.new("RGBA", (width, height), (0, 0, 0, 0))
+
+
+def tool_list_frames(session, user, project_id) -> str:
+    # Fresh reads: this session may have cached relations from an
+    # earlier tool call in the same turn.
+    session.expire_all()
+    frames = _project_frames(session, user, project_id)
+    if not frames:
+        return "No draw frames yet - create one first ('new frame')."
+    lines = [
+        f"'{f.name or 'Untitled'}' [frame {f.id}] {f.width}x{f.height}, "
+        f"{len(f.layers)} layers: {_layer_list(f)}"
+        for f in frames
+    ]
+    return f"Draw frames ({len(frames)}): " + " | ".join(lines)
+
+
+def tool_manage_layers(
+    session, user, project_id, frame, op="list", layer=None, name=None,
+    opacity=None, visible=None, locked=None, blend=None, position=None,
+) -> str:
+    """Draw-layer ops: list/add/rename/set/move/remove/duplicate/clear/merge."""
+    # Fresh reads: this session may have cached relations from an
+    # earlier tool call in the same turn.
+    session.expire_all()
+    f = _resolve_frame(session, user, project_id, frame)
+    if isinstance(f, str):
+        return f
+    op = str(op or "list").strip().lower()
+    if op == "list":
+        return f"Layers on '{f.name or 'Untitled'}': {_layer_list(f)}."
+    if op in ("add", "new"):
+        if len(f.layers) >= MAX_LAYERS:
+            return f"Too many layers ({len(f.layers)}), remove one first."
+        label = str(name or "").strip() or f"Layer {len(f.layers) + 1}"
+        row = LayerRow(
+            frame_id=f.id,
+            name=label[:200],
+            opacity=100,
+            visible=True,
+            locked=False,
+            blend_mode="normal",
+            layer_order=max([l.layer_order for l in f.layers], default=-1) + 1,
+            data_url=_blank_png_data_url(f.width, f.height),
+        )
+        session.add(row)
+        session.commit()
+        return f"Added layer '{row.name}' [{row.id}] to '{f.name or 'Untitled'}'."
+    target = _resolve_layer(f, layer)
+    if isinstance(target, str):
+        return target
+    if op == "rename":
+        if not str(name or "").strip():
+            return "Rename needs a name."
+        target.name = str(name).strip()[:200]
+        session.commit()
+        return f"Renamed layer to '{target.name}'."
+    if op == "set":
+        changed = []
+        if opacity is not None:
+            v = _parse_opacity(opacity)
+            if isinstance(v, str):
+                return v
+            target.opacity = v
+            changed.append(f"opacity {v}%")
+        if visible is not None:
+            target.visible = bool(visible)
+            changed.append("visible" if target.visible else "hidden")
+        if locked is not None:
+            target.locked = bool(locked)
+            changed.append("locked" if target.locked else "unlocked")
+        if blend is not None:
+            b, blend_err = _parse_blend(blend)
+            if blend_err:
+                return blend_err
+            target.blend_mode = b
+            changed.append(f"blend {b}")
+        if not changed:
+            return "Set needs opacity, visible, locked, or blend."
+        session.commit()
+        return f"Layer '{target.name}': {', '.join(changed)}."
+    if op == "move":
+        try:
+            pos = int(position)
+        except (TypeError, ValueError):
+            return f"Move needs a position number, got {position}."
+        layers = sorted(f.layers, key=lambda l: l.layer_order)
+        layers = [l for l in layers if l.id != target.id]
+        pos = min(max(pos, 0), len(layers))
+        layers.insert(pos, target)
+        for i, l in enumerate(layers):
+            l.layer_order = i
+        session.commit()
+        return f"Moved '{target.name}' to position {pos} (0 is bottom)."
+    if op in ("remove", "delete"):
+        if target.locked:
+            return f"Layer '{target.name}' is locked - unlock it first."
+        session.delete(target)
+        session.commit()
+        return f"Removed layer '{target.name}'."
+    if op in ("duplicate", "copy"):
+        if len(f.layers) >= MAX_LAYERS:
+            return f"Too many layers ({len(f.layers)}), remove one first."
+        row = LayerRow(
+            frame_id=f.id,
+            name=f"{target.name} copy"[:200],
+            opacity=target.opacity,
+            visible=target.visible,
+            locked=False,
+            blend_mode=target.blend_mode,
+            layer_order=max([l.layer_order for l in f.layers]) + 1,
+            data_url=target.data_url,
+        )
+        session.add(row)
+        session.commit()
+        return f"Duplicated '{target.name}' as '{row.name}' [{row.id}]."
+    if op == "clear":
+        if target.locked:
+            return f"Layer '{target.name}' is locked - unlock it first."
+        target.data_url = None
+        session.commit()
+        return f"Cleared the pixels on '{target.name}'."
+    if op == "merge":
+        if target.locked:
+            return f"Layer '{target.name}' is locked - unlock it first."
+        layers = sorted(f.layers, key=lambda l: l.layer_order)
+        idx = next(i for i, l in enumerate(layers) if l.id == target.id)
+        if idx == 0:
+            return f"'{target.name}' is already the bottom layer - nothing below to merge into."
+        below = layers[idx - 1]
+        if below.locked:
+            return f"Layer '{below.name}' is locked - unlock it first."
+        merged = _layer_rgba(below, f.width, f.height)
+        merged.alpha_composite(_layer_rgba(target, f.width, f.height))
+        below.data_url = _png_data_url(merged)
+        session.delete(target)
+        session.commit()
+        return f"Merged '{target.name}' down into '{below.name}'."
+    return (
+        f"Unknown layer op '{op}'. Valid: list, add, rename, set, move, "
+        "remove, duplicate, clear, merge."
+    )
+
+
+def _tone_png(width, height, density, angle_deg, rgb) -> bytes:
+    """Manga screentone: rotated dot grid, coverage ~ density."""
+    cell = 14
+    radius = max(1.0, cell * math.sqrt(max(0.0, min(1.0, density))) * 0.62)
+    img = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+    d = ImageDraw.Draw(img)
+    rad = math.radians(angle_deg)
+    cos_a, sin_a = math.cos(rad), math.sin(rad)
+    reach = math.hypot(width, height) / 2 + cell * 2
+    cx, cy = width / 2, height / 2
+    n = int(reach / cell) + 1
+    for i in range(-n, n + 1):
+        for j in range(-n, n + 1):
+            x = cx + i * cell * cos_a - j * cell * sin_a
+            y = cy + i * cell * sin_a + j * cell * cos_a
+            d.ellipse(
+                [x - radius, y - radius, x + radius, y + radius],
+                fill=rgb + (255,),
+            )
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    return buf.getvalue()
+
+
+def _parse_hex_color(value, default=(17, 17, 17)):
+    s = str(value or "").strip().lstrip("#")
+    if len(s) == 3:
+        s = "".join(c * 2 for c in s)
+    if len(s) == 6:
+        try:
+            return (int(s[0:2], 16), int(s[2:4], 16), int(s[4:6], 16))
+        except ValueError:
+            pass
+    return default
+
+
+def tool_tone_layer(
+    session, user, project_id, frame, density=0.2, angle=20.0,
+    color="#111111", opacity=100, blend="multiply", name=None,
+) -> str:
+    """Add a manga screentone dot layer to a draw frame."""
+    # Fresh reads: this session may have cached relations from an
+    # earlier tool call in the same turn.
+    session.expire_all()
+    f = _resolve_frame(session, user, project_id, frame)
+    if isinstance(f, str):
+        return f
+    if len(f.layers) >= MAX_LAYERS:
+        return f"Too many layers ({len(f.layers)}), remove one first."
+    try:
+        dens = min(max(float(density), 0.02), 1.0)
+    except (TypeError, ValueError):
+        return f"Density must be 0..1, got {density}."
+    try:
+        ang = float(angle)
+    except (TypeError, ValueError):
+        return f"Angle must be degrees, got {angle}."
+    v = _parse_opacity(opacity)
+    if isinstance(v, str):
+        return v
+    b, blend_err = _parse_blend(blend)
+    if blend_err:
+        return blend_err
+    png = _tone_png(f.width, f.height, dens, ang, _parse_hex_color(color))
+    label = str(name or "").strip() or f"Tone {round(dens * 100)}%"
+    row = LayerRow(
+        frame_id=f.id,
+        name=label[:200],
+        opacity=v,
+        visible=True,
+        locked=False,
+        blend_mode=b,
+        layer_order=max([l.layer_order for l in f.layers], default=-1) + 1,
+        data_url="data:image/png;base64," + base64.b64encode(png).decode(),
+    )
+    session.add(row)
+    session.commit()
+    return (
+        f"Added screentone layer '{row.name}' [{row.id}] to "
+        f"'{f.name or 'Untitled'}' ({round(dens * 100)}% dots at {ang:g}, {b})."
+    )
+
+
+def tool_layer_from_media(
+    session, user, project_id, frame, source, name=None,
+    opacity=100, blend="normal",
+) -> str:
+    # Fresh reads: this session may have cached relations from an
+    # earlier tool call in the same turn.
+    session.expire_all()
+    """Drop a scan page, panel, generation, or frame onto a frame as a layer."""
+    f = _resolve_frame(session, user, project_id, frame)
+    if isinstance(f, str):
+        return f
+    if len(f.layers) >= MAX_LAYERS:
+        return f"Too many layers ({len(f.layers)}), remove one first."
+    try:
+        data, label = load_media_image(session, user, project_id, source)
+    except HTTPException as exc:
+        return str(exc.detail)
+    try:
+        img = Image.open(io.BytesIO(data)).convert("RGBA")
+    except Exception:
+        return f"Could not decode {label}."
+    canvas = Image.new("RGBA", (f.width, f.height), (0, 0, 0, 0))
+    scale = min(f.width / max(1, img.width), f.height / max(1, img.height), 1.0)
+    nw, nh = max(1, round(img.width * scale)), max(1, round(img.height * scale))
+    fitted = img.resize((nw, nh)) if scale < 1.0 else img
+    canvas.paste(fitted, ((f.width - nw) // 2, (f.height - nh) // 2), fitted)
+    v = _parse_opacity(opacity)
+    if isinstance(v, str):
+        return v
+    b, blend_err = _parse_blend(blend)
+    if blend_err:
+        return blend_err
+    row = LayerRow(
+        frame_id=f.id,
+        name=(str(name or "").strip() or label)[:200],
+        opacity=v,
+        visible=True,
+        locked=False,
+        blend_mode=b,
+        layer_order=max([l.layer_order for l in f.layers], default=-1) + 1,
+        data_url=_png_data_url(canvas),
+    )
+    session.add(row)
+    session.commit()
+    return (
+        f"Added {label} as layer '{row.name}' [{row.id}] "
+        f"on '{f.name or 'Untitled'}'."
+    )
+
+
+def tool_manage_frames(
+    session, user, project_id, op, frame=None, name=None, frame_ids=None,
+) -> str:
+    # Fresh reads: this session may have cached relations from an
+    # earlier tool call in the same turn.
+    session.expire_all()
+    """Flipbook ops: list, duplicate, delete, rename, reorder draw frames."""
+    op = str(op or "list").strip().lower()
+    if op == "list":
+        return tool_list_frames(session, user, project_id)
+    if op == "reorder":
+        raw = (
+            list(frame_ids)
+            if isinstance(frame_ids, list)
+            else re.findall(r"\[frame ([A-Za-z0-9_-]+)\]", str(frame_ids or frame or ""))
+        )
+        frames = _project_frames(session, user, project_id)
+        by_id = {f.id: f for f in frames}
+        by_name = {(f.name or "").lower(): f for f in frames}
+        ordered = []
+        for item in raw:
+            token = str(item).strip()
+            m = re.search(r"\[frame ([A-Za-z0-9_-]+)\]", token)
+            hit = by_id.get(m.group(1) if m else token) or by_name.get(
+                (m.group(1) if m else token).lower()
+            )
+            if hit is None:
+                return f"Unknown frame '{token}'."
+            ordered.append(hit)
+        if len(ordered) != len(frames) or {f.id for f in ordered} != set(by_id):
+            names = "; ".join(
+                f"'{f.name or 'Untitled'}' [frame {f.id}]" for f in frames
+            )
+            return f"Reorder needs every frame exactly once. Frames: {names}."
+        order_frames(
+            project_id, FrameOrder(frame_ids=[f.id for f in ordered]), session, user
+        )
+        return "Reordered frames: " + ", ".join(
+            f"'{f.name or 'Untitled'}'" for f in ordered
+        ) + "."
+    f = _resolve_frame(session, user, project_id, frame)
+    if isinstance(f, str):
+        return f
+    if op == "duplicate":
+        copy = duplicate_frame(f.id, session, user)
+        return f"Duplicated '{f.name or 'Untitled'}' as '{copy.name}' [frame {copy.id}]."
+    if op in ("delete", "remove"):
+        try:
+            delete_frame(f.id, session, user)
+        except HTTPException as exc:
+            return str(exc.detail)
+        return f"Deleted frame '{f.name or 'Untitled'}'."
+    if op == "rename":
+        if not str(name or "").strip():
+            return "Rename needs a name."
+        f.name = str(name).strip()[:200]
+        session.commit()
+        return f"Renamed frame to '{f.name}'."
+    return "Unknown frame op '{op}'. Valid: list, duplicate, delete, rename, reorder.".format(op=op)
+
+
+def tool_manage_clips(
+    session, user, project_id, op, clip=None, scene=None,
+    duration=None, motion=None, clip_ids=None,
+) -> str:
+    # Fresh reads: this session may have cached relations from an
+    # earlier tool call in the same turn.
+    session.expire_all()
+    """Timeline-clip ops: list, remove, set (duration/motion), reorder."""
+    op = str(op or "list").strip().lower()
+    if op == "list":
+        scenes = sorted(list_scenes(project_id, session, user), key=lambda s: s.order)
+        if not scenes:
+            return "No scenes yet - auto-direct or add a clip first."
+        parts = []
+        for s in scenes:
+            clips = sorted(s.clips, key=lambda c: c.order)
+            desc = (
+                "; ".join(
+                    f"[clip {c.id}] {c.kind} {c.source_id} {c.duration:g}s {c.motion}"
+                    for c in clips
+                )
+                if clips
+                else "no clips"
+            )
+            parts.append(f"'{s.name}' [scene {s.id}]: {desc}")
+        return "Timeline: " + " | ".join(parts)
+    if op == "reorder":
+        try:
+            target = _resolve_scene(session, user, project_id, scene)
+        except HTTPException as exc:
+            return str(exc.detail)
+        raw = (
+            list(clip_ids)
+            if isinstance(clip_ids, list)
+            else re.findall(r"\[clip ([A-Za-z0-9_-]+)\]", str(clip_ids or clip or ""))
+        )
+        ids = []
+        for item in raw:
+            m = re.search(r"\[clip ([A-Za-z0-9_-]+)\]", str(item))
+            ids.append(m.group(1) if m else str(item).strip())
+        try:
+            order_clips(target.id, ClipOrder(clip_ids=ids), session, user)
+        except HTTPException as exc:
+            return str(exc.detail)
+        return f"Reordered {len(ids)} clips on '{target.name}'."
+    cid = str(clip or "").strip()
+    m = re.search(r"\[clip ([A-Za-z0-9_-]+)\]", cid)
+    if m:
+        cid = m.group(1)
+    else:
+        m2 = re.search(r"\bclip\s+([A-Za-z0-9_-]+)", cid)
+        if m2:
+            cid = m2.group(1)
+    if op in ("remove", "delete"):
+        if not cid:
+            return "Remove needs a clip id - ask me to list the timeline first."
+        try:
+            delete_clip(cid, session, user)
+        except HTTPException as exc:
+            return str(exc.detail)
+        return f"Removed clip {cid}."
+    if op == "set":
+        if not cid:
+            return "Set needs a clip id."
+        body = {}
+        if duration is not None:
+            try:
+                body["duration"] = min(max(float(duration), 0.1), 30.0)
+            except (TypeError, ValueError):
+                return f"Duration must be seconds, got {duration}."
+        if motion is not None:
+            if str(motion) not in MOTIONS:
+                return f"Unknown motion '{motion}'. Valid: {', '.join(MOTIONS)}."
+            body["motion"] = str(motion)
+        if not body:
+            return "Set needs duration or motion."
+        try:
+            updated = patch_clip(cid, ClipPatch(**body), session, user)
+        except HTTPException as exc:
+            return str(exc.detail)
+        return f"Clip {cid}: {updated.duration:g}s, {updated.motion}."
+    return (
+        f"Unknown clip op '{op}'. Valid: list, remove, set, reorder."
+    )
+
+
+
 CREATE_PROJECT_PHRASES = (
     "create project",
     "create a project",
@@ -1021,6 +1588,130 @@ def parse_job_id(message: str) -> str | None:
 
 
 # ------------------------------------------------------------ DemoBrain ---
+
+
+def _parse_quoted(text) -> list:
+    return re.findall(r'"([^"]+)"', text) + re.findall(r"'([^']+)'", text)
+
+
+def _demo_layer_name(message):
+    quoted = _parse_quoted(message)
+    if quoted:
+        return quoted[0]
+    m = re.search(r"(?:the\s+)?([A-Za-z0-9 _-]+?)\s+layer\b", message, re.IGNORECASE)
+    if m:
+        cand = re.sub(
+            r"^(?:(?:hide|show|unhide|lock|unlock|delete|remove|move|rename|duplicate|copy|merge|clear|set|add|make|put|the|a|an)\s+)+",
+            "",
+            m.group(1).strip(),
+            flags=re.IGNORECASE,
+        ).strip()
+        return cand or None
+    return None
+
+
+def _demo_layer_turn(session, user, project_id, message):
+    """Demo-brain layer control: verbs map to manage_layers ops."""
+    text = message.lower()
+    name = _demo_layer_name(message)
+    if "merge" in text:
+        return tool_manage_layers(session, user, project_id, frame=message, op="merge", layer=name)
+    if any(k in text for k in ("duplicate", "copy")):
+        return tool_manage_layers(session, user, project_id, frame=message, op="duplicate", layer=name)
+    if "rename" in text:
+        quoted = _parse_quoted(message)
+        old = name or (quoted[0] if quoted else None)
+        new = quoted[-1] if quoted and quoted[-1] != old else None
+        if not new:
+            m = re.search(r"\bto\s+([A-Za-z0-9 _-]+?)\s*$", message, re.IGNORECASE)
+            new = m.group(1).strip() if m else None
+        return tool_manage_layers(session, user, project_id, frame=message, op="rename", layer=old, name=new)
+    if any(k in text for k in ("delete", "remove", "erase")):
+        return tool_manage_layers(session, user, project_id, frame=message, op="remove", layer=name)
+    if "clear" in text:
+        return tool_manage_layers(session, user, project_id, frame=message, op="clear", layer=name)
+    if "hide" in text:
+        return tool_manage_layers(session, user, project_id, frame=message, op="set", layer=name, visible=False)
+    if "show" in text or "unhide" in text:
+        return tool_manage_layers(session, user, project_id, frame=message, op="set", layer=name, visible=True)
+    if "unlock" in text:
+        return tool_manage_layers(session, user, project_id, frame=message, op="set", layer=name, locked=False)
+    if "lock" in text:
+        return tool_manage_layers(session, user, project_id, frame=message, op="set", layer=name, locked=True)
+    if any(k in text for k in ("opacity", "transparent", "fade")) or re.search(r"\d\s*%", text):
+        m = re.search(r"(\d+)\s*%", message)
+        return tool_manage_layers(session, user, project_id, frame=message, op="set", layer=name, opacity=int(m.group(1)) if m else 100)
+    if any(k in text for k in ("reorder", "move", "position", "backward", "forward", "front", "back", "bottom", "top")):
+        m = re.search(r"(?:position|to)\s+(\d+)", text)
+        if m:
+            pos = int(m.group(1))
+        elif "bottom" in text or "back" in text:
+            pos = 0
+        else:
+            pos = 999
+        return tool_manage_layers(session, user, project_id, frame=message, op="move", layer=name, position=pos)
+    found = next((b for b in BLEND_MODES if b in text), None)
+    if found:
+        return tool_manage_layers(session, user, project_id, frame=message, op="set", layer=name, blend=found)
+    if any(k in text for k in ("add", "new", "create")):
+        quoted = _parse_quoted(message)
+        return tool_manage_layers(session, user, project_id, frame=message, op="add", name=quoted[0] if quoted else None)
+    return tool_manage_layers(session, user, project_id, frame=message, op="list")
+
+
+def _demo_frame_turn(session, user, project_id, message):
+    """Demo-brain flipbook control: duplicate/delete/rename/reorder/list."""
+    text = message.lower()
+    quoted = _parse_quoted(message)
+    if any(k in text for k in ("duplicate", "copy")):
+        return tool_manage_frames(session, user, project_id, "duplicate", message)
+    if any(k in text for k in ("delete", "remove")):
+        return tool_manage_frames(session, user, project_id, "delete", message)
+    if "rename" in text:
+        m = re.search(r"\bto\s+([A-Za-z0-9 _-]+?)\s*$", message, re.IGNORECASE)
+        new = quoted[-1] if quoted else (m.group(1).strip() if m else None)
+        return tool_manage_frames(session, user, project_id, "rename", message, new)
+    if "reorder" in text or ("order" in text and "frame" in text):
+        ids = re.findall(r"\[frame ([A-Za-z0-9_-]+)\]", message)
+        if not ids:
+            return ("Say the new order with frame ids, e.g. 'reorder frames: "
+                    "[frame abc], [frame def]' (see 'list frames').")
+        return tool_manage_frames(session, user, project_id, "reorder", frame_ids=ids)
+    return tool_list_frames(session, user, project_id)
+
+
+def _demo_clip_turn(session, user, project_id, message):
+    """Demo-brain clip control: remove/set/reorder/list."""
+    text = message.lower()
+    if "reorder" in text or ("order" in text and "clip" in text):
+        ids = re.findall(r"\[clip ([A-Za-z0-9_-]+)\]", message)
+        if not ids:
+            return ("Say the new clip order with ids, e.g. 'reorder clips: "
+                    "[clip abc], [clip def]'.")
+        return tool_manage_clips(session, user, project_id, "reorder",
+                                 scene=_parse_scene_ref(message), clip_ids=ids)
+    if any(k in text for k in ("remove", "delete")):
+        m = re.search(r"\[clip ([A-Za-z0-9_-]+)\]", message)
+        cid = m.group(1) if m else None
+        if not cid:
+            m2 = re.search(r"\bclip\s+([A-Za-z0-9_-]+)", text)
+            cid = m2.group(1) if m2 and m2.group(1) != "clips" else None
+        if not cid:
+            return "Which clip? " + tool_manage_clips(session, user, project_id, "list")
+        return tool_manage_clips(session, user, project_id, "remove", clip=cid)
+    if any(k in text for k in ("list", "show", "what")):
+        return tool_manage_clips(session, user, project_id, "list")
+    secs = parse_seconds(message)
+    motions = parse_motions(message)
+    if secs is not None or motions or any(
+        k in text for k in ("slower", "faster", "longer", "shorter", "motion", "duration")
+    ):
+        m = re.search(r"\[clip ([A-Za-z0-9_-]+)\]", message)
+        if not m:
+            return "Which clip? " + tool_manage_clips(session, user, project_id, "list")
+        return tool_manage_clips(session, user, project_id, "set", clip=m.group(1),
+                                 duration=secs, motion=(motions or [None])[0])
+    return tool_manage_clips(session, user, project_id, "list")
 
 
 def demo_turn(
@@ -1198,6 +1889,23 @@ def demo_turn(
                 reply = f"{reply} {chained}"
             else:
                 reply += " I could not place it on the timeline - say which frame to add."
+    elif "screentone" in text or ("tone" in text and "frame" in text):
+        m = re.search(r"(\d+)\s*%", text)
+        density = min(max(int(m.group(1)), 2), 100) / 100 if m else 0.2
+        reply = run("tone_layer", tool_tone_layer, session, user, project_id, message, density)
+    elif "layer" in text:
+        reply = run("manage_layers", _demo_layer_turn, session, user, project_id, message)
+    elif (
+        any(k in text for k in ("list frames", "show frames", "show me frames", "what frames", "how many frames", "my frames"))
+        or (
+            re.search(r"\bframes?\b", text)
+            and not any(k in text for k in ("timeline", "clip", "clips"))
+            and any(k in text for k in ("duplicate", "delete", "remove", "rename", "reorder", "order", "copy"))
+        )
+    ):
+        reply = run("manage_frames", _demo_frame_turn, session, user, project_id, message)
+    elif "clip" in text and any(k in text for k in ("remove", "delete", "reorder", "order", "list", "show", "slower", "faster", "longer", "shorter", "motion", "duration", "second")):
+        reply = run("manage_clips", _demo_clip_turn, session, user, project_id, message)
     elif "frame" in text and (
         re.search(r"@(media|gen|frame|panel):", text)
         or re.search(r"\b(?:page|pg)\s*\d+", text)
@@ -1452,6 +2160,127 @@ _TOOLS_SCHEMA = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_frames",
+            "description": "List the project's draw frames with their layers.",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "manage_layers",
+            "description": (
+                "Draw-layer ops on one frame (frame id, @frame: mention, or name). "
+                "Ops: list, add, rename, set (opacity/visible/locked/blend), "
+                "move (position 0 is bottom), remove, duplicate, clear, merge down."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "frame": {"type": "string"},
+                    "op": {"type": "string"},
+                    "layer": {"type": "string"},
+                    "name": {"type": "string"},
+                    "opacity": {"type": "number"},
+                    "visible": {"type": "boolean"},
+                    "locked": {"type": "boolean"},
+                    "blend": {"type": "string"},
+                    "position": {"type": "number"},
+                },
+                "required": ["frame", "op"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "tone_layer",
+            "description": (
+                "Add a manga screentone dot layer to a draw frame "
+                "(density 0..1, angle in degrees)."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "frame": {"type": "string"},
+                    "density": {"type": "number"},
+                    "angle": {"type": "number"},
+                    "color": {"type": "string"},
+                    "opacity": {"type": "number"},
+                    "blend": {"type": "string"},
+                    "name": {"type": "string"},
+                },
+                "required": ["frame"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "layer_from_media",
+            "description": (
+                "Drop a scan page, panel, generation, or frame onto a draw "
+                "frame as a new layer. Source is an @media:/@gen:/@frame:/@panel: "
+                "id or 'page N'."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "frame": {"type": "string"},
+                    "source": {"type": "string"},
+                    "name": {"type": "string"},
+                    "opacity": {"type": "number"},
+                    "blend": {"type": "string"},
+                },
+                "required": ["frame", "source"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "manage_frames",
+            "description": (
+                "Flipbook ops: list, duplicate, delete, rename, reorder "
+                "(frame_ids lists every frame id once)."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "op": {"type": "string"},
+                    "frame": {"type": "string"},
+                    "name": {"type": "string"},
+                    "frame_ids": {"type": "array"},
+                },
+                "required": ["op"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "manage_clips",
+            "description": (
+                "Timeline-clip ops: list, remove, set (duration/motion), "
+                "reorder (clip_ids lists every clip id once)."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "op": {"type": "string"},
+                    "clip": {"type": "string"},
+                    "scene": {"type": "string"},
+                    "duration": {"type": "number"},
+                    "motion": {"type": "string"},
+                    "clip_ids": {"type": "array"},
+                },
+                "required": ["op"],
+            },
+        },
+    },
 ]
 
 
@@ -1642,6 +2471,44 @@ def cloud_turn(
                 elif name == "check_job":
                     result = tool_check_job(
                         session, user, str(args.get("job_id") or "")
+                    )
+                elif name == "list_frames":
+                    result = tool_list_frames(session, user, project_id)
+                elif name == "manage_layers":
+                    result = tool_manage_layers(
+                        session, user, project_id,
+                        args.get("frame"), args.get("op", "list"),
+                        args.get("layer"), args.get("name"),
+                        args.get("opacity"), args.get("visible"),
+                        args.get("locked"), args.get("blend"),
+                        args.get("position"),
+                    )
+                elif name == "tone_layer":
+                    result = tool_tone_layer(
+                        session, user, project_id, args.get("frame"),
+                        args.get("density", 0.2), args.get("angle", 20.0),
+                        args.get("color", "#111111"),
+                        args.get("opacity", 100),
+                        args.get("blend", "multiply"), args.get("name"),
+                    )
+                elif name == "layer_from_media":
+                    result = tool_layer_from_media(
+                        session, user, project_id, args.get("frame"),
+                        str(args.get("source") or message),
+                        args.get("name"), args.get("opacity", 100),
+                        args.get("blend", "normal"),
+                    )
+                elif name == "manage_frames":
+                    result = tool_manage_frames(
+                        session, user, project_id, str(args.get("op") or "list"),
+                        args.get("frame"), args.get("name"), args.get("frame_ids"),
+                    )
+                elif name == "manage_clips":
+                    result = tool_manage_clips(
+                        session, user, project_id, str(args.get("op") or "list"),
+                        args.get("clip"), args.get("scene"),
+                        args.get("duration"), args.get("motion"),
+                        args.get("clip_ids"),
                     )
                 else:
                     result = f"unknown tool: {name}"

@@ -51,7 +51,12 @@ started Oct 28, 2026.
   status, detect, auto-direct, export, generate — via real tools, with a
   tool-calling LLM brain when keyed and one-click auto-direct in the UI.
   `@`-mentions reference a specific frame, media item, or detected panel
-  (`@frame:…`, `@media:…`, `@panel:…`) and the reply grounds in it
+  (`@frame:…`, `@media:…`, `@panel:…`) and the reply grounds in it.
+  The agent also runs the whole drawing/animation studio: draw-frame
+  layers (add/rename/show/hide/lock/blend/reorder/merge), manga
+  screentone layers, dropping any media onto a frame as a layer, plus
+  frame and clip management — same tools over MCP (stdio + HTTP
+  `POST /mcp`)
 
 ## Layout
 

@@ -21,11 +21,18 @@ import {
   type ToolId,
 } from "../lib/draw/engine";
 import { getCurrentProject, getDrawFrame, setCurrentProject, setDrawFrame } from "../lib/studio";
-import { BRUSH_PRESETS } from "../lib/draw/brushes";
+import {
+  BRUSH_PRESETS,
+  paintStroke,
+  type BrushPreset,
+  type DabMode,
+  type StrokeInput,
+} from "../lib/draw/brushes";
 
 const TOOLS: { id: ToolId; label: string; key: string }[] = [
   { id: "brush", label: "Brush", key: "B" },
   { id: "eraser", label: "Eraser", key: "E" },
+  { id: "smudge", label: "Blend", key: "U" },
   { id: "line", label: "Line", key: "L" },
   { id: "rect", label: "Rect", key: "R" },
   { id: "ellipse", label: "Ellipse", key: "O" },
@@ -55,6 +62,14 @@ interface LiveSettings {
   taperEnd: boolean;
   fillTolerance: number;
   shapeFill: boolean;
+  symmetry: boolean;
+  brushKind: "ink" | "dab";
+  dab: DabMode;
+  spacing: number;
+  jitter: number;
+  dabAngle: number;
+  grain: number;
+  toneDensity: number; // 0..100 UI; screentone dot coverage
 }
 
 const PEN = BRUSH_PRESETS[0];
@@ -73,6 +88,14 @@ const DEFAULT_LIVE: LiveSettings = {
   taperEnd: PEN.taperEnd,
   fillTolerance: 24,
   shapeFill: false,
+  symmetry: false,
+  brushKind: "ink",
+  dab: "round",
+  spacing: 0.15,
+  jitter: 0.3,
+  dabAngle: 45,
+  grain: 0,
+  toneDensity: 20,
 };
 
 function applyLive(engine: DrawEngine, s: LiveSettings) {
@@ -87,10 +110,17 @@ function applyLive(engine: DrawEngine, s: LiveSettings) {
     taperStart: s.taperStart,
     taperEnd: s.taperEnd,
     tiltEffect: s.tilt / 100,
+    kind: s.brushKind,
+    dab: s.dab,
+    spacing: s.spacing,
+    jitter: s.jitter,
+    dabAngle: s.dabAngle,
+    grain: s.grain,
   };
   engine.stabilizer = s.stabilizer / 100;
   engine.fillTolerance = s.fillTolerance;
   engine.shapeFill = s.shapeFill;
+  engine.symmetry = s.symmetry;
 }
 
 const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v));
@@ -132,6 +162,73 @@ function Slider({
       />
       <span className="kv-nums" style={{ width: 34, textAlign: "right" }}>{value}</span>
     </label>
+  );
+}
+
+function BrushSwatch({
+  preset,
+  active,
+  onClick,
+}: {
+  preset: BrushPreset;
+  active: boolean;
+  onClick: () => void;
+}) {
+  const ref = useRef<HTMLCanvasElement>(null);
+  useEffect(() => {
+    const c = ref.current;
+    if (!c) return;
+    const ctx = c.getContext("2d");
+    if (!ctx) return;
+    const W = c.width;
+    const H = c.height;
+    ctx.clearRect(0, 0, W, H);
+    const pts: StrokeInput[] = [];
+    const N = 28;
+    for (let i = 0; i <= N; i++) {
+      const t = i / N;
+      pts.push({
+        x: 10 + t * (W - 20),
+        y: H / 2 + Math.sin(t * Math.PI * 2) * H * 0.2,
+        pressure: 0.35 + 0.65 * Math.sin(t * Math.PI),
+        tilt: 0,
+      });
+    }
+    paintStroke(ctx, pts, { ...preset, size: Math.min(preset.size, H * 0.45) }, "#111111", false, true);
+  }, [preset]);
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      title={preset.hint}
+      aria-label={preset.name}
+      style={{
+        display: "flex",
+        flexDirection: "column",
+        alignItems: "center",
+        gap: 2,
+        padding: "4px 4px 3px",
+        borderRadius: 6,
+        border: active ? "2px solid var(--kv-accent)" : "1px solid var(--kv-border-strong)",
+        background: "var(--kv-raised)",
+        color: "inherit",
+        cursor: "pointer",
+        width: 78,
+      }}
+    >
+      <canvas ref={ref} width={66} height={30} style={{ width: 66, height: 30 }} />
+      <span
+        style={{
+          fontSize: 11,
+          whiteSpace: "nowrap",
+          overflow: "hidden",
+          textOverflow: "ellipsis",
+          maxWidth: 70,
+        }}
+      >
+        {preset.name}
+      </span>
+    </button>
   );
 }
 
@@ -214,6 +311,7 @@ export default function DrawPage() {
   const pinchRef = useRef(new Map<number, { x: number; y: number }>());
   const pinchStartRef = useRef<{ dist: number; zoom: number } | null>(null);
   const spaceRef = useRef(false);
+  const ringRef = useRef<HTMLDivElement>(null);
 
   const updateLive = useCallback((patch: Partial<LiveSettings>) => {
     const next = { ...liveRef.current, ...patch };
@@ -551,7 +649,29 @@ export default function DrawPage() {
     refreshLayers();
   };
 
+  const moveRing = (e: React.PointerEvent<HTMLCanvasElement>) => {
+    const ring = ringRef.current;
+    if (!ring) return;
+    const st = liveRef.current;
+    if (playingRef.current || (st.tool !== "brush" && st.tool !== "eraser" && st.tool !== "smudge")) {
+      ring.style.display = "none";
+      return;
+    }
+    const d = Math.max(6, Math.round(st.size * zoomRef.current));
+    ring.style.display = "block";
+    ring.style.width = `${d}px`;
+    ring.style.height = `${d}px`;
+    ring.style.left = `${e.nativeEvent.offsetX - d / 2}px`;
+    ring.style.top = `${e.nativeEvent.offsetY - d / 2}px`;
+  };
+
+  const hideRing = () => {
+    const ring = ringRef.current;
+    if (ring) ring.style.display = "none";
+  };
+
   const onPointerMove = (e: React.PointerEvent<HTMLCanvasElement>) => {
+    moveRing(e);
     if (playingRef.current) return;
     const engine = engineRef.current;
     const el = viewportRef.current;
@@ -854,11 +974,26 @@ export default function DrawPage() {
       tilt: Math.round(p.tiltEffect * 100),
       taperStart: p.taperStart,
       taperEnd: p.taperEnd,
+      brushKind: p.kind ?? "ink",
+      dab: p.dab ?? "round",
+      spacing: p.spacing ?? 0.15,
+      jitter: p.jitter ?? 0.3,
+      dabAngle: p.dabAngle ?? 45,
+      grain: p.grain ?? 0,
     });
   };
 
   const customBrush = (patch: Partial<LiveSettings>) =>
     updateLive({ ...patch, presetId: "custom" });
+
+  const doTone = () => {
+    const eng = engineRef.current;
+    if (!eng) return;
+    const r = eng.fillTone(liveRef.current.toneDensity / 100, 20);
+    if (r === "locked") setNotice("Active layer is locked.");
+    else if (r === "no-layer") setNotice("Add a layer first.");
+    refreshLayers();
+  };
 
   const frame = frames.find((f) => f.id === frameId);
   const activeLayer = layers.find((l) => l.id === engineRef.current?.activeId);
@@ -870,7 +1005,9 @@ export default function DrawPage() {
         : "grab"
       : live.tool === "text"
         ? "text"
-        : "crosshair";
+        : live.tool === "brush" || live.tool === "eraser" || live.tool === "smudge"
+          ? "none"
+          : "crosshair";
   const tone = /fail|offline|locked|transparent|timeline|can't/i.test(notice) ? "warn" : "info";
 
   const commitRename = () => {
@@ -1225,15 +1362,7 @@ export default function DrawPage() {
             <SectionTitle>Brush{live.presetId === "custom" ? " — custom" : ""}</SectionTitle>
             <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 8 }}>
               {BRUSH_PRESETS.map((p) => (
-                <Btn
-                  key={p.id}
-                  small
-                  active={live.presetId === p.id}
-                  title={p.hint}
-                  onClick={() => applyPreset(p.id)}
-                >
-                  {p.name}
-                </Btn>
+                <BrushSwatch key={p.id} preset={p} active={live.presetId === p.id} onClick={() => applyPreset(p.id)} />
               ))}
             </div>
             <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
@@ -1251,6 +1380,15 @@ export default function DrawPage() {
                   Taper⤵
                 </Btn>
               </div>
+              <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                <Btn small active={live.symmetry} title="Mirror brush strokes across the vertical center" onClick={() => updateLive({ symmetry: !live.symmetry })}>
+                  ⇋ Mirror
+                </Btn>
+                <Btn small title="Fill the active layer with manga screentone dots" onClick={doTone}>
+                  Tone fill
+                </Btn>
+              </div>
+              <Slider label="Tone %" min={0} max={100} value={live.toneDensity} onChange={(v) => updateLive({ toneDensity: v })} />
               {(live.tool === "rect" || live.tool === "ellipse") && (
                 <Btn small active={live.shapeFill} onClick={() => updateLive({ shapeFill: !live.shapeFill })}>
                   {live.shapeFill ? "■ Filled shapes" : "□ Outline shapes"}
@@ -1415,8 +1553,21 @@ export default function DrawPage() {
                   marginTop: 76,
                   cursor,
                   background: "#000",
+                  position: "relative",
                 }}
               >
+                <div
+                  ref={ringRef}
+                  style={{
+                    display: "none",
+                    position: "absolute",
+                    borderRadius: "50%",
+                    border: "1.5px solid rgba(255,255,255,0.9)",
+                    boxShadow: "0 0 0 1.5px rgba(0,0,0,0.7)",
+                    pointerEvents: "none",
+                    zIndex: 5,
+                  }}
+                />
                 <canvas
                   ref={canvasRef}
                   style={{
@@ -1431,6 +1582,7 @@ export default function DrawPage() {
                   onPointerUp={(e) => endPointer(e, false)}
                   onPointerCancel={(e) => endPointer(e, true)}
                   onPointerLeave={() => {
+                    hideRing();
                     if (!playingRef.current) engineRef.current?.pointerUp();
                   }}
                   onContextMenu={(e) => e.preventDefault()}

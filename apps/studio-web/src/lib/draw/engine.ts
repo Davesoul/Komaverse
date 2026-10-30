@@ -11,6 +11,7 @@ import { floodFill } from "./fill";
 export type ToolId =
   | "brush"
   | "eraser"
+  | "smudge"
   | "line"
   | "rect"
   | "ellipse"
@@ -123,6 +124,7 @@ export class DrawEngine {
   stabilizer = 0.35; // 0..1 extra weighted-average prefilter (Krita-style)
   fillTolerance = 24; // 0..255 channel distance
   shapeFill = false;
+  symmetry = false; // mirror strokes across the vertical canvas axis
   version = 0; // bumped on every mutation; drives page dirty/autosave
   onChange: (() => void) | null = null;
 
@@ -513,14 +515,104 @@ export class DrawEngine {
     const c = layer.canvas.getContext("2d")!;
     c.setTransform(1, 0, 0, 1, 0, 0);
     c.putImageData(this.snapshot.data, 0, 0);
+    if (this.tool === "smudge") {
+      this.smudgePaint(layer);
+      if (this.symmetry) {
+        const orig = this.brushPts;
+        this.brushPts = orig.map((p) => ({ ...p, x: this.width - p.x }));
+        this.smudgePaint(layer);
+        this.brushPts = orig;
+      }
+      return;
+    }
+    const erase = this.tool === "eraser";
     paintStroke(
       this.lctx(layer),
       this.brushPts,
       this.brush,
       this.color,
-      this.tool === "eraser",
+      erase,
       last,
     );
+    if (this.symmetry && !erase) {
+      const mirrored = this.brushPts.map((p) => ({ ...p, x: this.width - p.x }));
+      paintStroke(this.lctx(layer), mirrored, this.brush, this.color, false, last);
+    }
+  }
+
+  /** Finger-blend: drag sampled color along the stroke (samples the snapshot). */
+  private smudgePaint(layer: Layer) {
+    const snap = this.snapshot;
+    if (!snap) return;
+    const data = snap.data;
+    const sw = data.width;
+    const sh = data.height;
+    const at = (lx: number, ly: number): [number, number, number] | null => {
+      const dx = Math.round(lx * this.dpr);
+      const dy = Math.round(ly * this.dpr);
+      if (dx < 0 || dy < 0 || dx >= sw || dy >= sh) return null;
+      const o = (dy * sw + dx) * 4;
+      if (data.data[o + 3] < 8) return null;
+      return [data.data[o], data.data[o + 1], data.data[o + 2]];
+    };
+    const c = layer.canvas.getContext("2d")!;
+    c.setTransform(1, 0, 0, 1, 0, 0);
+    c.globalCompositeOperation = "source-over";
+    const size = Math.max(2, this.brush.size);
+    const step = Math.max(1, size * 0.25);
+    let lx = -1e9;
+    let ly = -1e9;
+    for (const p of this.brushPts) {
+      if (Math.hypot(p.x - lx, p.y - ly) < step) continue;
+      lx = p.x;
+      ly = p.y;
+      const col = at(p.x, p.y);
+      if (!col) continue;
+      const r = ((size / 2) * (0.5 + 0.5 * Math.min(1, Math.max(0, p.pressure)))) * this.dpr;
+      const cx = p.x * this.dpr;
+      const cy = p.y * this.dpr;
+      const g = c.createRadialGradient(cx, cy, 0, cx, cy, Math.max(1, r));
+      g.addColorStop(0, `rgba(${col[0]},${col[1]},${col[2]},${0.35 * this.brush.opacity})`);
+      g.addColorStop(1, `rgba(${col[0]},${col[1]},${col[2]},0)`);
+      c.fillStyle = g;
+      c.beginPath();
+      c.arc(cx, cy, Math.max(1, r), 0, Math.PI * 2);
+      c.fill();
+    }
+  }
+
+  /** Screentone dot fill on the active layer (undoable). Density 0..1. */
+  fillTone(density = 0.2, angleDeg = 20, color?: string): "ok" | "no-layer" | "locked" {
+    const layer = this.activeLayer();
+    if (!layer) return "no-layer";
+    if (layer.locked) return "locked";
+    this.pushUndo(this.activeId!, this.grab(layer));
+    const tile = 24;
+    const t = document.createElement("canvas");
+    t.width = tile;
+    t.height = tile;
+    const tc = t.getContext("2d")!;
+    tc.clearRect(0, 0, tile, tile);
+    tc.fillStyle = color ?? this.color;
+    tc.beginPath();
+    tc.arc(tile / 2, tile / 2, Math.max(0.5, tile * Math.sqrt(Math.max(0.02, Math.min(0.9, density)) / Math.PI)), 0, Math.PI * 2);
+    tc.fill();
+    const c = this.lctx(layer);
+    c.save();
+    c.translate(this.width / 2, this.height / 2);
+    c.rotate((angleDeg * Math.PI) / 180);
+    const pattern = c.createPattern(t, "repeat");
+    if (!pattern) {
+      c.restore();
+      return "ok";
+    }
+    c.fillStyle = pattern;
+    const diag = Math.hypot(this.width, this.height);
+    c.fillRect(-diag, -diag, diag * 2, diag * 2);
+    c.restore();
+    this.composite();
+    this.bump();
+    return "ok";
   }
 
   private drawShape(

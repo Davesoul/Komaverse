@@ -640,3 +640,169 @@ def test_agent_frame_panel_mention(factory, user):
         panel_id = row.id
     out = turn(factory, user, f"frame the panel @panel:{panel_id}", pid)
     assert any(a["tool"] == "frame_from_media" for a in out["actions"])
+
+
+def seed_draw(factory, user, name="Draw"):
+    from komaverse import agent as agent_mod
+
+    with factory() as s:
+        summary = agent_mod.tool_create_project(s, user, name)
+    import re
+
+    return re.search(r"\[project ([A-Za-z0-9_-]+)\]", summary).group(1)
+
+
+def draw_frame_id(factory, user, pid, name):
+    from komaverse import agent as agent_mod
+
+    import re
+
+    with factory() as s:
+        summary = agent_mod.tool_create_frame(s, user, pid, name)
+    return re.search(r"\[frame ([A-Za-z0-9_-]+)\]", summary).group(1)
+
+
+def test_agent_draw_layers_crud(factory, user):
+    from komaverse import agent as agent_mod
+
+    pid = seed_draw(factory, user)
+    fid = draw_frame_id(factory, user, pid, "F1")
+    with factory() as s:
+        assert "F1" in agent_mod.tool_list_frames(s, user, pid)
+        assert "Added layer 'ink'" in agent_mod.tool_manage_layers(
+            s, user, pid, fid, "add", name="ink"
+        )
+        assert "opacity 60%" in agent_mod.tool_manage_layers(
+            s, user, pid, fid, "set", "ink", opacity=60, locked=True
+        )
+        assert "hidden" in agent_mod.tool_manage_layers(
+            s, user, pid, fid, "set", "ink", visible=False
+        )
+        assert "Duplicated 'ink'" in agent_mod.tool_manage_layers(
+            s, user, pid, fid, "duplicate", "ink"
+        )
+        assert "Unknown layer 'ghost'" in agent_mod.tool_manage_layers(
+            s, user, pid, fid, "remove", "ghost"
+        )
+        assert "opacity must be" in agent_mod.tool_manage_layers(
+            s, user, pid, fid, "set", "ink", opacity=1000
+        ).lower()
+        assert "unknown blend mode" in agent_mod.tool_manage_layers(
+            s, user, pid, fid, "set", "ink", blend="bogus"
+        ).lower()
+        assert "unknown layer op" in agent_mod.tool_manage_layers(
+            s, user, pid, fid, "frobnicate", "ink"
+        ).lower()
+        assert "position 0" in agent_mod.tool_manage_layers(
+            s, user, pid, fid, "move", "ink copy", position=0
+        )
+        assert "unlocked" in agent_mod.tool_manage_layers(
+            s, user, pid, fid, "set", "ink", locked=False
+        )
+        assert "Merged 'ink' down into 'ink copy'" in agent_mod.tool_manage_layers(
+            s, user, pid, fid, "merge", "ink"
+        )
+        assert "Cleared the pixels" in agent_mod.tool_manage_layers(
+            s, user, pid, fid, "clear", "ink copy"
+        )
+        assert "Removed layer 'ink copy'" in agent_mod.tool_manage_layers(
+            s, user, pid, fid, "remove", "ink copy"
+        )
+
+
+def test_agent_draw_tone_and_media_layer(factory, user):
+    from komaverse import agent as agent_mod
+    from komaverse.db_models import FrameRow
+
+    pid = seed_project(factory, user)  # seeds scan page 1
+    fid = draw_frame_id(factory, user, pid, "Tone")
+    with factory() as s:
+        out = agent_mod.tool_tone_layer(s, user, pid, fid, 0.35)
+        assert "screentone" in out and "35%" in out
+        out = agent_mod.tool_layer_from_media(s, user, pid, fid, "page 1")
+        assert "as layer" in out
+        row = s.get(FrameRow, fid)
+        by_name = {layer.name: layer for layer in row.layers}
+        assert by_name["Tone 35%"].blend_mode == "multiply"
+        assert by_name["Tone 35%"].data_url.startswith("data:image/png;base64,")
+        media_layer = next(v for k, v in by_name.items() if k != "Tone 35%")
+        assert media_layer.data_url.startswith("data:image/png;base64,")
+        assert "Unknown media" in agent_mod.tool_layer_from_media(
+            s, user, pid, fid, "nope"
+        )
+
+
+def test_agent_draw_frames_and_clips(factory, user):
+    import re
+
+    from komaverse import agent as agent_mod
+    from komaverse.api.animate import list_scenes
+
+    pid = seed_project(factory, user)
+    f1 = draw_frame_id(factory, user, pid, "A")
+    f2 = draw_frame_id(factory, user, pid, "B")
+    with factory() as s:
+        assert "Duplicated 'A'" in agent_mod.tool_manage_frames(
+            s, user, pid, "duplicate", f1
+        )
+        assert "Renamed frame to 'Second'" in agent_mod.tool_manage_frames(
+            s, user, pid, "rename", f2, name="Second"
+        )
+        assert "every frame exactly once" in agent_mod.tool_manage_frames(
+            s, user, pid, "reorder", frame_ids=[f1]
+        )
+    with factory() as s:
+        frames = agent_mod.tool_list_frames(s, user, pid)
+        ids = re.findall(r"\[frame ([A-Za-z0-9_-]+)\]", frames)
+        assert len(ids) == 3
+        assert "Reordered frames" in agent_mod.tool_manage_frames(
+            s, user, pid, "reorder", frame_ids=list(reversed(ids))
+        )
+        assert "Deleted frame 'Second'" in agent_mod.tool_manage_frames(
+            s, user, pid, "delete", f2
+        )
+    with factory() as s:
+        added = agent_mod.tool_add_clip(s, user, pid, "frame", f1, None, 2.0, "none")
+        assert "[clip " in added
+        cid = re.search(r"\[clip ([A-Za-z0-9_-]+)\]", added).group(1)
+        assert "Timeline" in agent_mod.tool_manage_clips(s, user, pid, "list")
+        updated = agent_mod.tool_manage_clips(
+            s, user, pid, "set", clip=cid, duration=4.0, motion="zoom-in"
+        )
+        assert "4s, zoom-in" in updated
+        assert "Unknown motion" in agent_mod.tool_manage_clips(
+            s, user, pid, "set", clip=cid, motion="spin"
+        )
+        assert "frame is used by" in agent_mod.tool_manage_frames(
+            s, user, pid, "delete", f1
+        )
+        assert "Removed clip" in agent_mod.tool_manage_clips(
+            s, user, pid, "remove", clip=cid
+        )
+        assert "no clips" in agent_mod.tool_manage_clips(s, user, pid, "list")
+        assert "Deleted frame 'A'" in agent_mod.tool_manage_frames(
+            s, user, pid, "delete", f1
+        )
+        scenes = list_scenes(pid, s, user)
+        assert all(not sc.clips for sc in scenes)
+
+
+def test_agent_demo_draw_turns(factory, user):
+    pid = seed_project(factory, user)
+    fid = draw_frame_id(factory, user, pid, "Demo")
+    out = turn(factory, user, "add a tone layer at 40% to the frame", pid)
+    assert any(a["tool"] == "tone_layer" for a in out["actions"])
+    assert "40%" in out["reply"]
+    out = turn(factory, user, "list frames", pid)
+    assert any(a["tool"] == "manage_frames" for a in out["actions"])
+    assert "Demo" in out["reply"]
+    with factory() as s:
+        from komaverse import agent as agent_mod
+
+        agent_mod.tool_manage_layers(s, user, pid, fid, "add", name="ink")
+    out = turn(factory, user, "hide the ink layer", pid)
+    assert any(a["tool"] == "manage_layers" for a in out["actions"])
+    assert "hidden" in out["reply"]
+    out = turn(factory, user, "duplicate the demo frame", pid)
+    assert any(a["tool"] == "manage_frames" for a in out["actions"])
+    assert "Duplicated" in out["reply"]

@@ -113,6 +113,12 @@ def test_mcp_tools_list_covers_studio():
         "list_takes",
         "add_cue",
         "frame_from_media",
+        "list_frames",
+        "manage_layers",
+        "tone_layer",
+        "layer_from_media",
+        "manage_frames",
+        "manage_clips",
     } <= names
     for tool in TOOLS():
         assert tool["description"]
@@ -232,6 +238,41 @@ def test_mcp_http_unknown_user(factory):
         {"jsonrpc": "2.0", "id": 11, "method": "tools/list"}, factory, "nobody@x.io"
     )
     assert status == 401
+
+
+def test_mcp_draw_studio_tools(factory, user, uid):
+    def call(name, args, rid=20):
+        res = dispatch(
+            {
+                "jsonrpc": "2.0",
+                "id": rid,
+                "method": "tools/call",
+                "params": {"name": name, "arguments": args},
+            },
+            factory,
+            uid,
+        )
+        assert "error" not in res
+        return res["result"]["content"][0]["text"]
+
+    pid = seed_project(factory, user)
+    fid = re.search(
+        r"\[frame ([A-Za-z0-9_-]+)\]",
+        call("create_frame", {"project_id": pid, "name": "MCP Frame"}),
+    ).group(1)
+    assert "Added layer 'ink'" in call(
+        "manage_layers",
+        {"project_id": pid, "frame": fid, "op": "add", "name": "ink"},
+    )
+    assert "screentone" in call(
+        "tone_layer", {"project_id": pid, "frame": fid, "density": 0.3}
+    )
+    listed = call("list_frames", {"project_id": pid})
+    assert "MCP Frame" in listed and "ink" in listed
+    assert "Timeline" in call("manage_clips", {"project_id": pid, "op": "list"})
+    assert "Duplicated" in call(
+        "manage_frames", {"project_id": pid, "op": "duplicate", "frame": fid}
+    )
 
 
 def test_mcp_tool_error_becomes_is_error(factory, uid):

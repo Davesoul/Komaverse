@@ -42,8 +42,14 @@ from komaverse.agent import (
     tool_export,
     tool_frame_from_media,
     tool_generate,
+    tool_layer_from_media,
+    tool_list_frames,
     tool_list_takes,
+    tool_manage_clips,
+    tool_manage_frames,
+    tool_manage_layers,
     tool_status,
+    tool_tone_layer,
 )
 from komaverse.api.scans import list_projects
 from komaverse.config import settings
@@ -174,6 +180,69 @@ def call_tool(
             _str(args, "project_id"),
             _str(args, "source"),
             args.get("name"),
+        )
+    if name == "list_frames":
+        return tool_list_frames(session, user, _str(args, "project_id"))
+    if name == "manage_layers":
+        return tool_manage_layers(
+            session,
+            user,
+            _str(args, "project_id"),
+            args.get("frame"),
+            _str(args, "op") or "list",
+            args.get("layer"),
+            args.get("name"),
+            args.get("opacity"),
+            args.get("visible"),
+            args.get("locked"),
+            args.get("blend"),
+            args.get("position"),
+        )
+    if name == "tone_layer":
+        return tool_tone_layer(
+            session,
+            user,
+            _str(args, "project_id"),
+            args.get("frame"),
+            args.get("density", 0.2),
+            args.get("angle", 20.0),
+            _str(args, "color") or "#111111",
+            args.get("opacity", 100),
+            _str(args, "blend") or "multiply",
+            args.get("name"),
+        )
+    if name == "layer_from_media":
+        return tool_layer_from_media(
+            session,
+            user,
+            _str(args, "project_id"),
+            args.get("frame"),
+            _str(args, "source"),
+            args.get("name"),
+            args.get("opacity", 100),
+            _str(args, "blend") or "normal",
+        )
+    if name == "manage_frames":
+        return tool_manage_frames(
+            session,
+            user,
+            _str(args, "project_id"),
+            _str(args, "op") or "list",
+            args.get("frame"),
+            args.get("name"),
+            args.get("frame_ids"),
+        )
+    if name == "manage_clips":
+        return tool_manage_clips(
+            session,
+            user,
+            _str(args, "project_id"),
+            _str(args, "op") or "list",
+            args.get("clip"),
+            args.get("scene"),
+            args.get("duration"),
+            args.get("motion"),
+            args.get("clip_ids"),
         )
     raise KeyError(f"unknown tool: {name}")
 
@@ -360,6 +429,118 @@ def _tool_defs() -> list[dict]:
                 "type": "object",
                 "properties": {"project_id": s, "source": s, "name": s},
                 "required": ["project_id", "source"],
+            },
+        },
+        {
+            "name": "list_frames",
+            "description": "List the project's draw frames with their layers.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {"project_id": s},
+                "required": ["project_id"],
+            },
+        },
+        {
+            "name": "manage_layers",
+            "description": (
+                "Draw-layer ops on one frame (frame id, @frame: mention, or name). "
+                "Ops: list, add, rename, set (opacity/visible/locked/blend), "
+                "move (position 0 is bottom), remove, duplicate, clear, merge down."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "project_id": s,
+                    "frame": s,
+                    "op": s,
+                    "layer": s,
+                    "name": s,
+                    "opacity": num,
+                    "visible": {"type": "boolean"},
+                    "locked": {"type": "boolean"},
+                    "blend": s,
+                    "position": num,
+                },
+                "required": ["project_id", "frame", "op"],
+            },
+        },
+        {
+            "name": "tone_layer",
+            "description": (
+                "Add a manga screentone dot layer to a draw frame "
+                "(density 0..1, angle in degrees)."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "project_id": s,
+                    "frame": s,
+                    "density": num,
+                    "angle": num,
+                    "color": s,
+                    "opacity": num,
+                    "blend": s,
+                    "name": s,
+                },
+                "required": ["project_id", "frame"],
+            },
+        },
+        {
+            "name": "layer_from_media",
+            "description": (
+                "Drop a scan page, panel, generation, or frame onto a draw "
+                "frame as a new layer. Source is an @media:/@gen:/@frame:/@panel: "
+                "id or 'page N'."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "project_id": s,
+                    "frame": s,
+                    "source": s,
+                    "name": s,
+                    "opacity": num,
+                    "blend": s,
+                },
+                "required": ["project_id", "frame", "source"],
+            },
+        },
+        {
+            "name": "manage_frames",
+            "description": (
+                "Flipbook ops: list, duplicate, delete, rename, reorder "
+                "(frame_ids lists every frame id once)."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "project_id": s,
+                    "op": s,
+                    "frame": s,
+                    "name": s,
+                    "frame_ids": arr,
+                },
+                "required": ["project_id", "op"],
+            },
+        },
+        {
+            "name": "manage_clips",
+            "description": (
+                "Timeline-clip ops: list, remove, set (duration/motion), "
+                "reorder (clip_ids lists every clip id once)."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "project_id": s,
+                    "op": s,
+                    "clip": s,
+                    "scene": s,
+                    "duration": num,
+                    "motion": num,
+                    "clip_ids": arr,
+                },
+                "required": ["project_id", "op"],
             },
         },
     ]

@@ -217,3 +217,20 @@ the anchors on every provider, and OpenRouter gets them as images too
 as `first_frame` (`frame_images`). Contract deltas re-verified against the
 official Image/Video guides on 2026-10-30. Jobs show seed + entities +
 "What was sent" (final prompt) in the UI.
+
+Amendment: draw studio v2 + agent whole-studio control. Brushes move
+from ink-only polygons to a dab renderer (`kind: "dab"` stamped dabs with
+seeded jitter, fixed-seed repaint) with 7 new presets (calligraphy,
+chisel, chalk, hatch, toneline, watercolor, splatter) alongside the 10
+ink presets; engine gains `smudge` (snapshot-sampled finger blend),
+`symmetry` (mirrored strokes + smudge), and `fillTone` (manga screentone).
+Draw UI shows painted stroke previews per preset, a size-accurate cursor
+ring (native cursor hidden for brush/eraser/smudge), and Mirror + Tone
+fill + Tone % controls. The agent operates all of it server-side via new
+tools (DemoBrain, CloudBrain schema, MCP stdio + HTTP): `list_frames`,
+`manage_layers` (add/rename/set/move/remove/duplicate/clear/merge),
+`tone_layer` (PIL screentone), `layer_from_media` (page/panel/gen/frame
+onto a frame as a layer), `manage_frames` (duplicate/delete/rename/
+reorder), `manage_clips` (list/remove/set/reorder). Turn-scoped sessions
+call `session.expire_all()` on tool entry so a list after a mutation in
+the same turn never reads a stale cached collection.
