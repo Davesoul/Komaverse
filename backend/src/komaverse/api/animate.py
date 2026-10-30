@@ -13,6 +13,7 @@ from pydantic import BaseModel
 from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
+from komaverse.api.usage import record_usage
 from komaverse.auth import ensure_owner, get_current_user, own_project
 from komaverse.config import settings
 from komaverse.db import get_session, session_factory
@@ -35,7 +36,7 @@ logger = logging.getLogger("komaverse.animate")
 
 router = APIRouter(prefix="/api/v1")
 
-CLIP_KINDS = ("panel", "frame", "media", "ai")
+CLIP_KINDS = ("panel", "frame", "media", "video", "ai")
 MOTIONS = ("none", "zoom-in", "zoom-out", "pan-left", "pan-right")
 
 MIN_FRAME_DIM = 8
@@ -177,6 +178,13 @@ def _require_clip_source(session: Session, user: UserRow, kind: str, source_id: 
     elif kind == "media":
         row = session.get(PageRow, source_id)
         project_id = row.project_id if row else None
+    elif kind == "video":
+        job = session.get(JobRow, source_id)
+        if job is None or job.project_id is None or job.kind != "video":
+            raise HTTPException(400, f"unknown video: {source_id}")
+        if job.status != "done":
+            raise HTTPException(400, f"video {source_id} is still {job.status}")
+        row, project_id = job, job.project_id
     else:  # pragma: no cover — kind is validated before this runs
         raise HTTPException(400, f"unknown clip kind: {kind}")
     if row is None:
@@ -661,12 +669,14 @@ def run_export_job(job_id: str, factory=None) -> None:
             job.error = str(exc)
             session.commit()
             metrics.record_job("failed")
+            record_usage(session, job.user_id, "export", "failed")
             return
         except Exception as exc:  # noqa: BLE001 — job must never hang
             job.status = "failed"
             job.error = f"unexpected: {exc}"
             session.commit()
             metrics.record_job("failed")
+            record_usage(session, job.user_id, "export", "failed")
             return
         job.status = "done"
         job.progress = 1.0
@@ -689,6 +699,9 @@ def run_export_job(job_id: str, factory=None) -> None:
         session.commit()
         metrics.record_job("done")
         metrics.record_export()
+        record_usage(
+            session, job.user_id, "export", f"{out['width']}x{out['height']}@{out['fps']}"
+        )
 
 
 def _get_export_job(session: Session, user: UserRow, job_id: str) -> JobRow:

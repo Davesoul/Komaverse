@@ -493,3 +493,22 @@ class LedgerRow(Base):
             reason=self.reason,
             job_id=self.job_id,
         )
+
+
+class UsageEventRow(Base):
+    """One metered studio action (chat, detect, generate, export).
+
+    Append-only telemetry for the usage dashboard: per-period calls,
+    estimated chat tokens, and credit cost live here because jobs and
+    the credit ledger carry no timestamps.
+    """
+
+    __tablename__ = "usage_events"
+
+    id: Mapped[str] = mapped_column(String(12), primary_key=True, default=uuid_short)
+    user_id: Mapped[str] = mapped_column(String(64), index=True)
+    kind: Mapped[str] = mapped_column(String(20), default="")
+    label: Mapped[str] = mapped_column(String(200), default="")
+    tokens: Mapped[int] = mapped_column(default=0)
+    cost: Mapped[float] = mapped_column(default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, index=True)

@@ -15,6 +15,7 @@ from sqlalchemy.orm import Session
 from komaverse import storage
 from komaverse.auth import ensure_owner, get_current_user, own_project
 from komaverse.config import settings
+from komaverse.api.usage import record_usage
 from komaverse.db import get_session
 from komaverse.security import limiter
 from komaverse.db_models import (
@@ -46,7 +47,7 @@ class StorageOut(BaseModel):
 
 
 class DetectRequest(BaseModel):
-    detector: str = "heuristic"  # heuristic | yolo | yolo-leoxs22 | cloud | meta | openrouter (fall back to heuristic)
+    detector: str = "yolo-leoxs22"  # heuristic | yolo | yolo-leoxs22 | cloud | meta | openrouter | sam | local (fall back to heuristic)
     direction: str = "rtl"  # rtl (manga) | ltr (western)
     confirm: bool = False  # required when the page already has panels
 
@@ -282,6 +283,8 @@ def detect_panels(
         "cloud",
         "meta",
         "openrouter",
+        "sam",
+        "local",
     ):
         raise HTTPException(400, f"unknown detector: {body.detector}")
     if body.direction not in ("rtl", "ltr"):
@@ -335,6 +338,7 @@ def detect_panels(
             )
         )
     session.commit()
+    record_usage(session, user.id, "detect", used)
     return DetectResponse(panels=panels, detector_used=used, fell_back=fell_back)
 
 

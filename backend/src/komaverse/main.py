@@ -26,10 +26,12 @@ from komaverse.api.ai import billing_router, router as ai_router
 from komaverse.api.animate import router as animate_router
 from komaverse.api.audio import router as audio_router
 from komaverse.api.auth import router as auth_router
+from komaverse.api.mcp import router as mcp_router
 from komaverse.api.media import router as media_router
 from komaverse.api.ops import router as ops_router
 from komaverse.api.scans import router as scans_router
 from komaverse.api.subtitles import router as subtitles_router
+from komaverse.api.usage import router as usage_router
 from komaverse.config import settings
 from komaverse.db import init_db
 from komaverse.observability import (
@@ -176,6 +178,7 @@ app.include_router(v1)
 app.include_router(auth_router)
 app.include_router(scans_router)
 app.include_router(subtitles_router)
+app.include_router(usage_router)
 app.include_router(animate_router)
 app.include_router(audio_router)
 app.include_router(ai_router)
@@ -183,6 +186,7 @@ app.include_router(billing_router)
 app.include_router(agent_router)
 app.include_router(ops_router)
 app.include_router(media_router)
+app.include_router(mcp_router)
 
 
 # --- Optional single-port serving of the built web UI (SERVE_WEB=true) ---

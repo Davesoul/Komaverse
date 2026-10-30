@@ -11,6 +11,7 @@ import random
 from pathlib import Path
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
+from PIL import Image
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -27,6 +28,8 @@ from komaverse.ai.providers import (
     get_provider,
     list_openrouter_models,
 )
+from komaverse import storage
+from komaverse.api.usage import record_usage
 from komaverse.auth import ensure_owner, get_current_user
 from komaverse.config import settings
 from komaverse.db import get_session, session_factory
@@ -36,6 +39,8 @@ from komaverse.db_models import (
     JobRow,
     LayerRow,
     LedgerRow,
+    PageRow,
+    PanelRow,
     UserRow,
 )
 from komaverse.models import CreditEntry, Entity, Job
@@ -47,7 +52,7 @@ billing_router = APIRouter(prefix="/api/v1")
 logger = logging.getLogger("komaverse.ai")
 
 COSTS = {"image": 5, "video": 25}
-PROVIDERS = ("cloud", "comfyui", "fake", "meta", "openrouter")
+PROVIDERS = ("cloud", "comfyui", "fake", "local", "meta", "openrouter")
 
 
 class GenerateRequest(BaseModel):
@@ -93,6 +98,75 @@ def _frame_png(session: Session, project_id: str, frame_id: str) -> bytes | None
         img.convert("RGB").save(buf, format="PNG")
         return buf.getvalue()
     except Exception:
+        return None
+
+
+def _as_ref_png(data: bytes) -> bytes | None:
+    """Normalize arbitrary image bytes to a small guidance PNG."""
+    try:
+        img = Image.open(io.BytesIO(data)).convert("RGB")
+        img.thumbnail((_REF_PX, _REF_PX))
+        buf = io.BytesIO()
+        img.save(buf, format="PNG")
+        return buf.getvalue()
+    except Exception:
+        return None
+
+
+def _panel_png(session: Session, project_id: str, panel_id: str) -> bytes | None:
+    """Crop one detected panel to a small PNG for provider references."""
+    panel = session.get(PanelRow, panel_id)
+    page = session.get(PageRow, panel.page_id) if panel else None
+    if panel is None or page is None or page.project_id != project_id:
+        return None
+    try:
+        data = storage.resolve(page.image_path).read_bytes()
+        img = Image.open(io.BytesIO(data)).convert("RGB")
+        w, h = img.size
+        x, y = min(max(int(panel.x), 0), w), min(max(int(panel.y), 0), h)
+        bw, bh = min(int(panel.w), w - x), min(int(panel.h), h - y)
+        if bw < 2 or bh < 2:
+            return None
+        return _as_ref_png(_crop_bytes(img, x, y, bw, bh))
+    except (OSError, ValueError):
+        return None
+
+
+def _crop_bytes(img, x: int, y: int, w: int, h: int) -> bytes:
+    buf = io.BytesIO()
+    img.crop((x, y, x + w, y + h)).save(buf, format="PNG")
+    return buf.getvalue()
+
+
+def _page_png(session: Session, project_id: str, page_id: str) -> bytes | None:
+    """A whole scan page, shrunk, for provider references."""
+    page = session.get(PageRow, page_id)
+    if page is None or page.project_id != project_id:
+        return None
+    try:
+        return _as_ref_png(storage.resolve(page.image_path).read_bytes())
+    except OSError:
+        return None
+
+
+def _job_png(
+    session: Session, user_id: str, project_id: str, job_id: str
+) -> bytes | None:
+    """A finished image generation's artifact, for variation chains."""
+    row = session.get(JobRow, job_id)
+    if (
+        row is None
+        or row.user_id != user_id
+        or row.project_id != project_id
+        or row.kind != "image"
+        or row.status != "done"
+        or not row.result_url
+    ):
+        return None
+    try:
+        rel = row.result_url.split("/media/", 1)[-1]
+        return _as_ref_png(storage.resolve(rel).read_bytes())
+    except OSError:
         return None
 
 
@@ -197,8 +271,16 @@ def run_ai_job(job_id: str, factory=None) -> None:
                 fid = ent.get("frame_id")
                 if fid and job.project_id:
                     png = _frame_png(session, job.project_id, str(fid))
-                    if png is not None:
-                        ref_pngs.append(png)
+                elif ent.get("panel_id") and job.project_id:
+                    png = _panel_png(session, job.project_id, str(ent["panel_id"]))
+                elif ent.get("page_id") and job.project_id:
+                    png = _page_png(session, job.project_id, str(ent["page_id"]))
+                elif ent.get("job_id"):
+                    png = _job_png(session, job.user_id, job.project_id or "", str(ent["job_id"]))
+                else:
+                    png = None
+                if png is not None:
+                    ref_pngs.append(png)
             if job.kind == "image":
                 data = provider.generate_image(
                     final,
@@ -240,6 +322,9 @@ def run_ai_job(job_id: str, factory=None) -> None:
                 )
             session.commit()
             metrics.record_job("failed")
+            record_usage(
+                session, job.user_id, job.kind, f"{job.provider}:{job.model or 'default'}"
+            )
             return
         except Exception as exc:  # noqa: BLE001 — job must never hang
             job.status = "failed"
@@ -254,6 +339,9 @@ def run_ai_job(job_id: str, factory=None) -> None:
                 )
             session.commit()
             metrics.record_job("failed")
+            record_usage(
+                session, job.user_id, job.kind, f"{job.provider}:{job.model or 'default'}"
+            )
             return
 
         # The PNG below is the immutable job artifact (result_url); the
@@ -283,6 +371,14 @@ def run_ai_job(job_id: str, factory=None) -> None:
         job.progress = 1.0
         session.commit()
         metrics.record_job("done")
+        record_usage(
+            session,
+            job.user_id,
+            job.kind,
+            f"{job.provider}:{job.model or 'default'}",
+            0,
+            COSTS.get(job.kind, 0) if settings.paywall_enabled else 0.0,
+        )
 
 
 @router.post("/ai/generate", response_model=Job, status_code=202)
@@ -301,13 +397,8 @@ def generate(
             400, "video generation needs provider=openrouter "
             "(meta has no video endpoint)"
         )
-    if body.kind == "image" and body.provider == "meta":
-        raise HTTPException(
-            400, "meta has no image endpoint: use provider=openrouter "
-            "(or cloud/comfyui)"
-        )
-    if body.model and body.provider != "openrouter":
-        raise HTTPException(400, "per-model choice is openrouter-only")
+    if body.model and body.provider not in ("openrouter", "local"):
+        raise HTTPException(400, "per-model choice is openrouter/local-only")
     if body.provider == "openrouter" and body.model:
         try:
             check_openrouter_model(body.kind, body.model)

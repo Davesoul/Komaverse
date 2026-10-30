@@ -6,8 +6,55 @@ export interface PreviewClip {
   kind: string;
   label: string;
   image: string;
+  /** Set for video clips: the playable file URL (stills use image). */
+  video?: string;
   duration: number;
   motion: string;
+}
+
+/** A timeline video clip: muted playback synced to play/pause and seeks. */
+function VideoPreviewClip({
+  src,
+  playing,
+  offset,
+  seekNonce,
+  label,
+}: {
+  src: string;
+  playing: boolean;
+  offset: number;
+  seekNonce: number;
+  label: string;
+}) {
+  const ref = useRef<HTMLVideoElement>(null);
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    try {
+      el.currentTime = Math.max(0, offset);
+    } catch {
+      // Metadata not loaded yet; playback starts from the top.
+    }
+    if (playing) el.play().catch(() => {});
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [src, seekNonce]);
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    if (playing) el.play().catch(() => {});
+    else el.pause();
+  }, [playing]);
+  return (
+    <video
+      ref={ref}
+      src={src}
+      muted
+      playsInline
+      preload="auto"
+      aria-label={label}
+      style={{ width: "100%", height: "100%", objectFit: "contain", background: "#000" }}
+    />
+  );
 }
 
 /** One audible take on the preview: plays [start, end) from take offset. */
@@ -251,9 +298,11 @@ export function PreviewPlayer({
   let acc = 0;
   let current = clips[0];
   let local = 0;
+  let currentStart = 0;
   for (const c of clips) {
     if (time < acc + c.duration || c === clips[clips.length - 1]) {
       current = c;
+      currentStart = acc;
       local = Math.min(Math.max((time - acc) / c.duration, 0), 1);
       break;
     }
@@ -272,22 +321,33 @@ export function PreviewPlayer({
           marginBottom: 8,
         }}
       >
-        <img
-          key={current.id}
-          crossOrigin="use-credentials"
-          src={current.image}
-          alt={current.label}
-          style={{
-            width: "100%",
-            height: "100%",
-            // Contain, not cover: panel crops are portrait, and cover scaled
-            // them up until they filled 16/9 — the "zoomed" look. The black
-            // stage letterboxes the rest, which the Ken Burns drift plays on.
-            objectFit: "contain",
-            background: "#000",
-            ...motionStyle(current.motion, local, motionOff),
-          }}
-        />
+        {current.video ? (
+          <VideoPreviewClip
+            key={current.id}
+            src={current.video}
+            playing={playing}
+            offset={Math.max(0, time - currentStart)}
+            seekNonce={seek?.nonce ?? 0}
+            label={current.label}
+          />
+        ) : (
+          <img
+            key={current.id}
+            crossOrigin="use-credentials"
+            src={current.image}
+            alt={current.label}
+            style={{
+              width: "100%",
+              height: "100%",
+              // Contain, not cover: panel crops are portrait, and cover scaled
+              // them up until they filled 16/9 — the "zoomed" look. The black
+              // stage letterboxes the rest, which the Ken Burns drift plays on.
+              objectFit: "contain",
+              background: "#000",
+              ...motionStyle(current.motion, local, motionOff),
+            }}
+          />
+        )}
         <span
           className="kv-nums"
           style={{

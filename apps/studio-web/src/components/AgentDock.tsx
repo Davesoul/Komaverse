@@ -7,6 +7,7 @@ import {
   type AgentReply,
 } from "../api";
 import { getCurrentProject } from "../lib/studio";
+import { probeDuration } from "../lib/audio/peaks";
 import { Btn, PrimaryBtn, Spinner, TextInput } from "./ui";
 import { prefersReducedMotion } from "./Reveal";
 
@@ -26,23 +27,27 @@ interface MentionItem {
 const KIND_LABEL: Record<AgentRef["kind"], string> = {
   frame: "Frames",
   panel: "Panels",
+  media: "Media",
   take: "Takes",
   gen: "Generations",
 };
 
-const REF_TOKEN = /(@(?:frame|panel|take|gen):[A-Za-z0-9_-]+)/g;
+const REF_TOKEN = /(@(?:frame|panel|media|take|gen):[A-Za-z0-9_-]+)/g;
 
 const CHIPS = [
   "Project status",
+  "Create project",
   "Detect all panels",
   "Auto-direct timeline",
   "Export MP4",
 ];
 
+const JOB_RE = /\[job ([A-Za-z0-9_-]+)\]/g;
+
 const LOG_KEY = "komaverse.agentLog";
 const GREETING: Msg = {
   role: "agent",
-  text: "I operate the studio. Ask for status, detection, directing, export, or image generation.",
+  text: "I operate the studio. Ask for status, projects, detection, directing, clips, captions, cues, export, or image/video generation. ＋ attaches audio/images.",
 };
 
 /** Render text with clickable URLs and highlighted @kind:id mention tokens. */
@@ -106,6 +111,8 @@ export default function AgentDock() {
   const panelRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const abortRef = useRef<AbortController | null>(null);
+  const fileRef = useRef<HTMLInputElement>(null);
+  const [attaching, setAttaching] = useState(false);
 
   useEffect(() => {
     try {
@@ -191,7 +198,13 @@ export default function AgentDock() {
           sub: `${f.width}×${f.height} · ${f.layers.length} layers`,
         }),
       );
-      (proj?.pages ?? []).forEach((pg, pi) =>
+      (proj?.pages ?? []).forEach((pg, pi) => {
+        items.push({
+          kind: "media",
+          id: pg.id,
+          label: `PG ${pi + 1}`,
+          sub: `${pg.width}×${pg.height} · ${pg.panels.length} panels`,
+        });
         pg.panels.forEach((p, qi) =>
           items.push({
             kind: "panel",
@@ -199,8 +212,8 @@ export default function AgentDock() {
             label: `PG ${pi + 1} · Panel ${qi + 1}`,
             sub: `box ${Math.round(p.x)},${Math.round(p.y)} ${Math.round(p.w)}×${Math.round(p.h)}`,
           }),
-        ),
-      );
+        );
+      });
       takes.forEach((t) =>
         items.push({
           kind: "take",
@@ -287,6 +300,109 @@ export default function AgentDock() {
     if (e.key === "Enter") send(input);
   };
 
+  // Completion callbacks: any [job id] the agent started that is still
+  // running gets polled, and the dock posts a follow-up when it finishes —
+  // so async work (video renders) is seen when it lands, not just when
+  // it starts. Already-terminal jobs were reported inline; skip those.
+  const followJobs = async (ids: string[], projectId: string | null) => {
+    const seen = new Set<string>();
+    for (const id of ids) {
+      if (seen.has(id)) continue;
+      seen.add(id);
+      let job;
+      try {
+        job = await api.getJob(id);
+      } catch {
+        continue;
+      }
+      if (job.status === "done" || job.status === "failed") continue;
+      let done: typeof job | null = null;
+      for (let i = 0; i < 300; i++) {
+        await new Promise((r) => setTimeout(r, 2000));
+        try {
+          job = await api.getJob(id);
+        } catch {
+          break;
+        }
+        if (job.status === "done" || job.status === "failed") {
+          done = job;
+          break;
+        }
+      }
+      if (!done) {
+        setMessages((prev) => [
+          ...prev,
+          {
+            role: "agent",
+            text: `Still working on [job ${id}] — ask me to check it later.`,
+          },
+        ]);
+        continue;
+      }
+      const text =
+        done.status === "done"
+          ? `✅ Finished ${done.kind} [job ${done.id}]: ${done.result_url ?? "ready"}`
+          : `❌ ${done.kind} job failed [job ${done.id}]: ${done.error ?? "unknown error"}`;
+      setMessages((prev) => [...prev, { role: "agent", text }]);
+      window.dispatchEvent(
+        new CustomEvent("komaverse:agent-job-done", {
+          detail: {
+            jobId: done.id,
+            kind: done.kind,
+            projectId,
+            status: done.status,
+            url: done.result_url,
+          },
+        }),
+      );
+    }
+  };
+
+  // File attaching: audio uploads become takes, images become scan pages,
+  // and each lands in the composer as an @-mention the agent can cue, clip,
+  // or frame ("put @take:… at 5s", "add @media:… to the timeline").
+  const appendToken = (token: string) =>
+    setInput((v) => `${v}${v && !v.endsWith(" ") ? " " : ""}${token} `);
+
+  const attachFiles = async (files: File[]) => {
+    const pid = getCurrentProject();
+    if (!pid) {
+      setMessages((prev) => [
+        ...prev,
+        { role: "agent", text: "Open a project first (Home dashboard), then attach." },
+      ]);
+      return;
+    }
+    const auds = files.filter((f) => f.type.startsWith("audio/"));
+    const imgs = files.filter((f) => f.type.startsWith("image/"));
+    if (auds.length + imgs.length === 0) {
+      setMessages((prev) => [
+        ...prev,
+        { role: "agent", text: "Attach audio or image files." },
+      ]);
+      return;
+    }
+    setAttaching(true);
+    try {
+      for (const f of auds) {
+        const take = await api.uploadTake(pid, f, f.name, await probeDuration(f));
+        appendToken(`@take:${take.id}`);
+      }
+      for (const f of imgs) {
+        const page = await api.uploadPage(pid, f);
+        appendToken(`@media:${page.id}`);
+      }
+    } catch (e) {
+      setMessages((prev) => [
+        ...prev,
+        { role: "agent", text: `Attach failed: ${(e as Error).message}` },
+      ]);
+    } finally {
+      setAttaching(false);
+      inputRef.current?.focus();
+    }
+  };
+
   const send = async (text: string) => {
     const message = text.trim();
     if (!message || busy) return;
@@ -307,6 +423,30 @@ export default function AgentDock() {
         ...prev,
         { role: "agent", text: res.reply, actions: res.actions },
       ]);
+      const ids = [
+        ...`${res.reply} ${(res.actions ?? []).map((a) => a.summary).join(" ")}`.matchAll(
+          JOB_RE,
+        ),
+      ].map((m) => m[1]);
+      if (ids.length > 0) void followJobs(ids, res.project_id);
+      // Timeline/data mutations land live in open tabs (Animate, Scan).
+      const MUTATING = [
+        "detect_all",
+        "auto_direct",
+        "add_clip",
+        "add_subtitles",
+        "add_cue",
+        "frame_from_media",
+        "create_frame",
+        "create_image",
+      ];
+      if ((res.actions ?? []).some((a) => MUTATING.includes(a.tool))) {
+        window.dispatchEvent(
+          new CustomEvent("komaverse:agent-timeline-changed", {
+            detail: { projectId: res.project_id },
+          }),
+        );
+      }
       if (credits !== null) {
         api
           .getBalance()
@@ -472,6 +612,17 @@ export default function AgentDock() {
           >
             Generate image…
           </Btn>
+          <Btn
+            small
+            disabled={busy}
+            onClick={() => {
+              setInput("generate video ");
+              inputRef.current?.focus();
+            }}
+            title="Start a video prompt"
+          >
+            Generate video…
+          </Btn>
         </div>
         <div style={{ display: "flex", gap: 6, position: "relative" }}>
           {mention && (
@@ -503,7 +654,7 @@ export default function AgentDock() {
                 </div>
               ) : (
                 <>
-                  {(["frame", "panel", "take", "gen"] as const).map((k) => {
+                  {(["frame", "panel", "media", "take", "gen"] as const).map((k) => {
                     const group = mentionShown.filter((it) => it.kind === k);
                     if (group.length === 0) return null;
                     return (
@@ -559,9 +710,29 @@ export default function AgentDock() {
               )}
             </div>
           )}
+          <input
+            ref={fileRef}
+            type="file"
+            accept="audio/*,image/*"
+            multiple
+            style={{ display: "none" }}
+            onChange={(e) => {
+              void attachFiles(Array.from(e.target.files ?? []));
+              e.target.value = "";
+            }}
+          />
+          <Btn
+            small
+            disabled={busy || attaching}
+            onClick={() => fileRef.current?.click()}
+            title="Attach audio (becomes a take) or an image (becomes a scan page)"
+            aria-label="Attach audio or image"
+          >
+            {attaching ? "…" : "＋"}
+          </Btn>
           <TextInput
             ref={inputRef}
-            placeholder="Ask the studio… (@ to reference a frame, panel, take, generation)"
+            placeholder="Ask the studio… (@ to reference, ＋ to attach audio/image)"
             value={input}
             onChange={(e) => onComposerChange(e.target.value)}
             onKeyDown={onComposerKey}

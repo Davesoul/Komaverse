@@ -31,6 +31,8 @@ class Settings(BaseSettings):
 
     paywall_enabled: bool = Field(default=False, validation_alias="PAYWALL_ENABLED")
 
+    mcp_user_email: str = Field(default="", validation_alias="KOMAVERSE_MCP_USER")
+
     ai_provider: str = Field(default="cloud", validation_alias="AI_PROVIDER")
     ai_base_url: str | None = Field(default=None, validation_alias="AI_BASE_URL")
     ai_api_key: str | None = Field(default=None, validation_alias="AI_API_KEY")
@@ -39,8 +41,10 @@ class Settings(BaseSettings):
     ai_vision_model: str | None = Field(
         default=None, validation_alias="AI_VISION_MODEL"
     )
-    # Meta Model API (Muse Spark) — agent brain + vision detection.
-    # https://api.meta.ai/v1, OpenAI-compatible; key from dev.meta.ai.
+    # Meta Model API (Muse family) — agent brain, vision detection,
+    # image generation (Muse Image), speech-to-text (Muse Voice
+    # Transcribe), segmentation (SAM 3.1). https://api.meta.ai/v1;
+    # key from dev.meta.ai. See docs/models + the meta-model-cookbook.
     meta_api_key: str | None = Field(default=None, validation_alias="META_API_KEY")
     meta_base_url: str = Field(
         default="https://api.meta.ai/v1", validation_alias="META_BASE_URL"
@@ -50,6 +54,16 @@ class Settings(BaseSettings):
     )
     meta_vision_model: str | None = Field(
         default=None, validation_alias="META_VISION_MODEL"
+    )
+    meta_image_model: str = Field(
+        default="muse-image-1.0", validation_alias="META_IMAGE_MODEL"
+    )
+    meta_transcribe_model: str = Field(
+        default="muse-voice-transcribe-1.0",
+        validation_alias="META_TRANSCRIBE_MODEL",
+    )
+    meta_sam_model: str = Field(
+        default="sam-3.1", validation_alias="META_SAM_MODEL"
     )
     # OpenRouter — chat, image models, async video models, one key.
     openrouter_api_key: str | None = Field(
@@ -74,6 +88,20 @@ class Settings(BaseSettings):
     )
     openrouter_referer: str = Field(
         default="https://komaverse.studio", validation_alias="OPENROUTER_REFERER"
+    )
+    # Local open-weight server (Ollama-compatible) for desktop / LAN /
+    # on-device use: the studio talks to it like any OpenAI endpoint.
+    # Set the model names to what you pulled locally; no key needed.
+    local_base_url: str = Field(
+        default="http://127.0.0.1:11434", validation_alias="LOCAL_BASE_URL"
+    )
+    local_api_key: str = Field(default="ollama", validation_alias="LOCAL_API_KEY")
+    local_chat_model: str = Field(default="", validation_alias="LOCAL_CHAT_MODEL")
+    local_vision_model: str = Field(
+        default="", validation_alias="LOCAL_VISION_MODEL"
+    )
+    local_image_model: str = Field(
+        default="", validation_alias="LOCAL_IMAGE_MODEL"
     )
     comfyui_url: str = Field(
         default="http://127.0.0.1:8188", validation_alias="COMFYUI_URL"
@@ -103,6 +131,10 @@ class Settings(BaseSettings):
         default="models/best-comic-panel-detection.pt",
         validation_alias="KOMA_YOLO_MODEL",
     )
+    # Optional weight download URLs (web deploys without vendored .pt files).
+    # Fetched once into the paths above on first use, then cached locally.
+    yolo_url: str = Field(default="", validation_alias="KOMA_YOLO_URL")
+    yolo_leoxs22_url: str = Field(default="", validation_alias="KOMA_YOLO_LEOXS_URL")
 
     model_config = {
         "env_file": ".env",

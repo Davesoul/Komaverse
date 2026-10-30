@@ -64,7 +64,7 @@ class DrawFrame(BaseModel):
 class Clip(BaseModel):
     id: str = Field(default_factory=uuid_short)
     scene_id: str
-    kind: Literal["panel", "frame", "media", "ai"] = "panel"
+    kind: Literal["panel", "frame", "media", "video", "ai"] = "panel"
     source_id: str  # panel id, frame id, or media/asset id
     start: float = 0.0  # seconds on timeline
     duration: float = 2.0

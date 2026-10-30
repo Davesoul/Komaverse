@@ -69,7 +69,7 @@ def turn(factory, user, message, project_id=None, **kw):
 
 def test_agent_detect_status_unknown(factory, user):
     pid = seed_project(factory, user)
-    out = turn(factory, user, "detect all panels", pid)
+    out = turn(factory, user, "detect all panels with heuristic", pid)
     assert out["actions"] and out["actions"][0]["tool"] == "detect_all"
     assert "2 panels" in out["reply"]
 
@@ -83,7 +83,7 @@ def test_agent_detect_status_unknown(factory, user):
 
 def test_agent_full_loop_to_mp4(factory, user):
     pid = seed_project(factory, user)
-    assert "panels" in turn(factory, user, "find panels", pid)["reply"]
+    assert "panels" in turn(factory, user, "find panels with heuristic", pid)["reply"]
 
     out = turn(factory, user, "animate it", pid, clip_seconds=0.4)
     assert out["actions"][0]["tool"] == "auto_direct"
@@ -220,6 +220,335 @@ def test_chat_accepts_refs(factory, user):
             user,
         )
     assert "(not found)" in reply.reply
+
+
+def test_agent_creates_project_by_name(factory, user):
+    out = turn(factory, user, "create project Shark Tale")
+    assert out["actions"] and out["actions"][0]["tool"] == "create_project"
+    assert out["project_id"] is not None
+    assert "Shark Tale" in out["reply"]
+
+
+def test_agent_detect_with_detector_and_direction(factory, user):
+    from komaverse import agent as agent_mod
+
+    pid = seed_project(factory, user)
+    with factory() as s:
+        summary = agent_mod.tool_detect_all(
+            s, user, pid, detector="heuristic", direction="ltr"
+        )
+    assert "panels" in summary
+
+
+def test_agent_parse_detector_and_direction():
+    from komaverse.agent import parse_detector, parse_direction
+
+    assert parse_detector("scan everything with yolo") == "yolo"
+    assert parse_detector("detect panels") == "yolo-leoxs22"
+    assert parse_detector("use the leox model") == "yolo-leoxs22"
+    assert parse_detector("detect with bogus-model") == "yolo-leoxs22"
+    assert parse_direction("scan left to right") == "ltr"
+    assert parse_direction("scan the pages") == "rtl"
+    assert parse_direction("right to left, please") == "rtl"
+
+
+def test_agent_scan_picks_direction(factory, user):
+    pid = seed_project(factory, user)
+    out = turn(factory, user, "scan the pages left to right", pid)
+    assert out["actions"] and out["actions"][0]["tool"] == "detect_all"
+    assert "ltr" in out["actions"][0]["summary"]
+
+
+def test_agent_scan_unknown_detector_falls_back(factory, user):
+    pid = seed_project(factory, user)
+    out = turn(factory, user, "detect panels with bogus-model", pid)
+    assert out["actions"] and out["actions"][0]["tool"] == "detect_all"
+    assert "yolo-leoxs22" in out["actions"][0]["summary"]
+
+
+def test_agent_sees_finished_job(factory, user):
+    import re
+
+    from komaverse import agent as agent_mod
+
+    pid = seed_project(factory, user)
+    out = turn(factory, user, "generate a moonlit robot", pid, job_factory=factory)
+    m = re.search(r"\[job ([A-Za-z0-9_-]+)\]", out["actions"][0]["summary"])
+    assert m, "image summary must carry the job id"
+    with factory() as s:
+        seen = agent_mod.tool_check_job(s, user, m.group(1))
+    assert "done" in seen.lower()
+    assert ".png" in seen
+
+
+def test_agent_generate_and_add_to_timeline(factory, user):
+    from komaverse.api.animate import list_scenes
+
+    pid = seed_project(factory, user)
+    out = turn(
+        factory, user,
+        "generate a moonlit robot and add it to the timeline",
+        pid, job_factory=factory,
+    )
+    tools = [a["tool"] for a in out["actions"]]
+    assert "create_image" in tools and "add_clip" in tools
+    with factory() as s:
+        clips = list_scenes(pid, s, user)[0].clips
+    assert any(c.kind == "frame" for c in clips)
+
+
+def test_agent_add_panel_token_to_timeline(factory, user):
+    from komaverse.api.animate import list_scenes
+    from komaverse.api.scans import DetectRequest, detect_panels, get_project
+
+    pid = seed_project(factory, user)
+    with factory() as s:
+        page = get_project(pid, s, user).pages[0]
+    with factory() as s:
+        detected = detect_panels(
+            page.id, DetectRequest(detector="heuristic", confirm=True), s, user
+        )
+    panel_id = detected.panels[0].id
+    out = turn(factory, user, f"add @panel:{panel_id} to the timeline", pid)
+    assert any(a["tool"] == "add_clip" for a in out["actions"])
+    with factory() as s:
+        clips = list_scenes(pid, s, user)[0].clips
+    assert any(c.kind == "panel" and c.source_id == panel_id for c in clips)
+
+
+def test_agent_add_page_to_timeline(factory, user):
+    from komaverse.api.animate import list_scenes
+
+    pid = seed_project(factory, user)
+    out = turn(factory, user, "add page 1 to the timeline", pid)
+    assert any(a["tool"] == "add_clip" for a in out["actions"])
+    with factory() as s:
+        clips = list_scenes(pid, s, user)[0].clips
+    assert any(c.kind == "media" for c in clips)
+
+
+def test_agent_add_subtitles(factory, user):
+    from komaverse.api.animate import list_scenes
+    from komaverse.api.subtitles import get_subtitles
+
+    pid = seed_project(factory, user)
+    out = turn(factory, user, 'add subtitles: "hello" 0-2s; "world" 2-4s', pid)
+    assert any(a["tool"] == "add_subtitles" for a in out["actions"])
+    with factory() as s:
+        scene = list_scenes(pid, s, user)[0]
+    with factory() as s:
+        track = get_subtitles(scene.id, s, user)
+    assert track is not None and [s.text for s in track.segments] == ["hello", "world"]
+
+
+def seed_take(factory, user, project_id, name="Voice", duration=5.0):
+    from komaverse.db_models import AudioTakeRow
+
+    with factory() as s:
+        row = AudioTakeRow(
+            project_id=project_id,
+            name=name,
+            file_path="takes/seed.wav",
+            url="/media/seed.wav",
+            mime="audio/wav",
+            duration_sec=duration,
+        )
+        s.add(row)
+        s.commit()
+        return row.id
+
+
+def test_agent_add_cue_from_take(factory, user):
+    from komaverse.api.animate import list_scenes
+
+    pid = seed_project(factory, user)
+    tid = seed_take(factory, user, pid)
+    out = turn(factory, user, f"put @take:{tid} at 2s on the timeline", pid)
+    assert any(a["tool"] == "add_cue" for a in out["actions"])
+    with factory() as s:
+        cues = list_scenes(pid, s, user)[0].cues
+    assert any(c.audio_id == tid and c.start_sec == 2.0 for c in cues)
+
+
+def test_agent_frame_from_media_page(factory, user):
+    from komaverse.api.animate import list_frames
+
+    pid = seed_project(factory, user)
+    out = turn(factory, user, "put page 1 on a new frame", pid)
+    assert any(a["tool"] == "frame_from_media" for a in out["actions"])
+    with factory() as s:
+        frames = list_frames(pid, s, user)
+    assert len(frames) == 1 and len(frames[0].layers) == 1
+
+
+def seed_video_job(factory, user, project_id, prompt="a robot walking", seconds=1.0):
+    import imageio_ffmpeg
+    import numpy as np
+
+    from komaverse.db_models import JobRow
+
+    with factory() as s:
+        job = JobRow(
+            user_id=user.id,
+            project_id=project_id,
+            kind="video",
+            prompt=prompt,
+            provider="openrouter",
+            width=320,
+            height=240,
+            seconds=seconds,
+            attach_frame=False,
+            status="done",
+            progress=1.0,
+        )
+        s.add(job)
+        s.flush()
+        rel = f"ai/{job.id}.mp4"
+        dest = settings.media_dir / rel
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        writer = imageio_ffmpeg.write_frames(
+            str(dest), (320, 240), pix_fmt_in="rgb24", fps=12, codec="libx264",
+        )
+        writer.send(None)
+        try:
+            for i in range(12):
+                frame = np.full((240, 320, 3), (i * 20) % 255, dtype=np.uint8)
+                writer.send(frame.tobytes())
+        finally:
+            writer.close()
+        job.result_url = f"/media/{rel}"
+        s.commit()
+        return job.id
+
+
+def test_agent_add_video_to_timeline(factory, user):
+    from komaverse.api.animate import list_scenes
+
+    pid = seed_project(factory, user)
+    seed_video_job(factory, user, pid)
+    out = turn(factory, user, "add the video to the timeline", pid)
+    assert any(a["tool"] == "add_clip" for a in out["actions"])
+    with factory() as s:
+        clips = list_scenes(pid, s, user)[0].clips
+    assert any(c.kind == "video" for c in clips)
+
+
+def test_export_renders_video_clip(factory, user):
+    pid = seed_project(factory, user)
+    seed_video_job(factory, user, pid)
+    turn(factory, user, "add the video to the timeline", pid)
+    out = turn(factory, user, "export the video", pid, job_factory=factory)
+    assert ".mp4" in out["reply"]
+    url = out["reply"].rsplit(" ", 1)[-1]
+    video = settings.media_dir / url.removeprefix("/media/")
+    assert video.exists() and video.stat().st_size > 1000
+
+
+def job_entities(factory, job_id):
+    import json
+
+    from komaverse.db_models import JobRow
+
+    with factory() as s:
+        return json.loads(s.get(JobRow, job_id).entities_json or "[]")
+
+
+def job_id_of(summary):
+    import re
+
+    m = re.search(r"\[job ([A-Za-z0-9_-]+)\]", summary)
+    assert m, "expected a job id in the summary"
+    return m.group(1)
+
+
+def test_agent_generate_with_panel_reference(factory, user):
+    from komaverse.api.scans import DetectRequest, detect_panels, get_project
+
+    pid = seed_project(factory, user)
+    with factory() as s:
+        page = get_project(pid, s, user).pages[0]
+    with factory() as s:
+        detected = detect_panels(
+            page.id, DetectRequest(detector="heuristic", confirm=True), s, user
+        )
+    panel_id = detected.panels[0].id
+    out = turn(
+        factory, user,
+        f"generate a warrior in the style of @panel:{panel_id}",
+        pid, job_factory=factory,
+    )
+    assert out["actions"] and out["actions"][0]["tool"] == "create_image"
+    snaps = job_entities(factory, job_id_of(out["actions"][0]["summary"]))
+    assert any(s.get("panel_id") == panel_id for s in snaps)
+
+
+def test_agent_generate_with_media_reference(factory, user):
+    from komaverse.api.scans import get_project
+
+    pid = seed_project(factory, user)
+    with factory() as s:
+        page_id = get_project(pid, s, user).pages[0].id
+    out = turn(
+        factory, user, f"redraw @media:{page_id} as night",
+        pid, job_factory=factory,
+    )
+    snaps = job_entities(factory, job_id_of(out["actions"][0]["summary"]))
+    assert any(s.get("page_id") == page_id for s in snaps)
+
+
+def test_agent_generate_names_entity(factory, user):
+    from komaverse.api.ai import EntityCreate, create_entity
+
+    pid = seed_project(factory, user)
+    with factory() as s:
+        ent = create_entity(
+            pid, EntityCreate(kind="character", name="Mika"), s, user
+        )
+    out = turn(
+        factory, user, "generate Mika in the rain",
+        pid, job_factory=factory,
+    )
+    snaps = job_entities(factory, job_id_of(out["actions"][0]["summary"]))
+    assert any(s.get("id") == ent.id for s in snaps)
+
+
+def test_agent_generate_from_finished_generation(factory, user):
+    pid = seed_project(factory, user)
+    first = turn(factory, user, "generate a moonlit robot", pid, job_factory=factory)
+    gid = job_id_of(first["actions"][0]["summary"])
+    out = turn(
+        factory, user, f"generate a darker variant of @gen:{gid}",
+        pid, job_factory=factory,
+    )
+    snaps = job_entities(factory, job_id_of(out["actions"][0]["summary"]))
+    assert any(s.get("job_id") == gid for s in snaps)
+
+
+def test_agent_media_mention_resolves(factory, user):
+    from komaverse.api.scans import get_project
+
+    pid = seed_project(factory, user)
+    with factory() as s:
+        page_id = get_project(pid, s, user).pages[0].id
+    out = turn(
+        factory, user, "tell me about this page", pid,
+        refs=[{"kind": "media", "id": page_id}],
+    )
+    assert "Scan page 1" in out["reply"]
+
+
+def test_agent_lists_takes(factory, user):
+    pid = seed_project(factory, user)
+    seed_take(factory, user, pid, name="Intro VO")
+    out = turn(factory, user, "what takes do I have", pid)
+    assert any(a["tool"] == "list_takes" for a in out["actions"])
+    assert "Intro VO" in out["reply"]
+
+
+def test_agent_video_routes_to_async_job(factory, user):
+    pid = seed_project(factory, user)
+    out = turn(factory, user, "generate a video of a robot", pid, job_factory=factory)
+    assert out["actions"] and out["actions"][0]["tool"] == "create_video"
 
 
 def test_chat_threads_clip_seconds(factory, user):

@@ -209,6 +209,38 @@ def test_yolo_leoxs22_routes_and_falls_back(factory, user, monkeypatch):
     assert len(res.panels) >= 3
 
 
+def test_weights_download_once_then_load(tmp_path, monkeypatch):
+    from komaverse import detect as detect_mod
+
+    source = tmp_path / "hosted-leox.pt"
+    source.write_bytes(b"not-a-real-model")
+    dest = tmp_path / "cache" / "leox.pt"
+    monkeypatch.setattr(settings, "yolo_leoxs22_url", source.as_uri())
+    assert detect_mod._ensure_weights(dest, source.as_uri(), "yolo-leoxs22") is True
+    assert dest.read_bytes() == b"not-a-real-model"
+    # Second call is a no-op (already cached), even with a bogus URL.
+    assert detect_mod._ensure_weights(dest, "file:///does-not-exist-xyz.pt", "x") is True
+    assert dest.read_bytes() == b"not-a-real-model"
+
+
+def test_weights_download_failure_falls_back(factory, user, monkeypatch, tmp_path):
+    import komaverse.detect as detect_mod
+
+    missing = tmp_path / "leox-missing.pt"
+    monkeypatch.setattr(detect_mod, "YOLO_LEOXS", str(missing))
+    monkeypatch.setattr(settings, "yolo_leoxs22_url", "file:///does-not-exist-xyz.pt")
+    with factory() as s:
+        project = create_project(ProjectCreate(name="ChD"), s, user)
+    with factory() as s:
+        page = upload(s, user, project.id, fake_page())
+    with factory() as s:
+        res = detect_panels(page.id, DetectRequest(detector="yolo-leoxs22"), s, user)
+    assert not missing.exists()
+    assert res.detector_used == "heuristic"
+    assert res.fell_back is True
+    assert len(res.panels) >= 3
+
+
 def test_rejects_non_images(factory, user):
     from fastapi import HTTPException
 
@@ -323,7 +355,7 @@ def test_detect_ltr_smoke_and_crop_url(factory, user):
     with factory() as s:
         page = upload(s, user, project.id, fake_page())
     with factory() as s:
-        res = detect_panels(page.id, DetectRequest(direction="ltr"), s, user)
+        res = detect_panels(page.id, DetectRequest(detector="heuristic", direction="ltr"), s, user)
     assert len(res.panels) >= 3
     assert res.panels[0].crop_url == f"/api/v1/panels/{res.panels[0].id}/preview"
 

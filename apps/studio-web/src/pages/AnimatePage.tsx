@@ -210,6 +210,22 @@ export default function AnimatePage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Agent mutations (dock tools, job completions) refresh this tab live
+  // when it shows the affected project.
+  useEffect(() => {
+    const onAgent = (e: Event) => {
+      const pid = (e as CustomEvent).detail?.projectId as string | null | undefined;
+      if (!project || (pid && pid !== project.id)) return;
+      void refresh(project.id, sceneId || undefined).catch(() => {});
+    };
+    window.addEventListener("komaverse:agent-job-done", onAgent);
+    window.addEventListener("komaverse:agent-timeline-changed", onAgent);
+    return () => {
+      window.removeEventListener("komaverse:agent-job-done", onAgent);
+      window.removeEventListener("komaverse:agent-timeline-changed", onAgent);
+    };
+  });
+
   const refresh = async (projectId: string, keepScene?: string) => {
     const [full, sceneList, frameList, takeList, bal] = await Promise.all([
       api.getProject(projectId),
@@ -328,17 +344,49 @@ export default function AnimatePage() {
     }
   };
 
+  // Finished video jobs behind video clips: URL + label for preview,
+  // filmstrip, and inspector. Fetched once per clip; the player and the
+  // export read the same job artifact.
+  const [videoJobs, setVideoJobs] = useState<Record<string, { url: string; label: string }>>({});
+  useEffect(() => {
+    const missing = clips.filter((c) => c.kind === "video" && !videoJobs[c.source_id]);
+    if (missing.length === 0) return;
+    let live = true;
+    void Promise.all(
+      missing.map(async (c) => {
+        try {
+          const job = await api.getJob(c.source_id);
+          if (live && job.result_url) {
+            setVideoJobs((m) => ({
+              ...m,
+              [c.source_id]: {
+                url: mediaUrl(job.result_url as string),
+                label: job.prompt ? `Video: ${job.prompt.slice(0, 60)}` : "Video",
+              },
+            }));
+          }
+        } catch {
+          // Job gone — the clip keeps its fallback label.
+        }
+      }),
+    );
+    return () => {
+      live = false;
+    };
+  }, [clips, videoJobs]);
+
   const previewClips: PreviewClip[] = useMemo(
     () =>
       clips.map((c, i) => ({
         id: c.id,
         kind: c.kind,
-        label: `${i + 1} · ${labelFor(c, project, frames)}`,
+        label: `${i + 1} · ${c.kind === "video" ? (videoJobs[c.source_id]?.label ?? "Video") : labelFor(c, project, frames)}`,
         image: clipImageFor(c, project, true),
+        video: videoJobs[c.source_id]?.url,
         duration: c.duration,
         motion: c.motion,
       })),
-    [clips, project, frames],
+    [clips, project, frames, videoJobs],
   );
 
   const onTime = useCallback((t: number) => setPlayhead(t), []);
@@ -604,7 +652,9 @@ export default function AnimatePage() {
         project_id: project.id,
         provider: genProvider,
         model:
-          genProvider === "openrouter" && genModel ? genModel : undefined,
+          (genProvider === "openrouter" || genProvider === "local") && genModel
+            ? genModel
+            : undefined,
         width: size,
         height: size,
         seconds: isVideo ? Number(genSeconds) || 4 : undefined,
@@ -828,7 +878,8 @@ export default function AnimatePage() {
                 disabled={!!busy}
               >
                 <option value="cloud">Cloud (custom endpoint)</option>
-                <option value="meta">Meta Muse (agent + detect)</option>
+                <option value="meta">Meta (chat, vision, image)</option>
+                <option value="local">Local (Ollama / on-device)</option>
                 <option value="openrouter">OpenRouter (image + video)</option>
                 <option value="comfyui">ComfyUI (local)</option>
                 <option value="fake">Fake (demo)</option>
@@ -866,6 +917,16 @@ export default function AnimatePage() {
                   </SelectInput>
                 )}
               </div>
+              {genProvider === "local" && (
+                <TextInput
+                  style={{ width: "100%" }}
+                  value={genModel}
+                  onChange={(e) => setGenModel(e.target.value)}
+                  placeholder="Local model name (e.g. qwen3:8b)"
+                  aria-label="Local model name"
+                  disabled={!!busy}
+                />
+              )}
               {genProvider === "openrouter" && (
                 <SelectInput
                   style={{ width: "100%" }}
@@ -1364,8 +1425,12 @@ export default function AnimatePage() {
                     clips={clips.map((c) => ({
                       id: c.id,
                       kind: c.kind,
-                      label: labelFor(c, project, frames),
+                      label:
+                        c.kind === "video"
+                          ? (videoJobs[c.source_id]?.label ?? "Video")
+                          : labelFor(c, project, frames),
                       image: clipImageFor(c, project),
+                      video: videoJobs[c.source_id]?.url,
                       duration: c.duration,
                       motion: c.motion,
                     }))}
@@ -1409,17 +1474,32 @@ export default function AnimatePage() {
                 }}
               >
                 <div style={{ display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
-                  <img
-                    crossOrigin="use-credentials"
-                    src={clipImageFor(selectedClip, project)}
-                    alt=""
-                    width={96}
-                    height={54}
-                    style={{ borderRadius: 6, objectFit: "cover", background: "#f6f1e8", flexShrink: 0 }}
-                  />
+                  {selectedClip.kind === "video" && videoJobs[selectedClip.source_id]?.url ? (
+                    <video
+                      src={videoJobs[selectedClip.source_id].url}
+                      muted
+                      playsInline
+                      preload="metadata"
+                      width={96}
+                      height={54}
+                      style={{ borderRadius: 6, objectFit: "cover", background: "#000", flexShrink: 0 }}
+                    />
+                  ) : (
+                    <img
+                      crossOrigin="use-credentials"
+                      src={clipImageFor(selectedClip, project)}
+                      alt=""
+                      width={96}
+                      height={54}
+                      style={{ borderRadius: 6, objectFit: "cover", background: "#f6f1e8", flexShrink: 0 }}
+                    />
+                  )}
                   <div style={{ minWidth: 0 }}>
                     <div style={{ fontWeight: 700 }}>
-                      {clips.indexOf(selectedClip) + 1} · {labelFor(selectedClip, project, frames)}
+                      {clips.indexOf(selectedClip) + 1} ·{" "}
+                      {selectedClip.kind === "video"
+                        ? (videoJobs[selectedClip.source_id]?.label ?? "Video")
+                        : labelFor(selectedClip, project, frames)}
                     </div>
                     <div className="kv-nums" style={{ fontSize: 12, color: "var(--kv-muted)" }}>
                       starts {fmtTC(clips.slice(0, clips.indexOf(selectedClip)).reduce((a, c) => a + c.duration, 0))} ·{" "}

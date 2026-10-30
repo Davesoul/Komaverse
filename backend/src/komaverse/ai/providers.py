@@ -1,8 +1,9 @@
-"""Pluggable AI providers: cloud, local ComfyUI, Meta Muse, OpenRouter, fake.
+"""Pluggable AI providers: cloud, local ComfyUI, Meta Muse family, OpenRouter, fake.
 
 One interface for image / video / panel-detection, plus a shared
-OpenAI-compatible chat helper for the agent brain. No vendor types may leak
-outside this module — callers use names only.
+OpenAI-compatible chat helper for the agent brain and shared Meta Responses
+/ ASR helpers. No vendor types may leak outside this module — callers use
+names only.
 """
 
 from __future__ import annotations
@@ -109,7 +110,11 @@ def _boxes_from_text(text: str, w: int, h: int) -> list[dict]:
 
 
 class CloudProvider:
-    """Any OpenAI-compatible endpoint (OpenRouter etc.)."""
+    """Any OpenAI-compatible endpoint (OpenRouter etc.).
+
+    Settings indirection (_base_url/_api_key/...) lets LocalProvider
+    reuse every call shape against on-device open-weight servers.
+    """
 
     name = "cloud"
     _detect_prompt = (
@@ -117,8 +122,20 @@ class CloudProvider:
         '[{"x":0-1000,"y":0-1000,"w":0-1000,"h":0-1000}] in reading order.'
     )
 
+    def _base_url(self) -> str | None:
+        return settings.ai_base_url
+
+    def _api_key(self) -> str | None:
+        return settings.ai_api_key
+
+    def _image_model(self) -> str:
+        return settings.ai_image_model
+
+    def _vision_model(self) -> str:
+        return settings.ai_vision_model or settings.ai_chat_model
+
     def _check(self) -> None:
-        if not settings.ai_api_key or not settings.ai_base_url:
+        if not self._api_key() or not self._base_url():
             raise ProviderUnavailable("AI_BASE_URL / AI_API_KEY not configured")
 
     def generate_image(
@@ -138,18 +155,26 @@ class CloudProvider:
         self._check()
         try:
             res = httpx.post(
-                f"{settings.ai_base_url}/images/generations",
-                headers={"Authorization": f"Bearer {settings.ai_api_key}"},
+                f"{self._base_url()}/images/generations",
+                headers={"Authorization": f"Bearer {self._api_key()}"},
                 json={
-                    "model": settings.ai_image_model,
+                    "model": model or self._image_model(),
                     "prompt": prompt,
                     "size": f"{width}x{height}",
                     "response_format": "b64_json",
                 },
                 timeout=120,
             )
-            res.raise_for_status()
-            return base64.b64decode(res.json()["data"][0]["b64_json"])
+            if res.status_code >= 400:
+                raise ProviderError(
+                    f"image call failed ({res.status_code}): {res.text[:200]}"
+                )
+            try:
+                return base64.b64decode(res.json()["data"][0]["b64_json"])
+            except (ValueError, KeyError, IndexError, TypeError) as exc:
+                raise ProviderError(
+                    f"image returned an unreadable response: {exc}"
+                ) from exc
         except ProviderError:
             raise
         except Exception as exc:
@@ -179,10 +204,10 @@ class CloudProvider:
         b64 = base64.b64encode(buf.getvalue()).decode()
         try:
             res = httpx.post(
-                f"{settings.ai_base_url}/chat/completions",
-                headers={"Authorization": f"Bearer {settings.ai_api_key}"},
+                f"{self._base_url()}/chat/completions",
+                headers={"Authorization": f"Bearer {self._api_key()}"},
                 json={
-                    "model": settings.ai_vision_model or settings.ai_chat_model,
+                    "model": self._vision_model(),
                     "messages": [
                         {
                             "role": "user",
@@ -207,6 +232,40 @@ class CloudProvider:
         if not boxes:
             raise ProviderUnavailable("cloud returned no parseable boxes")
         return boxes
+
+
+class LocalProvider(CloudProvider):
+    """On-device / LAN open-weight server (Ollama-compatible OpenAI API).
+
+    The desktop app (and a phone on the same network) can point the
+    studio at a local server instead of a cloud account: set
+    LOCAL_BASE_URL (+ LOCAL_CHAT_MODEL / LOCAL_VISION_MODEL for the
+    models you pulled). Same call shapes as cloud; a server without an
+    image endpoint answers its own error.
+    """
+
+    name = "local"
+
+    def _base_url(self) -> str | None:
+        return settings.local_base_url
+
+    def _api_key(self) -> str | None:
+        return settings.local_api_key or "local"
+
+    def _image_model(self) -> str:
+        return settings.local_image_model or settings.local_chat_model
+
+    def _vision_model(self) -> str:
+        return settings.local_vision_model or settings.local_chat_model
+
+    def _check(self) -> None:
+        if not self._base_url():
+            raise ProviderUnavailable("LOCAL_BASE_URL not configured")
+        if not self._vision_model():
+            raise ProviderUnavailable(
+                "local chat needs LOCAL_CHAT_MODEL "
+                "(the model name you pulled locally)"
+            )
 
 
 class ComfyUIProvider:
@@ -381,6 +440,8 @@ def get_provider(name: str) -> AIProvider:
         return CloudProvider()
     if name == "comfyui":
         return ComfyUIProvider()
+    if name == "local":
+        return LocalProvider()
     if name == "meta":
         return MetaProvider()
     if name == "openrouter":
@@ -478,9 +539,24 @@ def get_chat_config(*, vision: bool = False) -> tuple[str, str, str]:
         if vision and settings.ai_vision_model:
             model = settings.ai_vision_model
         return settings.ai_base_url, settings.ai_api_key, model
+    if name == "local":
+        model = (
+            settings.local_vision_model
+            if vision
+            else settings.local_chat_model
+        ) or settings.local_chat_model
+        if not settings.local_base_url or not model:
+            raise ProviderError(
+                "local chat needs LOCAL_BASE_URL and LOCAL_CHAT_MODEL"
+            )
+        return (
+            settings.local_base_url,
+            settings.local_api_key or "local",
+            model,
+        )
     raise ProviderError(
         f'unknown AI_PROVIDER "{name}" (want meta, openrouter, cloud, '
-        "comfyui, fake)"
+        "local, comfyui, fake)"
     )
 
 
@@ -546,14 +622,49 @@ def _vision_boxes(
 
 
 # ---------------------------------------------------------------------------
-# Meta Model API (Muse Spark): agent chat + vision detection.
-# No public Meta image/video generation endpoint exists, so those raise with
-# a routing hint instead of silently faking output.
+# Meta Model API (Muse family): chat + vision (Muse Spark/Wonder),
+# image (Muse Image), speech-to-text (Muse Voice Transcribe), segmentation
+# (SAM 3.1). Shapes follow dev.meta.ai capability guides + the
+# meta-model-cookbook recipes (05_muse_image, 06_muse_voice, 07_sam).
+# There is no Meta video-generation model, so video raises with a routing
+# hint instead of silently faking output.
 # ---------------------------------------------------------------------------
 
 
+def _responses_create(*, base_url: str, api_key: str, payload: dict) -> dict:
+    """POST one Responses API turn; return the parsed response dict.
+
+    Shared by Muse Image generation and SAM segmentation. Status codes are
+    checked manually (no raise_for_status) to match module convention.
+    """
+    try:
+        res = httpx.post(
+            f"{base_url.rstrip('/')}/responses",
+            json=payload,
+            headers={"Authorization": f"Bearer {api_key}"},
+            timeout=180.0,
+        )
+    except httpx.HTTPError as exc:
+        raise ProviderUnavailable(f"meta responses call failed: {exc}") from exc
+    if res.status_code == 401:
+        raise ProviderError("meta rejected the API key (401) — check META_API_KEY")
+    if res.status_code == 429:
+        raise ProviderError("meta rate limit exceeded (429) — retry later")
+    if res.status_code >= 400:
+        raise ProviderError(
+            f"meta responses failed ({res.status_code}): {res.text[:200]}"
+        )
+    try:
+        data = res.json()
+    except ValueError as exc:
+        raise ProviderError(f"meta responses unreadable: {exc}") from exc
+    if not isinstance(data, dict):
+        raise ProviderError("meta responses returned an unreadable response")
+    return data
+
+
 class MetaProvider:
-    """Meta Model API (https://api.meta.ai/v1). Chat + vision only."""
+    """Meta Model API (https://api.meta.ai/v1). Chat, vision, image, voice, SAM."""
 
     name = "meta"
 
@@ -568,10 +679,45 @@ class MetaProvider:
         negative_prompt: str = "",
         reference_images: tuple[bytes, ...] = (),
     ) -> bytes:
-        raise UnsupportedOp(
-            "meta has no public image-generation endpoint: use provider "
-            '"openrouter" (or cloud/comfyui) for image jobs'
+        # Muse Image via the Responses API (cookbook 05_muse_image): turn 1
+        # takes a text input; reference images ride as input_image parts in
+        # a user message (steer/compose). The image is the base64 `result`
+        # on the image_generation_call output item.
+        if not settings.meta_api_key:
+            raise ProviderError("meta image needs META_API_KEY (dev.meta.ai)")
+        model = model or settings.meta_image_model
+        text = prompt.strip()
+        if negative_prompt.strip():
+            text = f"{text} (Avoid: {negative_prompt.strip()})"
+        if reference_images:
+            content: list[dict] = [{"type": "input_text", "text": text}]
+            content.extend(
+                {"type": "input_image", "image_url": _data_url(png)}
+                for png in reference_images
+            )
+            turn: str | list[dict] = [{"role": "user", "content": content}]
+        else:
+            turn = text
+        data = _responses_create(
+            base_url=settings.meta_base_url,
+            api_key=settings.meta_api_key,
+            payload={"model": model, "input": turn},
         )
+        for item in data.get("output") or []:
+            if (
+                isinstance(item, dict)
+                and item.get("type") == "image_generation_call"
+            ):
+                result = item.get("result")
+                if isinstance(result, str) and result:
+                    try:
+                        return base64.b64decode(result)
+                    except ValueError as exc:
+                        raise ProviderError(
+                            "meta image payload is not valid base64: "
+                            f"{exc}"
+                        ) from exc
+        raise ProviderError("meta image returned no image_generation_call result")
 
     def generate_video(
         self,
@@ -584,9 +730,129 @@ class MetaProvider:
         reference_images: tuple[bytes, ...] = (),
     ) -> bytes:
         raise UnsupportedOp(
-            "meta has no public video-generation endpoint: use provider "
+            "meta has no video-generation model: use provider "
             '"openrouter" for video jobs'
         )
+
+    def transcribe_audio(
+        self,
+        audio: bytes,
+        filename: str,
+        *,
+        mode: str = "ENDPOINTING",
+        model: str | None = None,
+    ) -> dict:
+        """One-shot speech-to-text (cookbook 06_muse_voice).
+
+        Returns the raw JSON: {transcript, audioDurationMs, turns?} where
+        each turn carries transcript + startMs/endMs (+speaker in
+        DIARIZATION). ENDPOINTING is the default: turn boundaries without
+        a speaker rig — exactly what subtitle drafting wants.
+        """
+        if not settings.meta_api_key:
+            raise ProviderError("meta transcribe needs META_API_KEY (dev.meta.ai)")
+        if mode not in ("PUSH_TO_TALK", "ENDPOINTING", "DIARIZATION"):
+            raise ProviderError(f"unknown transcribe mode {mode!r}")
+        if len(audio) > 32 * 1024 * 1024:
+            raise ProviderError(
+                "audio over the 32 MB one-shot cap — split it first"
+            )
+        request = {
+            "mode": mode,
+            "model": model or settings.meta_transcribe_model,
+            "audioEncoding": "WAV",
+        }
+        try:
+            res = httpx.post(
+                f"{settings.meta_base_url.rstrip('/')}/asr/transcribe",
+                headers={"Authorization": f"Bearer {settings.meta_api_key}"},
+                files={
+                    # Params travel as a JSON part, not as form fields.
+                    "request": (None, json.dumps(request), "application/json"),
+                    "audio": (filename or "take", audio),
+                },
+                timeout=300.0,
+            )
+        except httpx.HTTPError as exc:
+            raise ProviderUnavailable(
+                f"meta transcribe request failed: {exc}"
+            ) from exc
+        if res.status_code == 401:
+            raise ProviderError(
+                "meta rejected the API key (401) — check META_API_KEY"
+            )
+        if res.status_code == 429:
+            raise ProviderError("meta rate limit exceeded (429) — retry later")
+        if res.status_code >= 400:
+            raise ProviderError(
+                f"meta transcribe failed ({res.status_code}): {res.text[:200]}"
+            )
+        try:
+            data = res.json()
+        except ValueError as exc:
+            raise ProviderError(f"meta transcribe unreadable: {exc}") from exc
+        if not isinstance(data, dict) or not isinstance(
+            data.get("transcript"), str
+        ):
+            raise ProviderError("meta transcribe returned an unreadable response")
+        return data
+
+    def segment(self, image: Path, concept: str) -> list[dict]:
+        """Object boxes via SAM 3.1 (cookbook 07_sam): text prompt + image.
+
+        The model returns geometry as text; boxes are parsed 0-1000 like
+        vision detection and scaled to pixels. Unparseable output raises
+        ProviderUnavailable so detector callers fall back to heuristic.
+        """
+        if not settings.meta_api_key:
+            raise ProviderError("meta segment needs META_API_KEY (dev.meta.ai)")
+        with Image.open(image) as img:
+            orig_w, orig_h = img.size
+            img.thumbnail((1024, 1024))
+            buf = io.BytesIO()
+            img.save(buf, format="PNG")
+        b64 = base64.b64encode(buf.getvalue()).decode()
+        data = _responses_create(
+            base_url=settings.meta_base_url,
+            api_key=settings.meta_api_key,
+            payload={
+                "model": settings.meta_sam_model,
+                "input": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "input_text",
+                                "text": (
+                                    "Segment every instance of: "
+                                    f"{concept}. Reply ONLY with JSON "
+                                    'like [{"x":0-1000,"y":0-1000,'
+                                    '"w":0-1000,"h":0-1000}] in reading order.'
+                                ),
+                            },
+                            {
+                                "type": "input_image",
+                                "image_url": (
+                                    f"data:image/png;base64,{b64}"
+                                ),
+                            },
+                        ],
+                    }
+                ],
+            },
+        )
+        texts: list[str] = []
+        for item in data.get("output") or []:
+            if isinstance(item, dict) and item.get("type") == "message":
+                for part in item.get("content") or []:
+                    if isinstance(part, dict) and isinstance(
+                        part.get("text"), str
+                    ):
+                        texts.append(part["text"])
+        boxes = _boxes_from_text(" ".join(texts), orig_w, orig_h)
+        if not boxes:
+            raise ProviderUnavailable("sam returned no parseable geometry")
+        return boxes
 
     def detect_panels(self, image: Path) -> list[dict]:
         if not settings.meta_api_key:

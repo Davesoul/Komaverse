@@ -6,6 +6,8 @@ export interface TimelineClipInfo {
   kind: string;
   label: string;
   image: string;
+  /** Set for video clips: muted thumbnail playback. */
+  video?: string;
   duration: number;
   motion: string;
 }
@@ -48,6 +50,7 @@ const KIND_BAR: Record<string, string> = {
   panel: "#c1121f",
   frame: "#6fa373",
   media: "#7d9cc4",
+  video: "#4a6fa5",
   ai: "#ff5a5f",
 };
 
@@ -459,15 +462,26 @@ export function Timeline({
                     }}
                   >
                     <div style={{ width: 4, flexShrink: 0, background: KIND_BAR[clip.kind] ?? "#888", borderRadius: "4px 0 0 4px" }} />
-                    {w > 64 && clip.image && (
-                      <img
-                        crossOrigin="use-credentials"
-                        src={clip.image}
-                        alt=""
+                    {w > 64 && clip.video ? (
+                      <video
+                        src={clip.video}
+                        muted
+                        playsInline
+                        preload="metadata"
                         draggable={false}
-                        style={{ width: 56, height: "100%", objectFit: "cover", flexShrink: 0, background: "#f6f1e8" }}
-                        loading="lazy"
+                        style={{ width: 56, height: "100%", objectFit: "cover", flexShrink: 0, background: "#000" }}
                       />
+                    ) : (
+                      w > 64 && clip.image && (
+                        <img
+                          crossOrigin="use-credentials"
+                          src={clip.image}
+                          alt=""
+                          draggable={false}
+                          style={{ width: 56, height: "100%", objectFit: "cover", flexShrink: 0, background: "#f6f1e8" }}
+                          loading="lazy"
+                        />
+                      )
                     )}
                     <div style={{ flex: 1, minWidth: 0, padding: "4px 6px", overflow: "hidden" }}>
                       <div style={{ fontSize: 12, fontWeight: 600, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
@@ -496,7 +510,7 @@ export function Timeline({
               })}
               {clips.length === 0 && (
                 <span style={{ fontSize: 12, color: "var(--kv-faint)", padding: 8, display: "block" }}>
-                  No clips — auto-direct the timeline or add panels, frames, and stills.
+                  No clips — auto-direct the timeline or add panels, frames, stills, and videos.
                 </span>
               )}
             </div>

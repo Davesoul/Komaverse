@@ -14,6 +14,8 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from komaverse import storage
+from komaverse.ai.providers import MetaProvider, ProviderError
+from komaverse.api.usage import record_usage
 from komaverse.auth import ensure_owner, get_current_user, own_project
 from komaverse.config import settings
 from komaverse.db import get_session
@@ -54,6 +56,20 @@ class CuePatch(BaseModel):
     volume: float | None = None
     fade_in: float | None = None
     fade_out: float | None = None
+
+
+class TranscriptTurn(BaseModel):
+    transcript: str
+    start_sec: float = 0.0
+    end_sec: float = 0.0
+    speaker: str | None = None
+
+
+class Transcript(BaseModel):
+    take_id: str
+    transcript: str
+    duration_sec: float = 0.0
+    turns: list[TranscriptTurn] = []
 
 
 def _get_scene(session: Session, user: UserRow, scene_id: str) -> SceneRow:
@@ -184,6 +200,54 @@ def delete_take(
     session.delete(row)
     session.commit()
     storage.remove_file(rel)
+
+
+@router.post("/audio/{audio_id}/transcribe", response_model=Transcript)
+def transcribe_take(
+    audio_id: str,
+    session: Session = Depends(get_session),
+    user: UserRow = Depends(get_current_user),
+    mode: str = "ENDPOINTING",
+):
+    """Speech-to-text for one take via Muse Voice Transcribe (Meta).
+
+    Returns the transcript plus per-turn timings (turn-level, not
+    word-level). Needs META_API_KEY; without it the call fails with a
+    400 naming the missing key instead of hanging a job.
+    """
+    row = _get_take(session, user, audio_id)
+    try:
+        audio = storage.resolve(row.file_path).read_bytes()
+    except OSError as exc:
+        raise HTTPException(400, f"cannot read take audio: {exc}") from None
+    try:
+        res = MetaProvider().transcribe_audio(
+            audio,
+            Path(row.file_path).name,
+            mode=(mode or "ENDPOINTING").upper(),
+        )
+    except ProviderError as exc:
+        raise HTTPException(400, f"transcription failed: {exc}") from None
+    record_usage(session, user.id, "transcribe", settings.meta_transcribe_model)
+    turns = []
+    for t in res.get("turns") or []:
+        text = str(t.get("transcript") or "").strip()
+        if not text:
+            continue
+        turns.append(
+            TranscriptTurn(
+                transcript=text,
+                start_sec=(t.get("startMs") or 0) / 1000,
+                end_sec=(t.get("endMs") or 0) / 1000,
+                speaker=t.get("speaker"),
+            )
+        )
+    return Transcript(
+        take_id=row.id,
+        transcript=res.get("transcript") or "",
+        duration_sec=(res.get("audioDurationMs") or 0) / 1000,
+        turns=turns,
+    )
 
 
 @router.post("/scenes/{scene_id}/cues", response_model=AudioCue, status_code=201)

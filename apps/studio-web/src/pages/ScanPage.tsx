@@ -12,7 +12,6 @@ import {
   SelectInput,
   Spinner,
   StatusBar,
-  TextInput,
 } from "../components/ui";
 
 type Mode = "select" | "reshape" | "draw";
@@ -24,12 +23,11 @@ export default function ScanPage() {
   const [panels, setPanels] = useState<Panel[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [mode, setMode] = useState<Mode>("select");
-  const [detector, setDetector] = useState("yolo");
+  const [detector, setDetector] = useState("yolo-leoxs22");
   const [direction, setDirection] = useState("rtl");
   const [autoDetect, setAutoDetect] = useState(true);
   const [busy, setBusy] = useState("");
   const [notice, setNotice] = useState("");
-  const [newName, setNewName] = useState("");
   const [zoom, setZoom] = useState(1);
   // True size (1:1): one image pixel per screen pixel, so the scan looks
   // exactly like the upload instead of a CSS fit-downscale. Any fit/+/−
@@ -78,6 +76,17 @@ export default function ScanPage() {
       })
       .catch((e) => setNotice(`API offline: ${(e as Error).message}`));
   }, [refreshProject]);
+
+  // Agent detection refreshes this tab live when it shows that project.
+  useEffect(() => {
+    const onAgent = (e: Event) => {
+      const pid = (e as CustomEvent).detail?.projectId as string | null | undefined;
+      if (!project || (pid && pid !== project.id)) return;
+      void refreshProject(project.id).catch(() => {});
+    };
+    window.addEventListener("komaverse:agent-timeline-changed", onAgent);
+    return () => window.removeEventListener("komaverse:agent-timeline-changed", onAgent);
+  });
 
   // Page pixels via credentialed fetch → blob URL, so authed /media also
   // loads when the API lives on another origin (remote-URL desktop).
@@ -428,14 +437,6 @@ export default function ScanPage() {
     void doUploadMany(Array.from(e.dataTransfer.files ?? []));
   };
 
-  const doCreateProject = async () => {
-    const name = newName.trim() || "Untitled";
-    const created = await api.createProject(name);
-    setNewName("");
-    await refreshProjects();
-    await refreshProject(created.id);
-  };
-
   const doDeletePage = async () => {
     if (!page || !project) return;
     const idx = project.pages.findIndex((p) => p.id === page.id);
@@ -532,19 +533,9 @@ export default function ScanPage() {
             ))}
             {projects.length === 0 && (
               <span style={{ fontSize: 13, color: "var(--kv-faint)" }}>
-                No projects yet.
+                No projects yet — create one on the Home dashboard.
               </span>
             )}
-          </div>
-          <div style={{ display: "flex", gap: 6 }}>
-            <TextInput
-              placeholder="New project name"
-              value={newName}
-              onChange={(e) => setNewName(e.target.value)}
-              onKeyDown={(e) => e.key === "Enter" && doCreateProject()}
-              style={{ flex: 1 }}
-            />
-            <IconBtn onClick={doCreateProject} label="Create project">＋</IconBtn>
           </div>
           {project && (
             <div style={{ marginTop: 6 }}>
@@ -659,7 +650,7 @@ export default function ScanPage() {
         {!project ? (
           <EmptyState
             title="No project selected"
-            hint="Create or pick a project, then upload a manga page to begin."
+            hint="Create a project on the Home dashboard, then pick it here to upload a manga page."
           />
         ) : !page ? (
           <EmptyState
@@ -682,6 +673,8 @@ export default function ScanPage() {
                 <option value="yolo-leoxs22">YOLO leoxs22 (local, fast)</option>
                 <option value="cloud">Cloud vision (fallback local)</option>
                 <option value="meta">Meta Muse vision (fallback local)</option>
+                <option value="sam">Meta SAM 3.1 segment (fallback local)</option>
+                <option value="local">Local vision model (fallback heuristic)</option>
                 <option value="openrouter">OpenRouter vision (fallback local)</option>
               </SelectInput>
               <PrimaryBtn onClick={doDetect} disabled={!!busy}>

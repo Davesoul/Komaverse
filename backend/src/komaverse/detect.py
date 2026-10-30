@@ -10,6 +10,9 @@ path (its SAHI tiling bugs left behind).
 from __future__ import annotations
 
 import logging
+import shutil
+import threading
+import urllib.request
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -18,6 +21,7 @@ from PIL import Image, ImageOps, UnidentifiedImageError
 
 from komaverse.ai.providers import (
     CloudProvider,
+    LocalProvider,
     MetaProvider,
     OpenRouterProvider,
     ProviderError,
@@ -191,6 +195,35 @@ class OpenRouterDetector:
         return _vision_detect(OpenRouterProvider(), image, direction)
 
 
+class LocalDetector:
+    """Vision-API detector — local open-weight server (LOCAL_* settings)."""
+
+    name = "local"
+
+    def detect(self, image: Path, direction: str = "rtl") -> list[Box]:
+        return _vision_detect(LocalProvider(), image, direction)
+
+
+class _SamPanelAdapter:
+    """Adapts MetaProvider.segment to the detect_panels shape _vision_detect wants."""
+
+    def detect_panels(self, image: Path) -> list[dict]:
+        return MetaProvider().segment(image, "comic panel")
+
+
+class SamDetector:
+    """SAM 3.1 segmentation detector — Meta-hosted (META_API_KEY).
+
+    Prompts SAM for comic-panel geometry instead of asking a chat-vision
+    model for boxes; same contract as the other vision detectors.
+    """
+
+    name = "sam"
+
+    def detect(self, image: Path, direction: str = "rtl") -> list[Box]:
+        return _vision_detect(_SamPanelAdapter(), image, direction)
+
+
 def _backend_root() -> Path:
     return Path(__file__).resolve().parent.parent.parent
 
@@ -202,6 +235,38 @@ def _model_path() -> Path:
 
 
 _MODEL_CACHE: dict[str, Any] = {}
+_WEIGHT_LOCK = threading.Lock()
+
+
+def _ensure_weights(path: Path, url: str, name: str) -> bool:
+    """Fetch weights once from the configured URL. True when usable.
+
+    Web deploys do not vendor the .pt files: the first scan downloads them
+    into the configured path and every later scan reuses the cache. Any
+    failure returns False and callers fall back to heuristic.
+    """
+    if path.is_file():
+        return True
+    if not url:
+        return False
+    tmp = path.with_suffix(path.suffix + ".part")
+    with _WEIGHT_LOCK:
+        if path.is_file():
+            return True
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with urllib.request.urlopen(url, timeout=60) as resp, open(tmp, "wb") as fh:
+                shutil.copyfileobj(resp, fh, length=1024 * 256)
+            tmp.replace(path)
+            logger.info("%s weights downloaded (%d bytes)", name, path.stat().st_size)
+            return True
+        except Exception as exc:
+            logger.warning("%s weights download failed (%s); using heuristic", name, exc)
+            try:
+                tmp.unlink(missing_ok=True)
+            except OSError:
+                pass
+            return False
 
 
 def _load_yolo(path: Path) -> Any:
@@ -291,16 +356,21 @@ def run_detector(
 ) -> tuple[list[Box], str, bool]:
     """Run detector; yolo/vision failures fall back to heuristic. Returns (boxes, used, fell_back)."""
     if name == "yolo":
-        return _run_yolo(name, _model_path(), image, direction)
+        path = _model_path()
+        _ensure_weights(path, settings.yolo_url, name)
+        return _run_yolo(name, path, image, direction)
     if name == "yolo-leoxs22":
         raw = Path(YOLO_LEOXS)
         path = raw if raw.is_absolute() else _backend_root() / raw
+        _ensure_weights(path, settings.yolo_leoxs22_url, name)
         return _run_yolo(name, path, image, direction)
-    if name in ("cloud", "meta", "openrouter"):
+    if name in ("cloud", "meta", "openrouter", "sam", "local"):
         detector = {
             "cloud": CloudDetector,
             "meta": MetaDetector,
             "openrouter": OpenRouterDetector,
+            "sam": SamDetector,
+            "local": LocalDetector,
         }[name]()
         try:
             return detector.detect(image, direction), name, False

@@ -58,6 +58,18 @@ export interface AudioTake {
   created_at: string | null;
 }
 
+export interface TranscriptTurn {
+  transcript: string;
+  start_sec: number;
+  end_sec: number;
+  speaker: string | null;
+}
+export interface Transcript {
+  take_id: string;
+  transcript: string;
+  duration_sec: number;
+  turns: TranscriptTurn[];
+}
 export interface AudioCue {
   id: string;
   scene_id: string;
@@ -205,11 +217,11 @@ export interface AgentReply {
 
 /** One @-mention: a specific frame, detected panel, voice take, or generation. */
 export interface AgentRef {
-  kind: "frame" | "panel" | "take" | "gen";
+  kind: "frame" | "panel" | "media" | "take" | "gen";
   id: string;
 }
 
-const REF_RE = /@(frame|panel|take|gen):([A-Za-z0-9_-]+)/g;
+const REF_RE = /@(frame|panel|media|take|gen):([A-Za-z0-9_-]+)/g;
 
 /** Pull @kind:id tokens out of composer text for the refs array. */
 export function parseAgentRefs(message: string): AgentRef[] {
@@ -241,6 +253,29 @@ export interface SystemStatus {
     status: number;
     error: string;
   }[];
+}
+
+export interface UsagePoint {
+  day: string;
+  calls: number;
+  tokens: number;
+  cost: number;
+}
+export interface UsageSlice {
+  kind: string;
+  label: string;
+  calls: number;
+  tokens: number;
+  cost: number;
+}
+export interface UsageSummary {
+  days: number;
+  since: string | null;
+  totals: Record<string, number>;
+  tokens_total: number;
+  cost_total: number;
+  by_label: UsageSlice[];
+  series: UsagePoint[];
 }
 
 /** Base URL override for desktop/remote API (set on the Home tab). */
@@ -473,6 +508,8 @@ export const api = {
     }),
   deleteTake: (audioId: string) =>
     req<void>(`/api/v1/audio/${audioId}`, { method: "DELETE" }),
+  transcribeTake: (audioId: string) =>
+    req<Transcript>(`/api/v1/audio/${audioId}/transcribe`, { method: "POST" }),
   addCue: (
     sceneId: string,
     cue: {
@@ -584,6 +621,8 @@ export const api = {
       body: JSON.stringify(body ?? {}),
     }),
   getBalance: () => req<Balance>("/api/v1/billing/me"),
+  usageSummary: (days: number) =>
+    req<UsageSummary>(`/api/v1/usage/summary?days=${days}`),
   grantCredits: (amount: number) =>
     req<Balance>("/api/v1/billing/grant", {
       method: "POST",

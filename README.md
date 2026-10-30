@@ -4,16 +4,18 @@ Manga scan → panels → animation → video, in one cross-platform studio:
 drawing canvas, frame-by-frame timeline, and AI generation (cloud-first,
 local-pluggable).
 
-Built for the Meta hackathon. Rebuild of `../saas-projects/koma-wari`
-(kept as legacy reference — do not import from it, port deliberately).
+Rebuild of `../saas-projects/koma-wari` (kept as legacy reference —
+do not import from it, port deliberately). All work in this repo
+started Oct 28, 2026.
 
 ## Features (v1)
 
-- **Scan:** upload manga pages, detect panels (YOLO `yolo`
-  best-comic-panel-detection default via `KOMA_YOLO_MODEL`, `yolo-leoxs22`
-  option, heuristic fallback, cloud with local fallback), 1:1 true-size
-  viewer, SVG overlay editor (move/reshape/add/delete, reading order),
-  Send-to-Animate handoff
+- **Scan:** upload manga pages, detect panels (YOLO `yolo-leoxs22`
+  default, `yolo` best-comic option via `KOMA_YOLO_MODEL`, heuristic
+  fallback, cloud with local fallback; missing weights can be fetched
+  once from `KOMA_YOLO_LEOXS_URL` / `KOMA_YOLO_URL` on web deploys),
+  1:1 true-size viewer, SVG overlay editor (move/reshape/add/delete,
+  reading order), Send-to-Animate handoff
 - **Draw:** layered canvas (brush/eraser, pressure, undo/redo, G-pen and
   Japanese/modern presets, Ctrl+scroll zoom), frames strip under the canvas,
   last-open frame auto-opens per project, canvas-native playback at 2–24 fps
@@ -28,12 +30,17 @@ Built for the Meta hackathon. Rebuild of `../saas-projects/koma-wari`
 - **Media:** per-project library grid (scans, takes, generations, renders)
   with search/filters/sort, lightbox viewer, storage usage. Takes reach the
   timeline via ＋ Timeline (at the playhead) or drag onto the A1 lane
-- **AI:** pluggable providers — Meta Muse (agent brain + panel detect),
-  OpenRouter (chat, image + async video models), generic cloud endpoint,
-  local ComfyUI, fake demo — background jobs with polling; generated
-  images attach as frames, videos preview in the Generate panel
+- **AI:** pluggable providers — Meta Model API (Muse Spark/Wonder
+  brain, Muse Image generation, Voice Transcribe takes, SAM 3.1
+  segmentation), OpenRouter (chat, image + async video models),
+  generic cloud endpoint (incl. hosted open weights), local ComfyUI,
+  fake demo — background jobs with polling; generated images attach
+  as frames, videos preview in the Generate panel
 - **Credits:** append-only ledger, per-operation costs, 402 enforcement,
   dev grants (no Stripe in v1)
+- **Usage dashboard:** Home tab section with requests/calls, estimated
+  tokens, and credits over 7/30/90 days or all time — per activity and
+  model (`GET /api/v1/usage/summary?days=`), with daily activity bars
 - **Cross-platform:** PWA web app (installable, app-shell offline) + Tauri 2
   desktop shell (Windows/macOS/Linux), remote-API base URL setting
 - **Auth & security:** register/login/logout, per-user projects, rate limits,
@@ -126,26 +133,75 @@ no email verification.
 key everything still works: the agent uses its demo brain and image jobs
 use the fake provider (non-production).
 
-- **Agent (Meta Muse):** `AI_PROVIDER=meta` + `META_API_KEY` (from
-  dev.meta.ai). The chat agent talks to the Meta Model API
-  (`https://api.meta.ai/v1`, OpenAI-compatible, model `muse-spark-1.3`
-  by default) with the same tool calls as the demo brain. Any failure
-  falls back to the demo brain.
-- **Images + video (OpenRouter):** `OPENROUTER_API_KEY`. The Generate
-  panel offers a curated model picker (`GET /ai/models`, verified
-  against OpenRouter's live catalogs: budget vs popular badges, server
-  default from `OPENROUTER_IMAGE_MODEL` / `OPENROUTER_VIDEO_MODEL`).
-  Images via `POST /images` (Flux 3 Klein, Qwen 2.1 Turbo, Nano Banana,
-  Meta Muse Image); video jobs (`kind=video`, 25 credits) submit async
-  to `POST /videos` (Seedance 2.0, Veo 3.1, Wan 2.6) and poll
-  `polling_url` to `completed`, then download `content?index=0` — with
-  an elapsed-time progress readout. Costs real credits on your
-  OpenRouter account.
+- **Agent (Muse Spark / Wonder):** `AI_PROVIDER=meta` + `META_API_KEY`
+  (from dev.meta.ai). The chat agent talks to the Meta Model API
+  (`https://api.meta.ai/v1`, OpenAI-compatible, `muse-spark-1.3` by
+  default — set `META_CHAT_MODEL=muse-wonder-1.0` for the larger
+  reasoning model) with the same tool calls as the demo brain. Any
+  failure falls back to the demo brain.
+- **Images (Muse Image or OpenRouter):** `AI_PROVIDER=meta` renders
+  images with `muse-image-1.0` (override via `META_IMAGE_MODEL`) —
+  references ride along as `input_image` turns (steer/compose). The
+  Generate panel's OpenRouter picker stays the testing default
+  (`OPENROUTER_API_KEY`, verified catalog: Flux 3 Klein, Qwen 2.1
+  Turbo, Nano Banana, Meta Muse Image).
+- **Video (OpenRouter):** video jobs (`kind=video`, 25 credits) submit
+  async to `POST /videos` (Seedance 2.0, Veo 3.1, Wan 2.6) and poll
+  `polling_url` to `completed` — Meta has no video-generation model,
+  so `meta` video jobs fail fast with a routing hint.
+- **Voice transcription (Muse Voice Transcribe):** `META_TRANSCRIBE_MODEL`
+  (`muse-voice-transcribe-1.0`) transcribes any take from the Media
+  tab (`POST /api/v1/audio/{id}/transcribe`, turn-level timings) or via
+  the agent ("transcribe the latest take", optionally "...as subtitles").
+- **Segmentation (SAM 3.1):** `META_SAM_MODEL` (`sam-3.1`) powers the
+  `sam` panel detector — text-prompted geometry instead of chat-vision
+  boxes, same 0–1000 contract as YOLO, heuristic fallback.
 - **Panel detection via vision:** detector `cloud` with
-  `AI_VISION_MODEL`, or `AI_PROVIDER=meta` /
-  `OPENROUTER_VISION_MODEL` — same 0–1000 box contract as YOLO.
-- Meta has no public image/video endpoint: image or video jobs on
-  `meta` fail fast with a routing hint instead of burning credits.
+  `AI_VISION_MODEL`, `meta`, or `OPENROUTER_VISION_MODEL` — same
+  0–1000 box contract as YOLO.
+- **Local open weights (desktop / on-device):** `AI_PROVIDER=local`
+  points the studio at an Ollama-compatible server instead of a cloud
+  account — `LOCAL_BASE_URL` (default `http://127.0.0.1:11434`) plus
+  `LOCAL_CHAT_MODEL` / `LOCAL_VISION_MODEL` set to the names you
+  pulled (e.g. `ollama pull qwen3:8b`). The Generate panel offers a
+  `Local` provider with a free-text model box, the Scan tab a `local`
+  vision detector, and the agent brain runs on it too — no key, no
+  network. Hosted open weights (e.g. Baseten
+  `meta-models/muse-spark-open-1026`) plug in the same way through
+  the generic `cloud` provider (`AI_BASE_URL` + `AI_API_KEY`).
+
+## MCP server (stdio)
+
+The studio agent tools are also an MCP server, so Claude Code or
+Claude Desktop can operate the studio directly (same tools, same
+auth/credits as the in-app dock). Long-running tools never block:
+`export_video` and `create_image` return a job id at once (video
+already does) and `check_job` polls them to completion.
+
+Streamable HTTP (served by the backend, single-user via
+`KOMAVERSE_MCP_USER` — point any MCP client at the URL):
+
+```powershell
+# backend running (./scripts/dev.ps1), then:
+# POST http://localhost:8001/mcp   (JSON-RPC tools/list, tools/call)
+```
+
+Stdio (local subprocess):
+
+```powershell
+# from backend/ with the venv active
+$env:KOMAVERSE_MCP_USER = "you@example.com"  # your studio login email
+.venv\Scripts\python.exe -m komaverse.mcp_server
+```
+
+Claude Code (`mcp add`, stdio):
+
+```powershell
+claude mcp add komaverse -- .venv\Scripts\python.exe -m komaverse.mcp_server
+```
+
+with `KOMAVERSE_MCP_USER` in the environment. Claude Desktop
+(`claude_desktop_config.json`, same command/args, plus `"env"`).
 
 ## Tests
 

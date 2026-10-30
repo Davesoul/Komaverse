@@ -50,23 +50,19 @@ def _read_segments(session: Session, row: SubtitleTrackRow) -> list[SubSegment]:
         raise HTTPException(400, f"stored subtitles unreadable: {exc}") from None
 
 
-@router.post("/scenes/{scene_id}/subtitles", response_model=SubtitleTrack, status_code=201)
-def upload_subtitles(
-    scene_id: str,
-    file: UploadFile = File(...),
-    session: Session = Depends(get_session),
-    user: UserRow = Depends(get_current_user),
-):
+def save_subtitles_track(
+    session: Session, user: UserRow, scene_id: str, data: bytes
+) -> SubtitleTrack:
+    """Validate + store one SRT track, replacing any existing one.
+
+    Shared by the upload endpoint and the studio agent, so chat-added
+    captions get the same parse, quota, and storage path as file uploads.
+    """
     scene = _get_scene(session, user, scene_id)
-    name = (file.filename or "").lower()
-    if not name.endswith(".srt"):
-        raise HTTPException(400, "file must be .srt")
-    try:
-        data = storage.read_upload_capped(file.file, MAX_SRT_BYTES)
-    except storage.UploadTooLargeError:
-        raise HTTPException(413, "subtitle file too large") from None
     if not data:
-        raise HTTPException(400, "empty file")
+        raise HTTPException(400, "empty subtitles")
+    if len(data) > MAX_SRT_BYTES:
+        raise HTTPException(413, "subtitle file too large")
     try:
         segments = parse_srt(data.decode("utf-8-sig"))
     except (UnicodeDecodeError, ValueError) as exc:
@@ -87,6 +83,23 @@ def upload_subtitles(
     session.add(row)
     session.commit()
     return row.to_schema(segments)
+
+
+@router.post("/scenes/{scene_id}/subtitles", response_model=SubtitleTrack, status_code=201)
+def upload_subtitles(
+    scene_id: str,
+    file: UploadFile = File(...),
+    session: Session = Depends(get_session),
+    user: UserRow = Depends(get_current_user),
+):
+    name = (file.filename or "").lower()
+    if not name.endswith(".srt"):
+        raise HTTPException(400, "file must be .srt")
+    try:
+        data = storage.read_upload_capped(file.file, MAX_SRT_BYTES)
+    except storage.UploadTooLargeError:
+        raise HTTPException(413, "subtitle file too large") from None
+    return save_subtitles_track(session, user, scene_id, data)
 
 
 @router.get("/scenes/{scene_id}/subtitles", response_model=SubtitleTrack | None)

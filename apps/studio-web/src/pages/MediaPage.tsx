@@ -3,6 +3,7 @@ import {
   api,
   mediaUrl,
   type AudioTake,
+  type Transcript,
   type DrawFrame,
   type ExportReport,
   type Job,
@@ -151,6 +152,8 @@ export default function MediaPage() {
   const [query, setQuery] = useState("");
   const [genStatus, setGenStatus] = useState<"all" | "done" | "active" | "failed">("all");
   const [takeSort, setTakeSort] = useState<"new" | "old" | "name">("new");
+  const [transcripts, setTranscripts] = useState<Record<string, Transcript>>({});
+  const [transcribing, setTranscribing] = useState<string | null>(null);
   const [lightbox, setLightbox] = useState<LightboxState>(null);
 
   const refresh = useCallback(async (id: string | null) => {
@@ -185,6 +188,21 @@ export default function MediaPage() {
       .finally(() => setBusy(""));
   }, [refresh]);
 
+  // Agent uploads and generations refresh the library live.
+  useEffect(() => {
+    const onAgent = (e: Event) => {
+      const pid = (e as CustomEvent).detail?.projectId as string | null | undefined;
+      if (pid && project && pid !== project.id) return;
+      void refresh(pid ?? getCurrentProject()).catch(() => {});
+    };
+    window.addEventListener("komaverse:agent-job-done", onAgent);
+    window.addEventListener("komaverse:agent-timeline-changed", onAgent);
+    return () => {
+      window.removeEventListener("komaverse:agent-job-done", onAgent);
+      window.removeEventListener("komaverse:agent-timeline-changed", onAgent);
+    };
+  });
+
   const doDeletePage = async (page: Page, index: number) => {
     if (
       !window.confirm(
@@ -216,6 +234,24 @@ export default function MediaPage() {
       setNotice(`Delete failed: ${(e as Error).message}`);
     } finally {
       setBusy("");
+    }
+  };
+
+  const doTranscribeTake = async (take: AudioTake) => {
+    if (transcribing) return;
+    setTranscribing(take.id);
+    try {
+      const res = await api.transcribeTake(take.id);
+      setTranscripts((prev) => ({ ...prev, [take.id]: res }));
+      setNotice(
+        res.turns.length > 0
+          ? `Transcribed "${take.name}" (${res.turns.length} turns).`
+          : `No speech detected in "${take.name}".`,
+      );
+    } catch (e) {
+      setNotice(`Transcribe failed: ${(e as Error).message}`);
+    } finally {
+      setTranscribing(null);
     }
   };
 
@@ -429,8 +465,8 @@ export default function MediaPage() {
             ) : (
               <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
                 {takesShown.map((t) => (
+                  <div key={t.id} style={{ display: "flex", flexDirection: "column", gap: 4 }}>
                   <div
-                    key={t.id}
                     style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}
                   >
                     <audio
@@ -445,9 +481,23 @@ export default function MediaPage() {
                       {t.duration_sec > 0 ? `${t.duration_sec.toFixed(1)}s` : "live"} · {t.mime || "audio"}
                       {t.created_at ? ` · ${new Date(t.created_at).toLocaleDateString()}` : ""}
                     </span>
+                    <Btn small onClick={() => void doTranscribeTake(t)} disabled={transcribing === t.id}>
+                      {transcribing === t.id ? "Transcribing…" : "Transcribe"}
+                    </Btn>
                     <IconBtn danger onClick={() => doDeleteTake(t)} style={{ marginLeft: "auto" }} label="Delete take">
                       ×
                     </IconBtn>
+                  </div>
+                  {transcripts[t.id] && transcripts[t.id].turns.length > 0 && (
+                    <div style={{ fontSize: 12, color: "var(--kv-muted)", maxWidth: 560, paddingLeft: 4 }}>
+                      {transcripts[t.id].turns.map((turn, i) => (
+                        <div key={i}>
+                          <span className="kv-nums">[{turn.start_sec.toFixed(1)}s]</span>
+                          {turn.speaker ? ` ${turn.speaker}:` : ""} {turn.transcript}
+                        </div>
+                      ))}
+                    </div>
+                  )}
                   </div>
                 ))}
               </div>

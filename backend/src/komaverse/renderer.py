@@ -1,7 +1,9 @@
 """Project renderer: scenes/clips/cues → H.264 + AAC MP4.
 
 Clip sources: panel crops (page image + box), frame composites (layer PNGs),
-page stills (kind=media, source_id=page id). Motion: none, zoom-in, zoom-out,
+page stills (kind=media, source_id=page id), video files (kind=video,
+source_id=finished generation job id; looped to the clip length, Ken Burns
+moves apply over the moving picture). Motion: none, zoom-in, zoom-out,
 pan-left, pan-right. Timeline audio cues are mixed in a second ffmpeg pass
 (adelay/volume/afade per cue, amix, AAC). Encoding via the imageio-ffmpeg
 bundled binary (libx264/yuv420p/faststart) so output plays everywhere.
@@ -23,7 +25,7 @@ from sqlalchemy.orm import Session
 
 from komaverse import storage
 from komaverse.config import settings
-from komaverse.db_models import ClipRow, FrameRow, PageRow, PanelRow, ProjectRow
+from komaverse.db_models import ClipRow, FrameRow, JobRow, PageRow, PanelRow, ProjectRow
 from komaverse.models import uuid_short
 
 logger = logging.getLogger("komaverse.renderer")
@@ -153,6 +155,36 @@ def resolve_clip_image(clip: ClipRow, session: Session) -> np.ndarray | None:
     return None  # ai clips land in M4
 
 
+def video_duration_sec(path: Path) -> float | None:
+    """Container duration via OpenCV (no ffprobe dependency)."""
+    cap = cv2.VideoCapture(str(path))
+    try:
+        fps = cap.get(cv2.CAP_PROP_FPS) or 0
+        count = cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0
+        if fps > 0 and count > 0:
+            return count / fps
+        return None
+    finally:
+        cap.release()
+
+
+def resolve_clip_video(clip: ClipRow, session: Session) -> tuple[Path, float] | None:
+    """(video file, duration_sec) for kind == "video" clips (finished gen jobs)."""
+    if clip.kind != "video":
+        return None
+    job = session.get(JobRow, clip.source_id)
+    if job is None or job.kind != "video" or job.status != "done" or not job.result_url:
+        return None
+    try:
+        path = storage.resolve(job.result_url.split("/media/", 1)[-1])
+    except Exception:
+        return None
+    if not path.is_file():
+        return None
+    dur = video_duration_sec(path)
+    return (path, dur) if dur and dur > 0 else None
+
+
 def audio_has_stream(path: Path) -> bool:
     """True when ffmpeg can open the file and finds an audio stream.
 
@@ -262,8 +294,18 @@ def render_project(
         raise ValueError(f"project too long ({total:.0f}s > {MAX_TOTAL_SEC:.0f}s)")
 
     # Pass 1: resolve everything up front so skips are warned, never silent.
-    resolved: list[tuple[ClipRow, np.ndarray]] = []
+    # Stills resolve to one image; videos resolve to (tag, file, duration).
+    resolved: list[tuple[ClipRow, object]] = []
     for clip in clips:
+        if clip.kind == "video":
+            vid = resolve_clip_video(clip, session)
+            if vid is None:
+                msg = f"skipped clip {clip.id} (video): unresolvable source"
+                logger.warning(msg)
+                warnings.append(msg)
+                continue
+            resolved.append((clip, ("video", *vid)))
+            continue
         src = resolve_clip_image(clip, session)
         if src is None or src.size == 0:
             msg = f"skipped clip {clip.id} ({clip.kind}): unresolvable source"
@@ -369,6 +411,30 @@ def render_project(
         done = 0
         try:
             for clip, src, n in planned:
+                if isinstance(src, tuple):
+                    _, vpath, vdur = src
+                    cap = cv2.VideoCapture(str(vpath))
+                    try:
+                        last = None
+                        for i in range(n):
+                            t_out = i / fps
+                            t_src = t_out if t_out < vdur else t_out % vdur
+                            cap.set(cv2.CAP_PROP_POS_MSEC, t_src * 1000)
+                            ok, frame = cap.read()
+                            if ok and frame is not None:
+                                last = frame
+                            frame = last
+                            if frame is None:
+                                frame = np.full((h, w, 3), PAPER_RGB[::-1], dtype=np.uint8)
+                            base = cover_resize(frame, w * 2, h * 2)
+                            t = i / max(n - 1, 1)
+                            writer.send(motion_frame(base, w, h, t, clip.motion))
+                            done += 1
+                            if on_progress is not None:
+                                on_progress(done, total_frames)
+                    finally:
+                        cap.release()
+                    continue
                 base = cover_resize(src, w * 2, h * 2)
                 for i in range(n):
                     t = i / max(n - 1, 1)

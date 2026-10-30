@@ -179,8 +179,10 @@ def test_chat_complete_transport_propagates(monkeypatch):
 # ----------------------------------------------------------------- meta ---
 
 
-def test_meta_image_video_point_at_openrouter():
-    with pytest.raises(ProviderError, match="openrouter"):
+def test_meta_image_needs_key_video_points_at_openrouter(monkeypatch):
+    """Muse Image runs on Meta (key required); only video routes elsewhere."""
+    monkeypatch.setattr(settings, "meta_api_key", None)
+    with pytest.raises(ProviderError, match="META_API_KEY"):
         MetaProvider().generate_image("x", 64, 64)
     with pytest.raises(ProviderError, match="openrouter"):
         MetaProvider().generate_video("x", 2.0)
@@ -513,17 +515,24 @@ def test_ai_models_catalog(factory, user):
     assert out["defaults"]["image"] == settings.openrouter_image_model
 
 
-def test_generate_image_meta_rejected(factory, user):
+def test_generate_image_meta_queued(factory, user):
+    """Muse Image jobs queue like any provider; failures surface on the job."""
     with factory() as s:
-        with pytest.raises(HTTPException) as exc:
-            generate(
-                GenerateRequest(kind="image", prompt="x", provider="meta"),
-                BackgroundTasks(),
-                s,
-                user,
-            )
-    assert exc.value.status_code == 400
-    assert "meta" in exc.value.detail.lower()
+        project = create_project(ProjectCreate(name="MI2"), s, user)
+    with factory() as s:
+        grant(GrantRequest(amount=100), s, user)
+    with factory() as s:
+        job = generate(
+            GenerateRequest(
+                kind="image", prompt="x", project_id=project.id, provider="meta"
+            ),
+            BackgroundTasks(),
+            s,
+            user,
+        )
+    assert job.status == "queued"
+    with factory() as s:
+        assert get_job(job.id, s, user).status == "queued"
 
 
 # -------------------------------------------------------------- detect ---
@@ -598,13 +607,38 @@ def test_detect_endpoint_accepts_meta_and_openrouter(factory, user):
 # ---------------------------------------------------------------- agent ---
 
 
-def test_agent_tool_generate_meta_hint(factory, user, monkeypatch):
+def test_agent_tool_generate_meta_uses_muse_image(factory, user, monkeypatch):
+    """Meta image jobs now run Muse Image instead of refusing with a hint."""
+    import base64 as _b64
+
     monkeypatch.setattr(settings, "ai_provider", "meta")
+    monkeypatch.setattr(settings, "meta_api_key", "mk-test")
+    png = _png_bytes()
+    monkeypatch.setattr(
+        httpx,
+        "post",
+        lambda *a, **k: _Resp(
+            200,
+            {
+                "id": "resp_1",
+                "status": "completed",
+                "output": [
+                    {
+                        "type": "image_generation_call",
+                        "status": "completed",
+                        "result": _b64.b64encode(png).decode(),
+                    }
+                ],
+            },
+        ),
+    )
     with factory() as s:
         project = create_project(ProjectCreate(name="AI"), s, user)
     with factory() as s:
-        reply = agent_mod.tool_generate(s, user, project.id, "a robot")
-    assert "openrouter" in reply.lower()
+        grant(GrantRequest(amount=100), s, user)
+    with factory() as s:
+        reply = agent_mod.tool_generate(s, user, project.id, "a robot", factory)
+    assert "generated and attached" in reply.lower()
 
 
 def test_agent_cloud_turn_uses_meta_config(factory, user, monkeypatch):

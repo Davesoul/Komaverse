@@ -3,7 +3,8 @@ import { api, reportClientError, setOnUnauthorized, type User } from "./api";
 import AuthForm from "./components/AuthForm";
 import AgentDock from "./components/AgentDock";
 import SystemCard from "./components/SystemCard";
-import { Btn, Card, Kanji, SelectInput, Spinner, TextInput } from "./components/ui";
+import UsageCard from "./components/UsageCard";
+import { Btn, Card, Kanji, PrimaryBtn, SelectInput, Spinner, TextInput } from "./components/ui";
 import { getCurrentProject, setCurrentProject } from "./lib/studio";
 import { prefersReducedMotion } from "./components/Reveal";
 import LandingPage from "./pages/LandingPage";
@@ -56,6 +57,9 @@ export default function App() {
   const [projectCount, setProjectCount] = useState<number | null>(null);
   const [homeProjects, setHomeProjects] = useState<{ id: string; name: string }[]>([]);
   const [activeId, setActiveId] = useState<string>(() => getCurrentProject() ?? "");
+  const [newName, setNewName] = useState("");
+  const [creating, setCreating] = useState(false);
+  const [createNotice, setCreateNotice] = useState("");
   const mainRef = useRef<HTMLElement>(null);
 
   useEffect(() => {
@@ -137,6 +141,25 @@ export default function App() {
     } finally {
       setUser(null);
       setShowAuth(false);
+    }
+  };
+
+  const doCreateProject = async () => {
+    if (creating) return;
+    setCreating(true);
+    setCreateNotice("");
+    try {
+      const created = await api.createProject(newName.trim() || "Untitled");
+      setNewName("");
+      const ps = await api.listProjects();
+      setProjectCount(ps.length);
+      setHomeProjects(ps);
+      setActiveId(created.id);
+      setCurrentProject(created.id);
+    } catch (e) {
+      setCreateNotice(`Create failed: ${(e as Error).message}`);
+    } finally {
+      setCreating(false);
     }
   };
 
@@ -344,8 +367,8 @@ export default function App() {
             })}
           </div>
           <Card style={{ maxWidth: 640, marginBottom: 20 }}>
-            <h2 style={{ fontSize: 15, margin: "0 0 8px" }}>Active project</h2>
-            <div style={{ display: "flex", gap: 8 }}>
+            <h2 style={{ fontSize: 15, margin: "0 0 8px" }}>Projects</h2>
+            <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
               <SelectInput
                 value={activeId}
                 onChange={(e) => {
@@ -367,6 +390,24 @@ export default function App() {
                 Open in Scan
               </Btn>
             </div>
+            <div style={{ display: "flex", gap: 8 }}>
+              <TextInput
+                placeholder="New project name"
+                value={newName}
+                onChange={(e) => setNewName(e.target.value)}
+                onKeyDown={(e) => e.key === "Enter" && void doCreateProject()}
+                style={{ flex: 1 }}
+                aria-label="New project name"
+              />
+              <PrimaryBtn onClick={() => void doCreateProject()} disabled={creating}>
+                {creating ? "Creating…" : "Create project"}
+              </PrimaryBtn>
+            </div>
+            {createNotice && (
+              <p style={{ fontSize: 12, color: "var(--kv-danger)", margin: "8px 0 0" }}>
+                {createNotice}
+              </p>
+            )}
             <p style={{ fontSize: 12, color: "var(--kv-muted)" }}>
               Every tab reopens this project automatically — including after
               a page reload.
@@ -404,6 +445,7 @@ export default function App() {
               and save.
             </p>
           </Card>
+          <UsageCard />
           <SystemCard />
           </>
         ) : (
