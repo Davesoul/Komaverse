@@ -121,6 +121,7 @@ def test_mcp_tools_list_covers_studio():
         "manage_clips",
         "manage_sequences",
         "manage_timelines",
+        "video_to_frames",
     } <= names
     for tool in TOOLS():
         assert tool["description"]

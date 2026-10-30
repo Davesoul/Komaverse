@@ -35,7 +35,7 @@ import { AudioDeck } from "../components/AudioDeck";
 import { Magnet } from "../components/Magnet";
 import { PreviewPlayer, type PreviewClip } from "../components/PreviewPlayer";
 import { Timeline, fmtTC, type TimelineCueInfo } from "../components/Timeline";
-import { getCurrentProject, setCurrentProject } from "../lib/studio";
+import { getCurrentProject, getCurrentScene, setCurrentProject, setCurrentScene } from "../lib/studio";
 
 const MOTIONS = ["none", "zoom-in", "zoom-out", "pan-left", "pan-right"];
 const POLL_MS = 1500;
@@ -256,8 +256,12 @@ export default function RenderPage() {
         setEntityIds((ids) => ids.filter((id) => ents.some((e) => e.id === id)));
       })
       .catch(() => {});
-    const chosen = sceneList.find((s) => s.id === (keepScene ?? sceneId)) ?? sceneList[0];
+    const stored = getCurrentScene(projectId);
+    const chosen =
+      sceneList.find((s) => s.id === (keepScene ?? stored ?? sceneId)) ?? sceneList[0];
     setSceneId(chosen?.id ?? "");
+    // Publish the active timeline so Media's "add to timeline" lands here.
+    setCurrentScene(projectId, chosen?.id ?? null);
   };
 
   const scene = scenes.find((s) => s.id === sceneId);
@@ -740,7 +744,10 @@ export default function RenderPage() {
             <SelectInput
               style={{ width: "100%", marginBottom: 8 }}
               value={sceneId}
-              onChange={(e) => setSceneId(e.target.value)}
+              onChange={(e) => {
+                setSceneId(e.target.value);
+                if (project) setCurrentScene(project.id, e.target.value || null);
+              }}
               aria-label="Active timeline"
             >
               {scenes.map((s) => (
@@ -929,7 +936,12 @@ export default function RenderPage() {
                   disabled={!videoPick}
                   onClick={async () => {
                     if (!project) return;
-                    await api.addClip(scene.id, { kind: "video", source_id: videoPick, duration: 2 });
+                    const picked = doneVideos.find((j) => j.id === videoPick);
+                    await api.addClip(scene.id, {
+                      kind: "video",
+                      source_id: videoPick,
+                      duration: picked && picked.seconds > 0 ? picked.seconds : 2,
+                    });
                     await refresh(project.id, scene.id);
                   }}
                 >

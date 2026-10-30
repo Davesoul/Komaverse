@@ -8,8 +8,10 @@ import io
 import json
 import logging
 import re
+from pathlib import Path
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Response
+import cv2
+from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, Response, UploadFile
 from fastapi.responses import FileResponse
 from PIL import Image
 from pydantic import BaseModel
@@ -1079,6 +1081,40 @@ class FrameFromMedia(BaseModel):
     sequence_id: str | None = None
 
 
+VIDEO_EXTENSIONS = (".mp4", ".webm", ".mov")
+MAX_VIDEO_FRAMES = 24
+
+
+class VideoToFrames(BaseModel):
+    sequence_id: str | None = None
+    max_frames: int = 12
+    width: int = 960
+    height: int = 540
+    name: str | None = None
+
+
+def _read_video_job(session: Session, user: UserRow, job_id: str) -> tuple[JobRow, Path]:
+    """Finished video job the user owns + its file path (or 4xx)."""
+    ref = str(job_id or "").strip()
+    for prefix in ("@gen:", "@media:"):
+        if ref.startswith(prefix):
+            ref = ref[len(prefix):]
+            break
+    job = session.get(JobRow, ref)
+    if job is None or job.kind != "video":
+        raise HTTPException(404, "video not found")
+    if job.project_id:
+        own_project(session, user, job.project_id)
+    elif job.user_id != user.id:
+        raise HTTPException(404, "video not found")
+    if job.status != "done" or not job.result_url:
+        raise HTTPException(400, f"video {job.id} is still {job.status} - wait until done")
+    path = storage.resolve(job.result_url.split("/media/", 1)[-1])
+    if not path.is_file():
+        raise HTTPException(404, "video file missing")
+    return job, path
+
+
 @router.post(
     "/projects/{project_id}/frames/from-media",
     response_model=DrawFrame,
@@ -1094,6 +1130,141 @@ def frame_from_media(
     return frame_from_media_source(
         session, user, project_id, body.source, body.name, body.sequence_id
     )
+
+
+@router.post("/projects/{project_id}/videos/upload", response_model=Job, status_code=201)
+def upload_video(
+    project_id: str,
+    file: UploadFile = File(...),
+    session: Session = Depends(get_session),
+    user: UserRow = Depends(get_current_user),
+):
+    """Upload a video file so it can join timelines and the draw studio."""
+    project = own_project(session, user, project_id)
+    ctype = (file.content_type or "").lower()
+    name = (file.filename or "").lower()
+    if not (ctype.startswith("video/") or name.endswith(VIDEO_EXTENSIONS)):
+        raise HTTPException(400, "file must be a video (mp4/webm/mov)")
+    try:
+        data = storage.read_upload_capped(
+            file.file, settings.upload_max_mb * 1024 * 1024
+        )
+    except storage.UploadTooLargeError:
+        raise HTTPException(413, "file too large") from None
+    if not data:
+        raise HTTPException(400, "empty file")
+    try:
+        storage.check_quota(project.id, len(data))
+    except storage.QuotaExceededError as exc:
+        raise HTTPException(413, str(exc)) from None
+    rel, url = storage.save_upload(project.id, file.filename or "video.mp4", data)
+    width, height, seconds = 0, 0, 0.0
+    try:
+        cap = cv2.VideoCapture(str(storage.resolve(rel)))
+        try:
+            fps = cap.get(cv2.CAP_PROP_FPS) or 24.0
+            total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+            width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
+            height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
+            seconds = round(total / fps, 2) if fps > 0 else 0.0
+        finally:
+            cap.release()
+    except Exception:
+        logger.debug("video probe failed", exc_info=True)
+    job = JobRow(
+        user_id=user.id,
+        project_id=project.id,
+        kind="video",
+        prompt=file.filename or "upload",
+        provider="upload",
+        width=width,
+        height=height,
+        seconds=seconds,
+        status="done",
+        progress=1.0,
+        result_url=url,
+    )
+    session.add(job)
+    session.commit()
+    return job.to_schema()
+
+
+@router.post("/jobs/{job_id}/frames", response_model=list[DrawFrame], status_code=201)
+def video_to_frames(
+    job_id: str,
+    body: VideoToFrames,
+    session: Session = Depends(get_session),
+    user: UserRow = Depends(get_current_user),
+):
+    """Explode a finished video into draw frames, spread across its length.
+
+    Each frame lands in the given sequence (or the project's first one)
+    with the still as a fitted "video" layer — a starting point to draw
+    over, rotoscope-style.
+    """
+    job, path = _read_video_job(session, user, job_id)
+    if job.project_id is None:
+        raise HTTPException(400, "attach the video to a project first")
+    project = own_project(session, user, job.project_id)
+    _check_dims(body.width, body.height)
+    seq = _resolve_sequence(session, user, project.id, body.sequence_id)
+    cap = cv2.VideoCapture(str(path))
+    try:
+        total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+        if total <= 0:
+            raise HTTPException(400, "could not read any frames from the video")
+        want = min(max(int(body.max_frames or 1), 1), MAX_VIDEO_FRAMES, total)
+        picks = (
+            [round(i * (total - 1) / (want - 1)) for i in range(want)]
+            if want > 1
+            else [0]
+        )
+        base = (body.name or job.prompt or "Video").strip()[:120] or "Video"
+        out: list[DrawFrame] = []
+        for k, pos in enumerate(picks):
+            cap.set(cv2.CAP_PROP_POS_FRAMES, pos)
+            ok, bgr = cap.read()
+            if not ok or bgr is None:
+                continue
+            rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+            img = Image.fromarray(rgb).convert("RGBA")
+            scale = min(body.width / max(1, img.width), body.height / max(1, img.height))
+            nw, nh = max(1, round(img.width * scale)), max(1, round(img.height * scale))
+            canvas = Image.new("RGBA", (body.width, body.height), (0, 0, 0, 0))
+            canvas.paste(img.resize((nw, nh)), ((body.width - nw) // 2, (body.height - nh) // 2))
+            buf = io.BytesIO()
+            canvas.save(buf, format="PNG")
+            data_url = "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode()
+            row = FrameRow(
+                project_id=project.id,
+                sequence_id=seq.id,
+                name=f"{base} {k + 1}"[:200],
+                index=_next_frame_index(session, seq.id),
+                width=body.width,
+                height=body.height,
+            )
+            session.add(row)
+            session.flush()
+            session.add(
+                LayerRow(
+                    frame_id=row.id,
+                    name="video",
+                    opacity=100,
+                    visible=True,
+                    locked=False,
+                    blend_mode="normal",
+                    layer_order=0,
+                    data_url=data_url,
+                )
+            )
+            session.flush()
+            out.append(row.to_schema())
+    finally:
+        cap.release()
+    if not out:
+        raise HTTPException(400, "could not read any frames from the video")
+    session.commit()
+    return out
 
 
 @router.get("/frames/{frame_id}/thumbnail")

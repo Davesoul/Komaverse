@@ -58,7 +58,9 @@ started Oct 28, 2026.
   frame and clip management — same tools over MCP (stdio + HTTP
   `POST /mcp`). Projects hold multiple animation sequences (Draw tab
   switcher, Media overview) and multiple timelines (Render switcher,
-  per-timeline export), all agent-operated
+  per-timeline export), all agent-operated. Media imports image, video,
+  and audio files; videos also drop onto the current timeline as clips
+  or explode into the current sequence frame by frame
 
 ## Layout
 

@@ -458,6 +458,7 @@ class JobRow(Base):
             progress=self.progress,
             result_url=self.result_url,
             error=self.error,
+            seconds=self.seconds or 0.0,
         )
 
 

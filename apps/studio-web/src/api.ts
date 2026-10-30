@@ -40,7 +40,7 @@ export interface DetectResult {
 export interface Clip {
   id: string;
   scene_id: string;
-  kind: "panel" | "frame" | "media" | "ai";
+  kind: "panel" | "frame" | "media" | "video" | "ai";
   source_id: string;
   start: number;
   duration: number;
@@ -175,6 +175,7 @@ export interface Job {
   progress: number;
   result_url: string | null;
   error: string | null;
+  seconds: number;
 }
 
 export interface Entity {
@@ -557,6 +558,20 @@ export const api = {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ source, name, sequence_id }),
+    }),
+  uploadVideo: (projectId: string, file: File) => {
+    const form = new FormData();
+    form.append("file", file, file.name);
+    return req<Job>(`/api/v1/projects/${projectId}/videos/upload`, {
+      method: "POST",
+      body: form,
+    });
+  },
+  videoToFrames: (jobId: string, body: { sequence_id?: string; max_frames?: number; width?: number; height?: number; name?: string }) =>
+    req<DrawFrame[]>(`/api/v1/jobs/${jobId}/frames`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
     }),
   transcribeTake: (audioId: string) =>
     req<Transcript>(`/api/v1/audio/${audioId}/transcribe`, { method: "POST" }),

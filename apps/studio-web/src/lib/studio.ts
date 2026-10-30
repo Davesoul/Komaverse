@@ -58,6 +58,27 @@ export function getDrawFrame(projectId: string): string | null {
  * "Open in Draw" lands on the right sequence. */
 const sequenceKey = (projectId: string) => `komaverse.sequence.${projectId}`;
 
+/* Current timeline (scene), per project. Render publishes it; Media reads
+ * it so "add to timeline" lands on the timeline you are cutting. */
+const sceneKey = (projectId: string) => `komaverse.scene.${projectId}`;
+
+export function setCurrentScene(projectId: string, sceneId: string | null) {
+  try {
+    if (sceneId) localStorage.setItem(sceneKey(projectId), sceneId);
+    else localStorage.removeItem(sceneKey(projectId));
+  } catch {
+    // Private mode etc: Media falls back to the first timeline instead.
+  }
+}
+
+export function getCurrentScene(projectId: string): string | null {
+  try {
+    return localStorage.getItem(sceneKey(projectId));
+  } catch {
+    return null;
+  }
+}
+
 export function setCurrentSequence(projectId: string, sequenceId: string | null) {
   try {
     if (sequenceId) localStorage.setItem(sequenceKey(projectId), sequenceId);

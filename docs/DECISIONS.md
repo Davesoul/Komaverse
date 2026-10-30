@@ -244,3 +244,13 @@ Timelines are scenes (Render tab renamed the section, adds Duplicate,
 per-timeline export via `scene_id`; multi-clip-timeline exports 400 with
 "Which timeline?"). Both are agent/MCP-operated (`manage_sequences`,
 `manage_timelines`, sequence args on frame/layer tools, scene on export).
+
+Amendment: video in/out of the studio. `POST /projects/{id}/videos/upload`
+(mp4/webm/mov) stores an upload as a finished `video` job so it behaves
+exactly like a generation; `POST /jobs/{id}/frames` explodes a video into
+draw frames in a sequence (spread across its length, each a fitted "video"
+layer to draw over). Media shows videos with a preview player, imports
+image/video/audio files, and sends a video to the current timeline as a
+clip or to the current sequence frame by frame; video clip duration uses
+the job's `seconds` (new on the `Job` schema). Agent/MCP: `video_to_frames`
+plus the existing video `add_clip`.

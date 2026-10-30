@@ -196,6 +196,7 @@ class Job(BaseModel):
     progress: float = 0.0
     result_url: str | None = None
     error: str | None = None
+    seconds: float = 0.0
 
 
 class Entity(BaseModel):

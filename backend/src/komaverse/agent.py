@@ -50,6 +50,7 @@ from komaverse.api.animate import (
     ScenePatch,
     SequenceCreate,
     SequencePatch,
+    VideoToFrames,
     _next_frame_index,
     _resolve_sequence,
     add_clip,
@@ -71,6 +72,7 @@ from komaverse.api.animate import (
     patch_scene,
     patch_sequence,
     run_export_job,
+    video_to_frames,
 )
 from komaverse.api.audio import CueCreate, add_cue, list_takes
 from komaverse.api.scans import (
@@ -1714,6 +1716,31 @@ def tool_manage_timelines(
     return f"Unknown timeline op '{op}'. Valid: list, add, rename, duplicate, delete."
 
 
+def tool_video_to_frames(session, user, project_id, job, sequence=None, max_frames=12) -> str:
+    """Explode a finished video into draw frames in a sequence."""
+    # Fresh reads: this session may have cached relations from an
+    # earlier tool call in the same turn.
+    session.expire_all()
+    try:
+        n = min(max(int(max_frames or 12), 1), 24)
+    except (TypeError, ValueError):
+        return f"max_frames must be 1..24, got {max_frames}."
+    try:
+        frames = video_to_frames(
+            str(job or ""),
+            VideoToFrames(
+                sequence_id=str(sequence) if sequence else None,
+                max_frames=n,
+            ),
+            session,
+            user,
+        )
+    except HTTPException as exc:
+        return str(exc.detail)
+    listed = "; ".join(f"'{f.name}' [frame {f.id}]" for f in frames)
+    return f"Exploded the video into {len(frames)} draw frames: {listed}."
+
+
 
 CREATE_PROJECT_PHRASES = (
     "create project",
@@ -1939,6 +1966,24 @@ def _demo_scene_ref(message):
     return None
 
 
+def _demo_video_turn(session, user, project_id, message):
+    """Demo-brain video-to-frames: explode a finished video into a sequence."""
+    text = message.lower()
+    m = re.search(r"@gen:([A-Za-z0-9_-]+)", message)
+    ref = m.group(1) if m else None
+    if not ref:
+        m2 = re.search(r"\bvideo\s+([A-Za-z0-9_-]+)", text)
+        ref = m2.group(1) if m2 else None
+    if not ref:
+        return "Which video? Mention it with @gen: or give me its id (see Media)."
+    row = session.get(JobRow, ref)
+    if row is not None and row.kind != "video":
+        return tool_frame_from_media(session, user, project_id, f"@gen:{ref}", None)
+    m = re.search(r"(\d+)\s*frames?", text)
+    n = int(m.group(1)) if m else 12
+    return tool_video_to_frames(session, user, project_id, ref, _demo_seq_ref(message), n)
+
+
 def _demo_timeline_turn(session, user, project_id, message):
     """Demo-brain timeline control: verbs map to manage_timelines ops."""
     text = message.lower()
@@ -2045,6 +2090,8 @@ def demo_turn(
                 reply = f"{reply} {chained}"
     elif any(k in text for k in ("detect", "find panel", "scan")):
         reply = run("detect_all", tool_detect_all, session, user, project_id, parse_detector(text), parse_direction(text))
+    elif ("video" in text or "@gen:" in text) and any(k in text for k in ("frame", "frames", "draw", "explode", "rotoscope", "still", "stills")) and not any(k in text for k in ("timeline", "timelines", "clip", "clips", "scene")):
+        reply = run("video_to_frames", _demo_video_turn, session, user, project_id, message)
     elif "video" in text and any(k in text for k in TIMELINE_WORDS) and any(k in text for k in ("add", "put", "place", "cut")):
         resolved = resolve_video_job(text, session, user, project_id)
         if isinstance(resolved, str):
@@ -2588,6 +2635,25 @@ _TOOLS_SCHEMA = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "video_to_frames",
+            "description": (
+                "Explode a finished video (@gen: id) into draw frames in a "
+                "sequence (max 24)."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "job": {"type": "string"},
+                    "sequence": {"type": "string"},
+                    "max_frames": {"type": "number"},
+                },
+                "required": ["job"],
+            },
+        },
+    },
 ]
 
 
@@ -2834,6 +2900,12 @@ def cloud_turn(
                     result = tool_manage_timelines(
                         session, user, project_id, str(args.get("op") or "list"),
                         args.get("scene"), args.get("name"),
+                    )
+                elif name == "video_to_frames":
+                    result = tool_video_to_frames(
+                        session, user, project_id,
+                        str(args.get("job") or ""),
+                        args.get("sequence"), args.get("max_frames", 12),
                     )
                 else:
                     result = f"unknown tool: {name}"

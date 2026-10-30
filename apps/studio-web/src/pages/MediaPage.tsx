@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   api,
   mediaUrl,
@@ -12,7 +12,7 @@ import {
   type Sequence,
   type StorageUsage,
 } from "../api";
-import { getCurrentProject, gotoTab, setCurrentProject, setCurrentSequence } from "../lib/studio";
+import { getCurrentProject, getCurrentScene, getCurrentSequence, gotoTab, setCurrentProject, setCurrentSequence } from "../lib/studio";
 import {
   Btn,
   ChapterHeader,
@@ -409,6 +409,113 @@ export default function MediaPage() {
     }
   };
 
+  const imgInputRef = useRef<HTMLInputElement>(null);
+  const vidInputRef = useRef<HTMLInputElement>(null);
+  const audInputRef = useRef<HTMLInputElement>(null);
+
+  const probeAudioDuration = (file: File): Promise<number> =>
+    new Promise((resolve) => {
+      const url = URL.createObjectURL(file);
+      const el = document.createElement("audio");
+      el.preload = "metadata";
+      el.onloadedmetadata = () => {
+        const d = el.duration;
+        URL.revokeObjectURL(url);
+        resolve(Number.isFinite(d) ? d : 0);
+      };
+      el.onerror = () => {
+        URL.revokeObjectURL(url);
+        resolve(0);
+      };
+      el.src = url;
+    });
+
+  const doImportImage = async (file: File) => {
+    if (!project) return;
+    setBusy("Importing image…");
+    try {
+      await api.uploadPage(project.id, file);
+      await refresh(project.id);
+      setNotice(`Imported "${file.name}" as a scan page.`);
+    } catch (e) {
+      setNotice(`Import failed: ${(e as Error).message}`);
+    } finally {
+      setBusy("");
+    }
+  };
+
+  const doImportVideo = async (file: File) => {
+    if (!project) return;
+    setBusy("Importing video…");
+    try {
+      const job = await api.uploadVideo(project.id, file);
+      await refresh(project.id);
+      setNotice(`Imported "${job.prompt || file.name}" — add it to a timeline or the Draw studio.`);
+    } catch (e) {
+      setNotice(`Import failed: ${(e as Error).message}`);
+    } finally {
+      setBusy("");
+    }
+  };
+
+  const doImportAudio = async (file: File) => {
+    if (!project) return;
+    setBusy("Importing audio…");
+    try {
+      const duration = await probeAudioDuration(file);
+      await api.uploadTake(project.id, file, file.name, duration);
+      await refresh(project.id);
+      setNotice(`Imported "${file.name}" as a voice take.`);
+    } catch (e) {
+      setNotice(`Import failed: ${(e as Error).message}`);
+    } finally {
+      setBusy("");
+    }
+  };
+
+  const doAddVideoToTimeline = async (job: Job) => {
+    if (!project) return;
+    setBusy("Adding to timeline…");
+    try {
+      const scenes = await api.listScenes(project.id);
+      if (scenes.length === 0) {
+        setNotice("No timelines yet — create one in Render first.");
+        return;
+      }
+      const stored = getCurrentScene(project.id);
+      const target = scenes.find((s) => s.id === stored) ?? scenes[0];
+      await api.addClipsBatch(target.id, [
+        { kind: "video", source_id: job.id, duration: job.seconds > 0 ? job.seconds : 2 },
+      ]);
+      await refresh(project.id);
+      setNotice(`Added to "${target.name}" — open it in Render.`);
+    } catch (e) {
+      setNotice(`Add failed: ${(e as Error).message}`);
+    } finally {
+      setBusy("");
+    }
+  };
+
+  const doVideoToFrames = async (job: Job) => {
+    if (!project) return;
+    const stored = getCurrentSequence(project.id);
+    const target = sequences.find((s) => s.id === stored) ?? sequences[0];
+    if (!target) {
+      setNotice("Create a sequence first — then explode the video into it.");
+      return;
+    }
+    setBusy("Extracting frames…");
+    try {
+      const made = await api.videoToFrames(job.id, { sequence_id: target.id, max_frames: 12 });
+      await refresh(project.id);
+      setNotice(`${made.length} frames added to "${target.name}" — open it in Draw.`);
+    } catch (e) {
+      setNotice(`Extract failed: ${(e as Error).message}`);
+    } finally {
+      setBusy("");
+    }
+  };
+
   const doTranscribeTake = async (take: AudioTake) => {
     if (transcribing) return;
     setTranscribing(take.id);
@@ -476,7 +583,7 @@ export default function MediaPage() {
       const bt = b.created_at ?? "";
       return takeSort === "new" ? bt.localeCompare(at) : at.localeCompare(bt);
     });
-  const aiJobs = jobs.filter((j) => j.kind === "image");
+  const aiJobs = jobs.filter((j) => j.kind === "image" || j.kind === "video");
   const gensShown = aiJobs.filter(
     (j) =>
       (genStatus === "all" ||
@@ -577,6 +684,54 @@ export default function MediaPage() {
               notice
             )}
           </Notice>
+        </div>
+      )}
+
+      {project && (
+        <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 12, flexWrap: "wrap" }}>
+          <span style={{ fontSize: 12, color: "var(--kv-muted)" }}>Import:</span>
+          <Btn small onClick={() => imgInputRef.current?.click()} title="Import an image as a new scan page">
+            Image
+          </Btn>
+          <Btn small onClick={() => vidInputRef.current?.click()} title="Import a video file (mp4/webm/mov)">
+            Video
+          </Btn>
+          <Btn small onClick={() => audInputRef.current?.click()} title="Import an audio file as a voice take">
+            Audio
+          </Btn>
+          <input
+            ref={imgInputRef}
+            type="file"
+            accept="image/*"
+            hidden
+            onChange={(e) => {
+              const f = e.target.files?.[0];
+              e.target.value = "";
+              if (f) void doImportImage(f);
+            }}
+          />
+          <input
+            ref={vidInputRef}
+            type="file"
+            accept="video/mp4,video/webm,video/quicktime"
+            hidden
+            onChange={(e) => {
+              const f = e.target.files?.[0];
+              e.target.value = "";
+              if (f) void doImportVideo(f);
+            }}
+          />
+          <input
+            ref={audInputRef}
+            type="file"
+            accept="audio/*"
+            hidden
+            onChange={(e) => {
+              const f = e.target.files?.[0];
+              e.target.value = "";
+              if (f) void doImportAudio(f);
+            }}
+          />
         </div>
       )}
 
@@ -698,7 +853,7 @@ export default function MediaPage() {
           </MediaSection>
 
           <MediaSection
-            title="AI generations"
+            title="Videos & generations"
             items={gensShown}
             total={aiJobs.length}
             cap={GEN_CAP}
@@ -707,7 +862,7 @@ export default function MediaPage() {
             searching={q !== ""}
             onToggleCollapse={() => toggleCollapsed("gens")}
             onToggleShowAll={() => toggleShowAll("gens")}
-            emptyAll={<EmptyState title="No generations" hint="Generate images from the Render tab." />}
+            emptyAll={<EmptyState title="No videos or generations" hint="Import a video above or generate from the Render tab." />}
             emptyFiltered={<EmptyState title="No matches" hint="Nothing matches the current search or filter." />}
           >
             {(list) => (
@@ -720,7 +875,29 @@ export default function MediaPage() {
               >
                 {list.map((j) => (
                   <div key={j.id} className="kv-media-card">
-                    {j.status === "done" && j.result_url ? (
+                    {j.status === "done" && j.result_url && j.kind === "video" ? (
+                      <button
+                        type="button"
+                        onClick={() => setLightbox({ kind: "gen", job: j })}
+                        title={j.prompt ? `Play: ${j.prompt}` : "Play video"}
+                        style={{
+                          display: "block",
+                          width: "100%",
+                          padding: 0,
+                          border: "none",
+                          background: "none",
+                          cursor: "zoom-in",
+                        }}
+                      >
+                        <video
+                          src={mediaUrl(j.result_url)}
+                          muted
+                          playsInline
+                          preload="metadata"
+                          style={{ width: "100%", aspectRatio: "16 / 9", objectFit: "cover", display: "block" }}
+                        />
+                      </button>
+                    ) : j.status === "done" && j.result_url ? (
                       <button
                         type="button"
                         onClick={() => setLightbox({ kind: "gen", job: j })}
@@ -798,6 +975,16 @@ export default function MediaPage() {
                             }}
                           >
                             Frame it
+                          </Btn>
+                        </div>
+                      )}
+                      {j.status === "done" && j.kind === "video" && (
+                        <div style={{ marginTop: 6, display: "flex", gap: 6, flexWrap: "wrap" }}>
+                          <Btn small onClick={() => void doAddVideoToTimeline(j)} title="Add as a clip to the current timeline">
+                            To timeline
+                          </Btn>
+                          <Btn small onClick={() => void doVideoToFrames(j)} title="Explode into draw frames in the current sequence">
+                            Frames to Draw
                           </Btn>
                         </div>
                       )}
@@ -936,12 +1123,21 @@ export default function MediaPage() {
           meta={`${lightbox.job.id} · ${lightbox.job.status}`}
           onClose={() => setLightbox(null)}
         >
-          <img
-            crossOrigin="use-credentials"
-            src={mediaUrl(lightbox.job.result_url)}
-            alt={lightbox.job.prompt || "AI generation"}
-            style={{ width: "100%", maxHeight: "76vh", objectFit: "contain", display: "block", background: "#000" }}
-          />
+          {lightbox.job.kind === "video" ? (
+            <video
+              src={mediaUrl(lightbox.job.result_url)}
+              controls
+              playsInline
+              style={{ width: "100%", maxHeight: "76vh", display: "block", background: "#000" }}
+            />
+          ) : (
+            <img
+              crossOrigin="use-credentials"
+              src={mediaUrl(lightbox.job.result_url)}
+              alt={lightbox.job.prompt || "AI generation"}
+              style={{ width: "100%", maxHeight: "76vh", objectFit: "contain", display: "block", background: "#000" }}
+            />
+          )}
         </Lightbox>
       )}
     </>

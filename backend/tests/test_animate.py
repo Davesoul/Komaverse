@@ -820,6 +820,68 @@ def test_legacy_frames_auto_group(factory, user):
         assert third.sequence_id == seqs[0].id
 
 
+def _video_bytes(n=8, w=64, h=48) -> bytes:
+    import os
+    import tempfile
+
+    import numpy
+
+    path = tempfile.mktemp(suffix=".mp4")
+    writer = cv2.VideoWriter(path, cv2.VideoWriter_fourcc(*"mp4v"), 10, (w, h))
+    for i in range(n):
+        writer.write(numpy.full((h, w, 3), min(i * 30, 255), dtype=numpy.uint8))
+    writer.release()
+    with open(path, "rb") as f:
+        data = f.read()
+    os.unlink(path)
+    return data
+
+
+def test_video_upload_and_to_frames(factory, user):
+    from komaverse.api.animate import (
+        VideoToFrames,
+        list_sequences,
+        upload_video,
+        video_to_frames,
+    )
+
+    with factory() as s:
+        project = create_project(ProjectCreate(name="Vid"), s, user)
+    with factory() as s:
+        job = upload_video(
+            project.id,
+            UploadFile(
+                file=io.BytesIO(_video_bytes()),
+                filename="clip.mp4",
+                headers=Headers({"content-type": "video/mp4"}),
+            ),
+            s,
+            user,
+        )
+    assert job.kind == "video" and job.status == "done"
+    assert job.seconds > 0
+    with factory() as s:
+        with pytest.raises(HTTPException, match="must be a video"):
+            upload_video(
+                project.id,
+                UploadFile(
+                    file=io.BytesIO(b"nope"),
+                    filename="x.png",
+                    headers=Headers({"content-type": "image/png"}),
+                ),
+                s,
+                user,
+            )
+        frames = video_to_frames(job.id, VideoToFrames(max_frames=4), s, user)
+    assert len(frames) == 4 and all(f.name.startswith("clip") for f in frames)
+    assert all(len(f.layers) == 1 for f in frames)
+    with factory() as s:
+        seqs = list_sequences(project.id, s, user)
+        assert len(seqs) == 1 and len(seqs[0].frames) == 4
+        with pytest.raises(HTTPException):
+            video_to_frames("nope", VideoToFrames(), s, user)
+
+
 def test_duplicate_scene_and_scoped_export(factory, user):
     from komaverse.api.animate import duplicate_scene
 

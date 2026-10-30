@@ -52,6 +52,7 @@ from komaverse.agent import (
     tool_manage_timelines,
     tool_status,
     tool_tone_layer,
+    tool_video_to_frames,
 )
 from komaverse.api.scans import list_projects
 from komaverse.config import settings
@@ -276,6 +277,15 @@ def call_tool(
             args.get("motion"),
             args.get("clip_ids"),
         )
+    if name == "video_to_frames":
+        return tool_video_to_frames(
+            session,
+            user,
+            _str(args, "project_id"),
+            _str(args, "job"),
+            args.get("sequence"),
+            args.get("max_frames", 12),
+        )
     raise KeyError(f"unknown tool: {name}")
 
 
@@ -336,6 +346,23 @@ def _tool_defs() -> list[dict]:
                 "type": "object",
                 "properties": {"project_id": s, "op": s, "scene": s, "name": s},
                 "required": ["project_id", "op"],
+            },
+        },
+        {
+            "name": "video_to_frames",
+            "description": (
+                "Explode a finished video (@gen: id) into draw frames in a "
+                "sequence (max 24)."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "project_id": s,
+                    "job": s,
+                    "sequence": s,
+                    "max_frames": num,
+                },
+                "required": ["project_id", "job"],
             },
         },
         {

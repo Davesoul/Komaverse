@@ -874,6 +874,51 @@ def test_agent_timelines_crud(factory, user):
         )
 
 
+def test_agent_demo_video_to_frames(factory, user):
+    import io
+
+    from fastapi import UploadFile
+    from starlette.datastructures import Headers
+
+    from komaverse import agent as agent_mod
+
+    pid = seed_project(factory, user)
+    draw_frame_id(factory, user, pid, "Demo")
+    with factory() as s:
+        import cv2
+        import numpy
+        import os
+        import tempfile
+
+        path = tempfile.mktemp(suffix=".mp4")
+        writer = cv2.VideoWriter(path, cv2.VideoWriter_fourcc(*"mp4v"), 10, (64, 48))
+        for i in range(6):
+            writer.write(numpy.full((48, 64, 3), i * 30, dtype=numpy.uint8))
+        writer.release()
+        with open(path, "rb") as f:
+            data = f.read()
+        os.unlink(path)
+        from komaverse.api.animate import upload_video
+
+        job = upload_video(
+            pid,
+            UploadFile(
+                file=io.BytesIO(data),
+                filename="clip.mp4",
+                headers=Headers({"content-type": "video/mp4"}),
+            ),
+            s,
+            user,
+        )
+    out = turn(factory, user, f"explode @gen:{job.id} into 4 frames", pid)
+    assert any(a["tool"] == "video_to_frames" for a in out["actions"])
+    assert "4 draw frames" in out["reply"]
+    out = turn(factory, user, "explode the video", pid)
+    assert "Which video?" in out["reply"]
+    out = turn(factory, user, "explode the video " + job.id + " into frames", pid)
+    assert any(a["tool"] == "video_to_frames" for a in out["actions"])
+
+
 def test_agent_demo_sequence_timeline_turns(factory, user):
     pid = seed_project(factory, user)
     draw_frame_id(factory, user, pid, "Demo")
