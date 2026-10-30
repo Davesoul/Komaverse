@@ -566,3 +566,77 @@ def test_chat_threads_clip_seconds(factory, user):
     with factory() as s:
         clips = list_scenes(pid, s, user)[0].clips
     assert clips and all(c.duration == 4.0 for c in clips)
+
+
+def test_agent_add_media_mention_to_timeline(factory, user):
+    from komaverse.api.animate import list_scenes
+    from komaverse.api.scans import get_project
+
+    pid = seed_project(factory, user)
+    with factory() as s:
+        page = get_project(pid, s, user).pages[0]
+    out = turn(factory, user, f"add @media:{page.id} to the timeline", pid)
+    assert any(a["tool"] == "add_clip" for a in out["actions"])
+    with factory() as s:
+        clips = list_scenes(pid, s, user)[0].clips
+    assert any(c.kind == "media" and c.source_id == page.id for c in clips)
+
+
+def test_agent_check_video_without_id(factory, user):
+    pid = seed_project(factory, user)
+    jid = seed_video_job(factory, user, pid)
+    out = turn(factory, user, "is my video done?", pid)
+    assert any(a["tool"] == "check_job" for a in out["actions"])
+    assert "done" in out["reply"].lower()
+
+
+def test_agent_check_running_video(factory, user):
+    from komaverse.db_models import JobRow
+
+    pid = seed_project(factory, user)
+    jid = seed_video_job(factory, user, pid)
+    with factory() as s:
+        s.get(JobRow, jid).status = "running"
+        s.commit()
+    out = turn(factory, user, "is my video done?", pid)
+    assert "still running" in out["reply"].lower()
+
+
+def test_agent_single_take_needs_no_disambiguation(factory, user):
+    pid = seed_project(factory, user)
+    seed_take(factory, user, pid)
+    out = turn(factory, user, "put the take at 1s", pid)
+    assert any(a["tool"] == "add_cue" for a in out["actions"])
+    out = turn(factory, user, "transcribe it", pid)
+    assert any(a["tool"] == "transcribe_audio" for a in out["actions"])
+
+
+def test_agent_generate_and_add_it(factory, user):
+    from komaverse.api.animate import list_scenes
+
+    pid = seed_project(factory, user)
+    out = turn(
+        factory, user, "generate a moonlit robot and add it", pid,
+        job_factory=factory,
+    )
+    tools = [a["tool"] for a in out["actions"]]
+    assert "create_image" in tools and "add_clip" in tools
+    with factory() as s:
+        clips = list_scenes(pid, s, user)[0].clips
+    assert any(c.kind == "frame" for c in clips)
+
+
+def test_agent_frame_panel_mention(factory, user):
+    from komaverse.api.scans import get_project
+    from komaverse.db_models import PanelRow
+
+    pid = seed_project(factory, user)
+    with factory() as s:
+        page = get_project(pid, s, user).pages[0]
+    with factory() as s:
+        row = PanelRow(page_id=page.id, x=10.0, y=10.0, w=60.0, h=40.0)
+        s.add(row)
+        s.commit()
+        panel_id = row.id
+    out = turn(factory, user, f"frame the panel @panel:{panel_id}", pid)
+    assert any(a["tool"] == "frame_from_media" for a in out["actions"])

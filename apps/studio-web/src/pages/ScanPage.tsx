@@ -484,18 +484,18 @@ export default function ScanPage() {
     }
   };
 
-  // Panels → animation handoff: same server path as Animate's Auto-direct
-  // (dedupe + reading order + scene choice), then jump to the Animate tab —
-  // the project is already published, so Animate restores it on mount.
+  // Panels → render handoff: same server path as Render's Auto-direct
+  // (dedupe + reading order + scene choice), then jump to the Render tab —
+  // the project is already published, so Render restores it on mount.
   const doSendToAnimate = async () => {
     if (!project || panels.length === 0 || busy) return;
     setBusy("Sending panels…");
     try {
       const target = await api.autoDirect(project.id, { seconds: 2 });
       setNotice(
-        `Sent ${target.clips.length} clip${target.clips.length === 1 ? "" : "s"} into '${target.name}' — opening Animate.`,
+        `Sent ${target.clips.length} clip${target.clips.length === 1 ? "" : "s"} into '${target.name}' — opening Render.`,
       );
-      gotoTab("animate");
+      gotoTab("render");
     } catch (e) {
       setNotice(`Couldn't send panels: ${(e as Error).message}`);
     } finally {
@@ -717,10 +717,46 @@ export default function ScanPage() {
               <PrimaryBtn
                 onClick={doSendToAnimate}
                 disabled={!!busy || panels.length === 0}
-                title="Add every panel to the timeline, then open the Animate tab"
+                title="Add every panel to the timeline, then open the Render tab"
               >
-                Send to Animate →
+                Send to Render →
               </PrimaryBtn>
+              <Btn
+                disabled={!!busy || !page}
+                onClick={async () => {
+                  if (!page || busy) return;
+                  setBusy("Framing page…");
+                  try {
+                    const f = await api.frameFromMedia(page.project_id, `page ${page.index + 1}`);
+                    setNotice(`Framed as '${f.name}' — open the Draw tab to edit it.`);
+                  } catch (e) {
+                    setNotice(`Frame failed: ${(e as Error).message}`);
+                  } finally {
+                    setBusy("");
+                  }
+                }}
+                title="Create a draw frame from this scan page"
+              >
+                Frame page
+              </Btn>
+              <Btn
+                disabled={!!busy || !selectedId}
+                onClick={async () => {
+                  if (!page || !selectedId || busy) return;
+                  setBusy("Framing panel…");
+                  try {
+                    const f = await api.frameFromMedia(page.project_id, `@panel:${selectedId}`);
+                    setNotice(`Framed as '${f.name}' — open the Draw tab to edit it.`);
+                  } catch (e) {
+                    setNotice(`Frame failed: ${(e as Error).message}`);
+                  } finally {
+                    setBusy("");
+                  }
+                }}
+                title="Create a draw frame from the selected panel"
+              >
+                Frame panel
+              </Btn>
               <span style={{ display: "inline-flex", gap: 4, alignItems: "center" }}>
                 <IconBtn onClick={() => { setTrueSize(false); setZoom((z) => Math.max(z / 1.25, 0.5)); }} label="Zoom out">−</IconBtn>
                 <span style={{ fontSize: 12, minWidth: 44, textAlign: "center", color: "var(--kv-muted)" }}>

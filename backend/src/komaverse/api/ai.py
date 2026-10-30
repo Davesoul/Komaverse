@@ -371,12 +371,13 @@ def run_ai_job(job_id: str, factory=None) -> None:
         job.progress = 1.0
         session.commit()
         metrics.record_job("done")
+        last_usage = getattr(provider, "last_usage", None) or {}
         record_usage(
             session,
             job.user_id,
             job.kind,
             f"{job.provider}:{job.model or 'default'}",
-            0,
+            last_usage.get("total", 0),
             COSTS.get(job.kind, 0) if settings.paywall_enabled else 0.0,
         )
 

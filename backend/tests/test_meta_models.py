@@ -242,6 +242,75 @@ def test_meta_segment_parses_boxes(monkeypatch, tmp_path):
     assert (boxes[0]["w"], boxes[0]["h"]) == (160.0, 50.0)
 
 
+def test_normalize_usage_shapes():
+    from komaverse.ai.providers import _normalize_usage
+
+    assert _normalize_usage(
+        {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
+    ) == {"input": 10, "output": 5, "total": 15}
+    assert _normalize_usage({"input_tokens": 7, "output_tokens": 3}) == {
+        "input": 7,
+        "output": 3,
+        "total": 10,
+    }
+    assert _normalize_usage(None) == {"input": 0, "output": 0, "total": 0}
+    assert _normalize_usage({}) == {"input": 0, "output": 0, "total": 0}
+
+
+def test_chat_complete_with_usage(monkeypatch):
+    from komaverse.ai.providers import chat_complete_with_usage
+
+    def _post(url, **kwargs):
+        return _Resp(
+            200,
+            {
+                "choices": [{"message": {"content": "hi"}}],
+                "usage": {"prompt_tokens": 4, "completion_tokens": 1},
+            },
+        )
+
+    monkeypatch.setattr(httpx, "post", _post)
+    msg, usage = chat_complete_with_usage(
+        base_url="https://x", api_key="k", model="m", messages=[]
+    )
+    assert msg == {"content": "hi"}
+    assert usage == {"input": 4, "output": 1, "total": 5}
+
+
+def test_meta_image_job_records_provider_tokens(factory, user, monkeypatch):
+    from sqlalchemy import select
+
+    from komaverse import agent as agent_mod
+    from komaverse.api.ai import GrantRequest, grant
+    from komaverse.db_models import UsageEventRow
+
+    monkeypatch.setattr(settings, "ai_provider", "meta")
+    monkeypatch.setattr(settings, "meta_api_key", "mk-test")
+    monkeypatch.setattr(settings, "paywall_enabled", True)
+    png = _png_bytes()
+    monkeypatch.setattr(
+        httpx,
+        "post",
+        lambda *a, **k: _Resp(200, _image_payload(base64.b64encode(png).decode())),
+    )
+    with factory() as s:
+        project = create_project(ProjectCreate(name="Tokens"), s, user)
+    with factory() as s:
+        grant(GrantRequest(amount=100), s, user)
+    with factory() as s:
+        reply = agent_mod.tool_generate(s, user, project.id, "a fox", factory)
+    assert "generated and attached" in reply.lower()
+    with factory() as s:
+        rows = s.execute(
+            select(UsageEventRow).where(
+                UsageEventRow.user_id == user.id,
+                UsageEventRow.kind == "image",
+            )
+        ).scalars().all()
+    assert len(rows) == 1
+    assert rows[0].tokens == 10904  # provider-reported, not estimated
+
+
 def test_meta_segment_unparseable(monkeypatch, tmp_path):
     monkeypatch.setattr(settings, "meta_api_key", "mk-test")
     monkeypatch.setattr(

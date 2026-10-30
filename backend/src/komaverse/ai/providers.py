@@ -134,6 +134,9 @@ class CloudProvider:
     def _vision_model(self) -> str:
         return settings.ai_vision_model or settings.ai_chat_model
 
+    # Last image-endpoint usage payload, set by generate_image for telemetry.
+    last_usage: dict = {}
+
     def _check(self) -> None:
         if not self._api_key() or not self._base_url():
             raise ProviderUnavailable("AI_BASE_URL / AI_API_KEY not configured")
@@ -170,7 +173,9 @@ class CloudProvider:
                     f"image call failed ({res.status_code}): {res.text[:200]}"
                 )
             try:
-                return base64.b64decode(res.json()["data"][0]["b64_json"])
+                payload = res.json()
+                self.last_usage = _normalize_usage(payload.get("usage"))
+                return base64.b64decode(payload["data"][0]["b64_json"])
             except (ValueError, KeyError, IndexError, TypeError) as exc:
                 raise ProviderError(
                     f"image returned an unreadable response: {exc}"
@@ -458,7 +463,26 @@ def get_provider(name: str) -> AIProvider:
 _CHAT_TIMEOUT = 60.0
 
 
-def chat_complete(
+def _normalize_usage(raw) -> dict:
+    """Provider usage payloads (chat or Responses) into input/output/total.
+
+    Chat completions report prompt/completion/total_tokens; the Responses
+    API reports input/output/total_tokens. Missing or partial payloads
+    yield zeros — callers fall back to estimates.
+    """
+    raw = raw if isinstance(raw, dict) else {}
+    if "prompt_tokens" in raw or "total_tokens" in raw and "input_tokens" not in raw:
+        prompt = raw.get("prompt_tokens", 0) or 0
+        done = raw.get("completion_tokens", 0) or 0
+        total = raw.get("total_tokens", prompt + done) or 0
+    else:
+        prompt = raw.get("input_tokens", 0) or 0
+        done = raw.get("output_tokens", 0) or 0
+        total = raw.get("total_tokens", prompt + done) or 0
+    return {"input": int(prompt), "output": int(done), "total": int(total)}
+
+
+def chat_complete_with_usage(
     *,
     base_url: str,
     api_key: str,
@@ -466,8 +490,8 @@ def chat_complete(
     messages: list[dict],
     tools: list[dict] | None = None,
     extra_headers: dict[str, str] | None = None,
-) -> dict:
-    """POST one chat-completions call; return the first choice message dict.
+) -> tuple[dict, dict]:
+    """POST one chat-completions call; return (message dict, usage dict).
 
     Works against any OpenAI-compatible endpoint (generic cloud, Meta Model
     API, OpenRouter). Transport errors propagate as httpx.HTTPError so the
@@ -494,13 +518,39 @@ def chat_complete(
     if res.status_code >= 400:
         raise ProviderError(f"chat failed ({res.status_code}): {res.text[:200]}")
     try:
-        message = res.json()["choices"][0]["message"]
+        payload = res.json()
+        message = payload["choices"][0]["message"]
     except (ValueError, KeyError, IndexError, TypeError) as exc:
         raise ProviderError(
             f"chat returned an unreadable response: {exc}"
         ) from exc
     if not isinstance(message, dict):
         raise ProviderError("chat returned an unreadable response")
+    return message, _normalize_usage(payload.get("usage"))
+
+
+def chat_complete(
+    *,
+    base_url: str,
+    api_key: str,
+    model: str,
+    messages: list[dict],
+    tools: list[dict] | None = None,
+    extra_headers: dict[str, str] | None = None,
+) -> dict:
+    """POST one chat-completions call; return the first choice message dict.
+
+    Usage is discarded — telemetry that needs token counts uses
+    chat_complete_with_usage instead.
+    """
+    message, _ = chat_complete_with_usage(
+        base_url=base_url,
+        api_key=api_key,
+        model=model,
+        messages=messages,
+        tools=tools,
+        extra_headers=extra_headers,
+    )
     return message
 
 
@@ -631,11 +681,14 @@ def _vision_boxes(
 # ---------------------------------------------------------------------------
 
 
-def _responses_create(*, base_url: str, api_key: str, payload: dict) -> dict:
-    """POST one Responses API turn; return the parsed response dict.
+def _post_responses(
+    *, base_url: str, api_key: str, payload: dict
+) -> tuple[dict, dict]:
+    """POST one Responses API turn; return (response dict, usage dict).
 
     Shared by Muse Image generation and SAM segmentation. Status codes are
     checked manually (no raise_for_status) to match module convention.
+    Usage carries model-reported input/output/total tokens for telemetry.
     """
     try:
         res = httpx.post(
@@ -660,6 +713,16 @@ def _responses_create(*, base_url: str, api_key: str, payload: dict) -> dict:
         raise ProviderError(f"meta responses unreadable: {exc}") from exc
     if not isinstance(data, dict):
         raise ProviderError("meta responses returned an unreadable response")
+    return data, _normalize_usage(data.get("usage"))
+
+
+def _responses_create(*, base_url: str, api_key: str, payload: dict) -> dict:
+    """POST one Responses API turn; return the parsed response dict.
+
+    Usage is discarded — telemetry that needs token counts uses
+    _post_responses instead.
+    """
+    data, _ = _post_responses(base_url=base_url, api_key=api_key, payload=payload)
     return data
 
 
@@ -667,6 +730,9 @@ class MetaProvider:
     """Meta Model API (https://api.meta.ai/v1). Chat, vision, image, voice, SAM."""
 
     name = "meta"
+    # Last Responses-API usage payload (input/output/total tokens), set by
+    # generate_image/segment for telemetry. Read via getattr (absent = {}).
+    last_usage: dict = {}
 
     def generate_image(
         self,
@@ -698,7 +764,7 @@ class MetaProvider:
             turn: str | list[dict] = [{"role": "user", "content": content}]
         else:
             turn = text
-        data = _responses_create(
+        data, self.last_usage = _post_responses(
             base_url=settings.meta_base_url,
             api_key=settings.meta_api_key,
             payload={"model": model, "input": turn},
@@ -812,7 +878,7 @@ class MetaProvider:
             buf = io.BytesIO()
             img.save(buf, format="PNG")
         b64 = base64.b64encode(buf.getvalue()).decode()
-        data = _responses_create(
+        data, self.last_usage = _post_responses(
             base_url=settings.meta_base_url,
             api_key=settings.meta_api_key,
             payload={
@@ -969,6 +1035,8 @@ class OpenRouterProvider:
     """OpenRouter gateway: chat models, image models, async video models."""
 
     name = "openrouter"
+    # Last image-endpoint usage payload, set by generate_image for telemetry.
+    last_usage: dict = {}
 
     def _check(self) -> None:
         if not settings.openrouter_api_key:
@@ -1023,7 +1091,9 @@ class OpenRouterProvider:
                 f"openrouter image failed ({resp.status_code}): {resp.text[:200]}"
             )
         try:
-            first = resp.json()["data"][0]
+            payload = resp.json()
+            self.last_usage = _normalize_usage(payload.get("usage"))
+            first = payload["data"][0]
         except (ValueError, KeyError, IndexError, TypeError) as exc:
             raise ProviderError(
                 f"openrouter image returned an unreadable response: {exc}"

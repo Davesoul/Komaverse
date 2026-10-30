@@ -15,6 +15,13 @@ interface Msg {
   role: "user" | "agent";
   text: string;
   actions?: AgentReply["actions"];
+  job?: {
+    id: string;
+    kind: string;
+    status: string;
+    url: string | null;
+    error: string | null;
+  };
 }
 
 interface MentionItem {
@@ -49,6 +56,48 @@ const GREETING: Msg = {
   role: "agent",
   text: "I operate the studio. Ask for status, projects, detection, directing, clips, captions, cues, export, or image/video generation. ＋ attaches audio/images.",
 };
+
+/** Completion card for a finished background job: status, thumbnail or
+player when there is a result URL, and no dead placeholder text. */
+function JobCard({ job }: { job: NonNullable<Msg["job"]> }) {
+  return (
+    <div>
+      <div style={{ fontWeight: 700, marginBottom: 4 }}>
+        {job.status === "done"
+          ? `Finished ${job.kind} [job ${job.id}]`
+          : `${job.kind} job failed [job ${job.id}]`}
+      </div>
+      {job.status !== "done" ? (
+        <span>{job.error ?? "unknown error"}</span>
+      ) : !job.url ? (
+        <span style={{ color: "var(--kv-muted)" }}>
+          Finished — find it in the Media tab.
+        </span>
+      ) : /\.(png|jpe?g|gif|webp)(\?|$)/i.test(job.url) ? (
+        <img
+          src={job.url.startsWith("/") ? mediaUrl(job.url) : job.url}
+          alt={`${job.kind} result`}
+          style={{ maxWidth: "100%", borderRadius: 4 }}
+        />
+      ) : /\.mp4(\?|$)/i.test(job.url) ? (
+        <video
+          src={job.url.startsWith("/") ? mediaUrl(job.url) : job.url}
+          controls
+          preload="none"
+          style={{ maxWidth: "100%", borderRadius: 4 }}
+        />
+      ) : (
+        <a
+          href={job.url.startsWith("/") ? mediaUrl(job.url) : job.url}
+          target="_blank"
+          rel="noreferrer"
+        >
+          Open result
+        </a>
+      )}
+    </div>
+  );
+}
 
 /** Render text with clickable URLs and highlighted @kind:id mention tokens. */
 function linked(text: string) {
@@ -113,6 +162,11 @@ export default function AgentDock() {
   const abortRef = useRef<AbortController | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
   const [attaching, setAttaching] = useState(false);
+  const [activeJobs, setActiveJobs] = useState<Record<string, { kind: string; progress: number }>>({});
+  const [failed, setFailed] = useState<string | null>(null);
+  const [queued, setQueued] = useState(0);
+  const busyRef = useRef(false);
+  const queueRef = useRef<string[]>([]);
 
   useEffect(() => {
     try {
@@ -223,7 +277,11 @@ export default function AgentDock() {
         }),
       );
       jobs
-        .filter((j) => j.kind === "image" && j.project_id === projectId)
+        .filter(
+          (j) =>
+            (j.kind === "image" || j.kind === "video") &&
+            j.project_id === projectId,
+        )
         .forEach((j) =>
           items.push({
             kind: "gen",
@@ -316,6 +374,10 @@ export default function AgentDock() {
         continue;
       }
       if (job.status === "done" || job.status === "failed") continue;
+      setActiveJobs((prev) => ({
+        ...prev,
+        [id]: { kind: job.kind, progress: job.progress ?? 0 },
+      }));
       let done: typeof job | null = null;
       for (let i = 0; i < 300; i++) {
         await new Promise((r) => setTimeout(r, 2000));
@@ -324,11 +386,22 @@ export default function AgentDock() {
         } catch {
           break;
         }
+        setActiveJobs((prev) =>
+          prev[id]
+            ? { ...prev, [id]: { kind: job.kind, progress: job.progress ?? 0 } }
+            : prev,
+        );
         if (job.status === "done" || job.status === "failed") {
           done = job;
           break;
         }
       }
+      setActiveJobs((prev) => {
+        if (!(id in prev)) return prev;
+        const next = { ...prev };
+        delete next[id];
+        return next;
+      });
       if (!done) {
         setMessages((prev) => [
           ...prev,
@@ -339,11 +412,20 @@ export default function AgentDock() {
         ]);
         continue;
       }
-      const text =
-        done.status === "done"
-          ? `✅ Finished ${done.kind} [job ${done.id}]: ${done.result_url ?? "ready"}`
-          : `❌ ${done.kind} job failed [job ${done.id}]: ${done.error ?? "unknown error"}`;
-      setMessages((prev) => [...prev, { role: "agent", text }]);
+      setMessages((prev) => [
+        ...prev,
+        {
+          role: "agent",
+          text: "",
+          job: {
+            id: done.id,
+            kind: done.kind,
+            status: done.status,
+            url: done.result_url ?? null,
+            error: done.error ?? null,
+          },
+        },
+      ]);
       window.dispatchEvent(
         new CustomEvent("komaverse:agent-job-done", {
           detail: {
@@ -403,13 +485,26 @@ export default function AgentDock() {
     }
   };
 
+  // Follow-ups sent while the agent works queue up and run in order
+  // once the current turn finishes — the chat no longer blocks on long
+  // synchronous generations.
   const send = async (text: string) => {
     const message = text.trim();
-    if (!message || busy) return;
+    if (!message) return;
+    if (busyRef.current) {
+      queueRef.current.push(message);
+      setQueued(queueRef.current.length);
+      setInput("");
+      setMention(null);
+      setMessages((prev) => [...prev, { role: "user", text: message }]);
+      return;
+    }
     setInput("");
     setMention(null);
+    setFailed(null);
     setMessages((prev) => [...prev, { role: "user", text: message }]);
     setBusy(true);
+    busyRef.current = true;
     const ctl = new AbortController();
     abortRef.current = ctl;
     try {
@@ -429,7 +524,7 @@ export default function AgentDock() {
         ),
       ].map((m) => m[1]);
       if (ids.length > 0) void followJobs(ids, res.project_id);
-      // Timeline/data mutations land live in open tabs (Animate, Scan).
+      // Timeline/data mutations land live in open tabs (Render, Scan).
       const MUTATING = [
         "detect_all",
         "auto_direct",
@@ -454,24 +549,44 @@ export default function AgentDock() {
           .catch(() => {});
       }
     } catch (e) {
-      setMessages((prev) => [
-        ...prev,
-        {
-          role: "agent",
-          text:
-            (e as Error).name === "AbortError"
-              ? "Stopped."
-              : `Request failed: ${(e as Error).message}`,
-        },
-      ]);
+      if ((e as Error).name === "AbortError") {
+        queueRef.current = [];
+        setQueued(0);
+        setMessages((prev) => [...prev, { role: "agent", text: "Stopped." }]);
+      } else {
+        const msg = (e as Error).message;
+        const offline = !window.navigator.onLine;
+        const auth = /401|unauthorized|session|sign in/i.test(msg);
+        setFailed(message);
+        setMessages((prev) => [
+          ...prev,
+          {
+            role: "agent",
+            text: offline
+              ? "You're offline — reconnect, then retry."
+              : auth
+                ? "Session expired — sign in again, then retry."
+                : `Request failed: ${msg}`,
+          },
+        ]);
+      }
     } finally {
       abortRef.current = null;
       setBusy(false);
-      requestAnimationFrame(() =>
-        bottomRef.current?.scrollIntoView({ behavior: "smooth" }),
-      );
+      busyRef.current = false;
+      const next = queueRef.current.shift();
+      setQueued(queueRef.current.length);
+      if (next !== undefined) void send(next);
     }
   };
+
+  // Async arrivals (job completions) scroll into view, not just replies.
+  useEffect(() => {
+    if (!open) return;
+    bottomRef.current?.scrollIntoView({
+      behavior: prefersReducedMotion() ? "auto" : "smooth",
+    });
+  }, [messages, open]);
 
   if (!open) {
     return (
@@ -543,7 +658,10 @@ export default function AgentDock() {
             {credits} credits
           </span>
         )}
-        <span style={{ marginLeft: "auto" }}>
+        <span style={{ marginLeft: "auto", display: "flex", gap: 6 }}>
+          <Btn small onClick={() => setMessages([GREETING])} aria-label="Clear chat history">
+            Clear
+          </Btn>
           <Btn small onClick={() => setOpen(false)} aria-label="Close agent">
             Close
           </Btn>
@@ -567,25 +685,72 @@ export default function AgentDock() {
               overflowWrap: "anywhere",
             }}
           >
-            {linked(m.text)}
-            {m.actions && m.actions.length > 0 && (
-              <div style={{ marginTop: 6, display: "flex", flexDirection: "column", gap: 4 }}>
-                {m.actions.map((a, j) => (
-                  <div
-                    key={j}
-                    style={{
-                      fontFamily: "var(--kv-mono)",
-                      fontSize: 11,
-                      color: "var(--kv-muted)",
-                    }}
-                  >
-                    ▸ {a.tool}: {linked(a.summary)}
+            {m.job ? <JobCard job={m.job} /> : (
+              <>
+                {linked(m.text)}
+                {m.actions && m.actions.length > 0 && (
+                  <div style={{ marginTop: 6, display: "flex", flexDirection: "column", gap: 4 }}>
+                    {m.actions.map((a, j) => (
+                      <div
+                        key={j}
+                        style={{
+                          fontFamily: "var(--kv-mono)",
+                          fontSize: 11,
+                          color: "var(--kv-muted)",
+                        }}
+                      >
+                        ▸ {a.tool}: {linked(a.summary)}
+                      </div>
+                    ))}
                   </div>
-                ))}
-              </div>
+                )}
+              </>
             )}
           </div>
         ))}
+        {Object.entries(activeJobs).map(([id, j]) => {
+          const pct = Math.max(0, Math.min(100, Math.round(j.progress * 100)));
+          return (
+            <div
+              key={id}
+              role="status"
+              style={{
+                alignSelf: "flex-start",
+                maxWidth: "88%",
+                background: "var(--kv-inset)",
+                border: "1px solid var(--kv-border)",
+                borderRadius: "var(--kv-radius-sm)",
+                padding: "8px 10px",
+                fontSize: 12,
+              }}
+            >
+              <div>
+                Working on {j.kind} [job {id}] — {pct}%
+              </div>
+              <div
+                role="progressbar"
+                aria-valuenow={pct}
+                aria-valuemin={0}
+                aria-valuemax={100}
+                style={{
+                  height: 6,
+                  borderRadius: 3,
+                  background: "var(--kv-border)",
+                  marginTop: 6,
+                }}
+              >
+                <div
+                  style={{
+                    width: `${pct}%`,
+                    height: "100%",
+                    borderRadius: 3,
+                    background: "var(--kv-accent)",
+                  }}
+                />
+              </div>
+            </div>
+          );
+        })}
         {busy && (
           <div style={{ fontSize: 13, color: "var(--kv-muted)" }}>
             <Spinner /> Working…
@@ -597,13 +762,12 @@ export default function AgentDock() {
       <div style={{ padding: "8px 12px", borderTop: "1px solid var(--kv-border)" }}>
         <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 8 }}>
           {CHIPS.map((c) => (
-            <Btn key={c} small disabled={busy} onClick={() => send(c)}>
+            <Btn key={c} small onClick={() => send(c)}>
               {c}
             </Btn>
           ))}
           <Btn
             small
-            disabled={busy}
             onClick={() => {
               setInput("generate ");
               inputRef.current?.focus();
@@ -614,7 +778,6 @@ export default function AgentDock() {
           </Btn>
           <Btn
             small
-            disabled={busy}
             onClick={() => {
               setInput("generate video ");
               inputRef.current?.focus();
@@ -723,7 +886,7 @@ export default function AgentDock() {
           />
           <Btn
             small
-            disabled={busy || attaching}
+            disabled={attaching}
             onClick={() => fileRef.current?.click()}
             title="Attach audio (becomes a take) or an image (becomes a scan page)"
             aria-label="Attach audio or image"
@@ -751,6 +914,36 @@ export default function AgentDock() {
             </PrimaryBtn>
           )}
         </div>
+        {(queued > 0 || failed) && (
+          <div
+            style={{
+              display: "flex",
+              gap: 6,
+              alignItems: "center",
+              marginTop: 6,
+              fontSize: 12,
+              color: "var(--kv-muted)",
+            }}
+          >
+            {queued > 0 && (
+              <span>
+                {queued} queued — sends when the agent finishes.
+              </span>
+            )}
+            {failed && !busy && (
+              <Btn
+                small
+                onClick={() => {
+                  const m = failed;
+                  setFailed(null);
+                  void send(m);
+                }}
+              >
+                Retry send
+              </Btn>
+            )}
+          </div>
+        )}
       </div>
     </div>
   );

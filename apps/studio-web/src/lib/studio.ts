@@ -57,7 +57,7 @@ export function getDrawFrame(projectId: string): string | null {
 /* Cross-tab jump: pages can't reach the shell's setTab, so they dispatch
  * this event (the project is already published via setCurrentProject, so
  * the target tab restores it on mount). */
-export type StudioTab = "home" | "scan" | "draw" | "animate" | "media";
+export type StudioTab = "home" | "scan" | "draw" | "render" | "media";
 
 export function gotoTab(tab: StudioTab) {
   window.dispatchEvent(new CustomEvent("komaverse:goto-tab", { detail: tab }));

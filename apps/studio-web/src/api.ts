@@ -508,6 +508,12 @@ export const api = {
     }),
   deleteTake: (audioId: string) =>
     req<void>(`/api/v1/audio/${audioId}`, { method: "DELETE" }),
+  frameFromMedia: (projectId: string, source: string, name?: string) =>
+    req<DrawFrame>(`/api/v1/projects/${projectId}/frames/from-media`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ source, name }),
+    }),
   transcribeTake: (audioId: string) =>
     req<Transcript>(`/api/v1/audio/${audioId}/transcribe`, { method: "POST" }),
   addCue: (

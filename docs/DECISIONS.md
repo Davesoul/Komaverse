@@ -163,7 +163,7 @@ Permissions-Policy opens microphone=(self) so the served SPA can record.
 Amendment: YOLO detectors landed — `yolo` follows `KOMA_YOLO_MODEL`
 (`best-comic-panel-detection.pt` default, `backend/models/`), plus a pinned
 `yolo-leoxs22` option; heuristic stays as fallback. Panel/frame previews take
-`?px=` (64..1600) so the Animate player renders contain-fit hi-res stills.
+`?px=` (64..1600) so the Render player renders contain-fit hi-res stills.
 Draw grew G-pen/Japanese/modern presets, Ctrl+scroll zoom, a frames strip
 under the canvas with last-open restore, and canvas-native fps playback with
 loop. Agent chat takes `@frame:`/`@media:`/`@panel:` refs.

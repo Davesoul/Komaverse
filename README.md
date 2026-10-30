@@ -15,13 +15,13 @@ started Oct 28, 2026.
   fallback, cloud with local fallback; missing weights can be fetched
   once from `KOMA_YOLO_LEOXS_URL` / `KOMA_YOLO_URL` on web deploys),
   1:1 true-size viewer, SVG overlay editor (move/reshape/add/delete,
-  reading order), Send-to-Animate handoff
+  reading order), Send-to-Render handoff
 - **Draw:** layered canvas (brush/eraser, pressure, undo/redo, G-pen and
   Japanese/modern presets, Ctrl+scroll zoom), frames strip under the canvas,
   last-open frame auto-opens per project, canvas-native playback at 2–24 fps
   with loop, Krita-style onion skin (red previous / green next, counts +
   opacity, never exported)
-- **Animate:** CapCut-style V1/A1/S1 timeline (proportional blocks, second
+- **Render:** CapCut-style V1/A1/S1 timeline (proportional blocks, second
   ruler, tenths timecode, zoom, drag-reorder, edge-trim with cue `end_sec`),
   per-clip inspector (duration steppers, motion), scenes + clips timeline
   (panels, frames, stills), Ken Burns motion, voiceover recording over

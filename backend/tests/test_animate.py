@@ -684,3 +684,73 @@ def test_motion_frame_moves_pixels_for_every_motion():
         assert not np.array_equal(first, last), motion
     still = motion_frame(base, 320, 180, 1.0, "none")
     assert np.array_equal(still, motion_frame(base, 320, 180, 0.0, "none"))
+
+
+def _page_png(factory, user, project_id, w=200, h=100):
+    import io as _io
+
+    from fastapi import UploadFile as _UploadFile
+    from PIL import Image as _Image
+    from starlette.datastructures import Headers as _Headers
+
+    buf = _io.BytesIO()
+    _Image.new("RGB", (w, h), (10, 20, 30)).save(buf, format="PNG")
+    with factory() as s:
+        return upload_page(
+            project_id,
+            _UploadFile(
+                file=_io.BytesIO(buf.getvalue()),
+                filename="p.png",
+                headers=_Headers({"content-type": "image/png"}),
+            ),
+            s,
+            user,
+        )
+
+
+def test_frame_from_media_page(factory, user):
+    from komaverse.api.animate import FrameFromMedia, frame_from_media
+
+    with factory() as s:
+        project = create_project(ProjectCreate(name="Framing"), s, user)
+    _page_png(factory, user, project.id)
+    with factory() as s:
+        schema = frame_from_media(
+            project.id, FrameFromMedia(source="page 1"), s, user
+        )
+    assert (schema.width, schema.height) == (200, 100)
+    assert len(schema.layers) == 1
+
+
+def test_frame_from_panel_crops(factory, user):
+    from komaverse.api.animate import FrameFromMedia, frame_from_media
+    from komaverse.db_models import PanelRow
+
+    with factory() as s:
+        project = create_project(ProjectCreate(name="Framing"), s, user)
+    page = _page_png(factory, user, project.id)
+    with factory() as s:
+        row = PanelRow(page_id=page.id, x=20.0, y=10.0, w=60.0, h=40.0)
+        s.add(row)
+        s.commit()
+        panel_id = row.id
+    with factory() as s:
+        schema = frame_from_media(
+            project.id, FrameFromMedia(source=f"@panel:{panel_id}"), s, user
+        )
+    assert (schema.width, schema.height) == (60, 40)
+    assert "panel" in schema.name
+
+
+def test_frame_from_unknown_media_rejected(factory, user):
+    from fastapi import HTTPException
+
+    from komaverse.api.animate import FrameFromMedia, frame_from_media
+
+    with factory() as s:
+        project = create_project(ProjectCreate(name="Framing"), s, user)
+    with factory() as s:
+        with pytest.raises(HTTPException):
+            frame_from_media(
+                project.id, FrameFromMedia(source="@panel:nope"), s, user
+            )

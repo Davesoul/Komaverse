@@ -142,7 +142,7 @@ function DurationInput({ value, onCommit }: { value: number; onCommit: (v: numbe
   );
 }
 
-export default function AnimatePage() {
+export default function RenderPage() {
   const [projects, setProjects] = useState<Project[]>([]);
   const [project, setProject] = useState<Project | null>(null);
   const [scenes, setScenes] = useState<Scene[]>([]);
@@ -151,6 +151,9 @@ export default function AnimatePage() {
   const [takes, setTakes] = useState<AudioTake[]>([]);
   const [framePick, setFramePick] = useState("");
   const [pagePick, setPagePick] = useState("");
+  const [panelPick, setPanelPick] = useState("");
+  const [videoPick, setVideoPick] = useState("");
+  const [doneVideos, setDoneVideos] = useState<Job[]>([]);
   const [fps, setFps] = useState("12");
   const [expW, setExpW] = useState("1280");
   const [expH, setExpH] = useState("720");
@@ -227,11 +230,12 @@ export default function AnimatePage() {
   });
 
   const refresh = async (projectId: string, keepScene?: string) => {
-    const [full, sceneList, frameList, takeList, bal] = await Promise.all([
+    const [full, sceneList, frameList, takeList, jobList, bal] = await Promise.all([
       api.getProject(projectId),
       api.listScenes(projectId),
       api.listFrames(projectId),
       api.listTakes(projectId),
+      api.listJobs().catch(() => [] as Job[]),
       api.getBalance().catch(() => null),
     ]);
     setProject(full);
@@ -239,6 +243,11 @@ export default function AnimatePage() {
     setScenes(sceneList);
     setFrames(frameList);
     setTakes(takeList);
+    setDoneVideos(
+      jobList.filter(
+        (j) => j.project_id === projectId && j.kind === "video" && j.status === "done",
+      ),
+    );
     if (bal) setBalance(bal.balance);
     api
       .listEntities(projectId)
@@ -856,6 +865,58 @@ export default function AnimatePage() {
                   onClick={async () => {
                     if (!project) return;
                     await api.addClip(scene.id, { kind: "media", source_id: pagePick, duration: 2 });
+                    await refresh(project.id, scene.id);
+                  }}
+                >
+                  Add
+                </Btn>
+              </div>
+              <div style={{ display: "flex", gap: 6, marginTop: 8 }}>
+                <SelectInput
+                  style={{ flex: 1 }}
+                  value={panelPick}
+                  onChange={(e) => setPanelPick(e.target.value)}
+                  aria-label="Panel to add"
+                >
+                  <option value="">Panel clip…</option>
+                  {(project?.pages ?? []).flatMap((pg, pi) =>
+                    pg.panels.map((pn) => (
+                      <option key={pn.id} value={pn.id}>
+                        PG {pi + 1} · panel {pn.reading_order + 1}
+                      </option>
+                    )),
+                  )}
+                </SelectInput>
+                <Btn
+                  disabled={!panelPick}
+                  onClick={async () => {
+                    if (!project) return;
+                    await api.addClip(scene.id, { kind: "panel", source_id: panelPick, duration: 2 });
+                    await refresh(project.id, scene.id);
+                  }}
+                >
+                  Add
+                </Btn>
+              </div>
+              <div style={{ display: "flex", gap: 6, marginTop: 8 }}>
+                <SelectInput
+                  style={{ flex: 1 }}
+                  value={videoPick}
+                  onChange={(e) => setVideoPick(e.target.value)}
+                  aria-label="Finished video to add"
+                >
+                  <option value="">Video clip…</option>
+                  {doneVideos.map((j) => (
+                    <option key={j.id} value={j.id}>
+                      {j.prompt ? `${j.prompt.slice(0, 40)}` : j.id} ({j.id.slice(0, 6)})
+                    </option>
+                  ))}
+                </SelectInput>
+                <Btn
+                  disabled={!videoPick}
+                  onClick={async () => {
+                    if (!project) return;
+                    await api.addClip(scene.id, { kind: "video", source_id: videoPick, duration: 2 });
                     await refresh(project.id, scene.id);
                   }}
                 >

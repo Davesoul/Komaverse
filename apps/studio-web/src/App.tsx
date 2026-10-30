@@ -12,16 +12,16 @@ import LandingPage from "./pages/LandingPage";
 // Perf: one chunk per editor surface; landing stays in the entry bundle.
 const ScanPage = lazy(() => import("./pages/ScanPage"));
 const DrawPage = lazy(() => import("./pages/DrawPage"));
-const AnimatePage = lazy(() => import("./pages/AnimatePage"));
+const RenderPage = lazy(() => import("./pages/RenderPage"));
 const MediaPage = lazy(() => import("./pages/MediaPage"));
 
-type Tab = "home" | "scan" | "draw" | "animate" | "media";
+type Tab = "home" | "scan" | "draw" | "render" | "media";
 
 const TABS: { id: Tab; label: string; hint: string }[] = [
   { id: "home", label: "Home", hint: "Overview & connection" },
   { id: "scan", label: "Scan", hint: "Import & detect panels" },
   { id: "draw", label: "Draw", hint: "Layered canvas" },
-  { id: "animate", label: "Animate", hint: "Timeline, AI & export" },
+  { id: "render", label: "Render", hint: "Timeline, AI & export" },
   { id: "media", label: "Media", hint: "Library, takes & storage" },
 ];
 
@@ -37,7 +37,8 @@ export default function App() {
         return null;
       }
     })();
-    return TABS.some((x) => x.id === t) ? (t as Tab) : "home";
+    const legacy = t === "animate" ? "render" : t; // pre-rename stored tab
+    return TABS.some((x) => x.id === legacy) ? (legacy as Tab) : "home";
   });
   // The shell tab survives reloads next to the published project id, so a
   // refresh drops you back where you were instead of Home with nothing open.
@@ -106,7 +107,7 @@ export default function App() {
     setOnUnauthorized(() => setUser(null));
   }, []);
 
-  // Pages request shell navigation (e.g. Scan → Animate handoff) via
+  // Pages request shell navigation (e.g. Scan → Render handoff) via
   // lib/studio gotoTab; the detail is validated like stored tab ids.
   useEffect(() => {
     const goto = (e: Event) => {
@@ -340,7 +341,7 @@ export default function App() {
               marginBottom: 20,
             }}
           >
-            {(["scan", "draw", "animate", "media"] as Tab[]).map((id, i) => {
+            {(["scan", "draw", "render", "media"] as Tab[]).map((id, i) => {
               const t = TABS.find((x) => x.id === id)!;
               return (
                 <button
@@ -460,8 +461,8 @@ export default function App() {
               <ScanPage />
             ) : tab === "draw" ? (
               <DrawPage />
-            ) : tab === "animate" ? (
-              <AnimatePage />
+            ) : tab === "render" ? (
+              <RenderPage />
             ) : (
               <MediaPage />
             )}

@@ -8,7 +8,7 @@ Web (PWA) first, desktop (Tauri) second, mobile out of scope for v1.
 
 ## 2. Core flows (must all work E2E by v1)
 
-1. **Scan → animate:** import page(s) → detect panels (YOLO `yolo` /
+1. **Scan → render:** import page(s) → detect panels (YOLO `yolo` /
    `yolo-leoxs22`, heuristic fallback, cloud AI) → panels become timeline
    clips → Ken Burns / AI motion → export MP4.
 2. **Draw:** canvas with layers + brushes → frames (strip under canvas,
@@ -90,4 +90,4 @@ project-file migration, self-hosted auth (Clerk or local only).
 ## 10. Definition of done (demo)
 
 `compose up` + `npm run dev` → import 1 manga page → detect panels →
-animate → export MP4, all in the desktop app, with credits deducted once.
+render → export MP4, all in the desktop app, with credits deducted once.

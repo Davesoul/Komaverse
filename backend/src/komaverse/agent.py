@@ -31,12 +31,14 @@ from komaverse.ai.providers import (
     chat_complete,
     chat_configured,
     get_chat_config,
+    chat_complete_with_usage,
 )
 from komaverse.api.ai import COSTS, PROVIDERS, add_entry, get_balance, list_entities, run_ai_job
 from komaverse.api.animate import (
     MOTIONS,
     ClipCreate,
     FrameCreate,
+    frame_from_media_source,
     SceneCreate,
     add_clip,
     create_frame,
@@ -705,7 +707,7 @@ def find_generated_frame(session, job):
 
 
 def resolve_clip_source(text, session, user, project_id):
-    m = re.search(r"@(frame|panel|gen):([A-Za-z0-9_-]+)", text)
+    m = re.search(r"@(frame|panel|gen|media):([A-Za-z0-9_-]+)", text)
     if m:
         kind, rid = m.group(1), m.group(2)
         if kind == "frame":
@@ -719,6 +721,11 @@ def resolve_clip_source(text, session, user, project_id):
             if panel is None or page is None or page.project_id != project_id:
                 return f"Unknown panel {rid} in this project."
             return ("panel", rid)
+        if kind == "media":
+            page = session.get(PageRow, rid)
+            if page is None or page.project_id != project_id:
+                return f"Unknown scan page {rid} in this project."
+            return ("media", rid)
         job = session.get(JobRow, rid)
         if job is None or job.user_id != user.id or job.project_id != project_id or job.kind not in ("image", "video"):
             return f"Unknown generation {rid}."
@@ -740,7 +747,7 @@ def resolve_clip_source(text, session, user, project_id):
         if not 0 <= i < len(pages):
             return f"Page {m.group(1)} does not exist - this project has {len(pages)}."
         return ("media", pages[i].id)
-    return "Say what to add - @frame:/@panel:/@gen:, 'page N', or 'create a frame and add it'."
+    return "Say what to add - @frame:/@panel:/@gen:/@media:, 'page N', or 'create a frame and add it'."
 
 
 def resolve_video_job(text, session, user, project_id):
@@ -870,6 +877,8 @@ def resolve_take(text, session, user, project_id):
     for t in takes:
         if t.name and t.name.lower() in lowered:
             return t
+    if len(takes) == 1:
+        return takes[0]
     choices = "; ".join(f"'{t.name or 'Untitled'}'" for t in takes)
     return f"Which take? Say @take:..., 'latest', or a name ({choices})."
 
@@ -961,102 +970,13 @@ def tool_transcribe_audio(
     return f"Transcript of '{row.name or 'take'}' ({len(segs)} turns): {head}"
 
 
-def parse_media_source(text):
-    m = re.search(r"@(media|gen|frame):([A-Za-z0-9_-]+)", text)
-    if m:
-        return (m.group(1), m.group(2))
-    m = re.search(r"\b(?:page|pg)\s*(\d+)\b", text)
-    if m:
-        return ("page_index", m.group(1))
-    return None
-
-
-def load_media_image(session, user, project_id, source):
-    parsed = parse_media_source(source) if isinstance(source, str) else None
-    if isinstance(source, str) and parsed is None:
-        parsed = ("id", source.strip())
-    kind, ref = parsed
-    if kind == "id":
-        page = session.get(PageRow, ref)
-        if page is not None and page.project_id == project_id:
-            kind, ref = "page", ref
-        else:
-            job = session.get(JobRow, ref)
-            if job is not None and job.user_id == user.id and job.project_id == project_id:
-                kind = "gen"
-            else:
-                row = session.get(FrameRow, ref)
-                if row is not None and row.project_id == project_id:
-                    kind = "frame"
-                else:
-                    return f"Unknown media {ref} - use @media:/@gen:/@frame: or 'page N'."
-    if kind == "page_index":
-        p = get_project(project_id, session, user)
-        pages = sorted(p.pages, key=lambda pg: pg.index)
-        i = int(ref) - 1
-        if not 0 <= i < len(pages):
-            return f"Page {ref} does not exist - this project has {len(pages)}."
-        kind, ref = "page", pages[i].id
-    if kind == "page" or kind == "media":
-        page = session.get(PageRow, ref)
-        if page is None or page.project_id != project_id:
-            return f"Unknown scan page {ref} in this project."
-        try:
-            data = storage.resolve(page.image_path).read_bytes()
-        except OSError:
-            return f"Scan file for page {page.index + 1} is missing."
-        return (data, f"scan page {page.index + 1}")
-    if kind == "gen":
-        job = session.get(JobRow, ref)
-        if job is None or job.user_id != user.id or job.project_id != project_id:
-            return f"Unknown generation {ref}."
-        if job.kind != "image":
-            return "Only image generations can become frames - video renders stay in the Generate panel."
-        if job.status != "done" or not job.result_url:
-            return f"Job {ref} is still {job.status} - ask me to check it when done."
-        rel = job.result_url.split("/media/", 1)[-1]
-        try:
-            data = storage.resolve(rel).read_bytes()
-        except OSError:
-            return f"Artifact for job {ref} is missing."
-        return (data, f"generation '{job.prompt[:40]}'")
-    if kind == "frame":
-        row = session.get(FrameRow, ref)
-        if row is None or row.project_id != project_id:
-            return f"Unknown frame {ref} in this project."
-        from komaverse.renderer import composite_frame_image
-        buf = io.BytesIO()
-        composite_frame_image(row).convert("RGB").save(buf, format="PNG")
-        return (buf.getvalue(), f"frame '{row.name or 'Untitled'}'")
-    return f"Unknown media {ref} - use @media:/@gen:/@frame: or 'page N'."
-
-
 def tool_frame_from_media(session, user, project_id, source, name=None):
-    loaded = load_media_image(session, user, project_id, source)
-    if isinstance(loaded, str):
-        return loaded
-    data, label = loaded
+    """Draw frame from a scan page, panel, generation, or frame."""
     try:
-        img = Image.open(io.BytesIO(data))
-        w, h = img.size
-        fmt = (img.format or "PNG").upper()
-    except Exception:
-        return f"Could not decode {label}."
-    longest = max(w, h)
-    if longest > 4096:
-        scale = 4096 / longest
-        w, h = max(8, round(w * scale)), max(8, round(h * scale))
-    w, h = max(8, w), max(8, h)
-    if fmt not in ("PNG", "JPEG", "JPG"):
-        buf = io.BytesIO()
-        img.convert("RGB").save(buf, format="PNG")
-        data, fmt = buf.getvalue(), "PNG"
-    mime = "image/jpeg" if fmt in ("JPEG", "JPG") else "image/png"
-    schema = create_frame(project_id, FrameCreate(name=(name or f"Media: {label}")[:200], width=w, height=h), session, user)
-    b64 = base64.b64encode(data).decode()
-    session.add(LayerRow(frame_id=schema.id, name="media", layer_order=0, data_url=f"data:{mime};base64,{b64}"))
-    session.commit()
-    return f"Created frame '{schema.name}' from {label} [frame {schema.id}] ({w}x{h})."
+        schema = frame_from_media_source(session, user, project_id, source, name)
+    except HTTPException as exc:
+        return str(exc.detail)
+    return f"Created frame '{schema.name}' [frame {schema.id}]."
 
 
 CREATE_PROJECT_PHRASES = (
@@ -1131,10 +1051,18 @@ def demo_turn(
             user,
             parse_project_name(message),
         )
-    elif "job" in text and any(k in text for k in JOB_STATUS_WORDS):
+    elif ("job" in text or "video" in text) and any(k in text for k in JOB_STATUS_WORDS):
         jid = parse_job_id(message)
         if not jid:
-            reply = "Which job? Paste its [job id] — e.g. \"check job abc123\"."
+            resolved = resolve_video_job(message, session, user, project_id)
+            if isinstance(resolved, tuple):
+                reply = run("check_job", tool_check_job, session, user, resolved[1])
+            else:
+                pending = session.execute(select(JobRow.id).where(JobRow.user_id == user.id, JobRow.project_id == project_id, JobRow.kind == "video", JobRow.status != "done")).scalars().first()
+                if pending:
+                    reply = f"Job {pending} is still running - ask me again in a bit."
+                else:
+                    reply = resolved
         else:
             reply = run("check_job", tool_check_job, session, user, jid)
     elif _wants_video(text):
@@ -1200,10 +1128,10 @@ def demo_turn(
         else:
             reply = run("add_subtitles", tool_add_subtitles, session, user, project_id, parts, _parse_scene_ref(message))
     elif (
-        (re.search(r"@(frame|panel|gen):", text) or re.search(r"\b(?:page|pg)\s*\d+", text) or any(p in text for p in CREATE_FRAME_PHRASES))
+        (re.search(r"@(frame|panel|gen|media):", text) or re.search(r"\b(?:page|pg)\s*\d+", text) or any(p in text for p in CREATE_FRAME_PHRASES))
         and (any(k in text for k in TIMELINE_WORDS) or any(k in text for k in ("animate", "direct", "cut")))
     ):
-        if any(p in text for p in CREATE_FRAME_PHRASES) and not re.search(r"@(frame|panel|gen):", text) and not re.search(r"\b(?:page|pg)\s*\d+", text):
+        if any(p in text for p in CREATE_FRAME_PHRASES) and not re.search(r"@(frame|panel|gen|media):", text) and not re.search(r"\b(?:page|pg)\s*\d+", text):
             created = run("create_frame", tool_create_frame, session, user, project_id)
             m = re.search(r"\[frame ([A-Za-z0-9_-]+)\]", actions[-1]["summary"])
             if not m:
@@ -1255,13 +1183,23 @@ def demo_turn(
             if text.startswith(prefix):
                 prompt = message[len(prefix):].strip(" :")
                 break
+        add_it = bool(re.search(r"\s+(?:and|then)\s+add\s+(it|this|that|them)\s*[.!,;:]*$", prompt, re.IGNORECASE))
+        if add_it:
+            prompt = re.sub(r"\s+(?:and|then)\s+add\s+(it|this|that|them)\s*[.!,;:]*$", "", prompt, flags=re.IGNORECASE).strip(" ,.:")
         if not prompt:
             return "Tell me what to generate — e.g. \"generate a moonlit robot\".", []
         reply = run(
             "create_image", tool_generate, session, user, project_id, prompt, job_factory
         )
+        if add_it:
+            m = re.search(r"\[frame ([A-Za-z0-9_-]+)\]", actions[-1]["summary"])
+            if m:
+                chained = run("add_clip", tool_add_clip, session, user, project_id, "frame", m.group(1), _parse_scene_ref(message), parse_seconds(message) or 2.0, (parse_motions(message) or ["none"])[0])
+                reply = f"{reply} {chained}"
+            else:
+                reply += " I could not place it on the timeline - say which frame to add."
     elif "frame" in text and (
-        re.search(r"@(media|gen|frame):", text)
+        re.search(r"@(media|gen|frame|panel):", text)
         or re.search(r"\b(?:page|pg)\s*\d+", text)
         or ("from" in text and any(k in text for k in ("page", "scan", "media", "generation", "gen", "photo", "picture")))
         or "duplicate" in text
@@ -1489,7 +1427,7 @@ _TOOLS_SCHEMA = [
         "type": "function",
         "function": {
             "name": "frame_from_media",
-            "description": "Create a draw frame from a scan page, image generation, or frame (@media:/@gen:/@frame: id, or 'page N').",
+            "description": "Create a draw frame from a scan page, detected panel, image generation, or frame (@media:/@gen:/@frame:/@panel: id, or 'page N').",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -1537,17 +1475,21 @@ def cloud_turn(
     ]
     actions: list[dict] = []
     base_url, api_key, model = get_chat_config()
+    total_tokens = 0
     for _ in range(6):
-        msg = chat_complete(
+        msg, usage = chat_complete_with_usage(
             base_url=base_url,
             api_key=api_key,
             model=model,
             messages=messages,
             tools=_TOOLS_SCHEMA,
         )
+        total_tokens += usage.get("total", 0)
         calls = msg.get("tool_calls") or []
         if not calls:
-            return msg.get("content") or "Done.", actions
+            reply_text = msg.get("content") or "Done."
+            record_usage(session, user.id, "chat", model, total_tokens or (len(message) + len(reply_text)) // 4)
+            return reply_text, actions
         messages.append(msg)
         for call in calls:
             name = call["function"]["name"]
@@ -1713,6 +1655,7 @@ def cloud_turn(
                     "content": result[:2000],
                 }
             )
+    record_usage(session, user.id, "chat", model, total_tokens or (len(message) + 40) // 4)
     return "I ran out of steps — try a smaller request.", actions
 
 
@@ -1806,11 +1749,6 @@ def run_agent_turn(
             )
             target = _adopt_created_project(actions, session, user, target)
             schema = get_project(target, session, user)
-            try:
-                brain = get_chat_config()[2]
-            except Exception:
-                brain = settings.ai_provider
-            record_usage(session, user.id, "chat", brain, (len(message) + len(reply)) // 4)
             return {
                 "reply": reply,
                 "project_id": target,

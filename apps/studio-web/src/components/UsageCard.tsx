@@ -278,8 +278,8 @@ export default function UsageCard() {
             </tbody>
           </table>
           <p style={{ fontSize: 11, color: "var(--kv-faint)", margin: "8px 0 0" }}>
-            Token counts for chats are estimates (≈ characters ÷ 4).
-            Detection and generation calls are counted by detector and model.
+            Tokens are provider-reported when available, estimated otherwise.
+            Detection, transcription, and export calls are counted by tool.
           </p>
         </>
       )}

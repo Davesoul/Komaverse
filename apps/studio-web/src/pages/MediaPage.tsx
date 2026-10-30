@@ -459,7 +459,7 @@ export default function MediaPage() {
           <section>
             <SectionTitle>Voice takes ({takesShown.length}{takesShown.length !== takes.length ? ` of ${takes.length}` : ""})</SectionTitle>
             {takes.length === 0 ? (
-              <EmptyState title="No takes" hint="Record or upload voice takes from the Cut tab." />
+              <EmptyState title="No takes" hint="Record or upload voice takes from the Render tab." />
             ) : takesShown.length === 0 ? (
               <EmptyState title="No matches" hint="Nothing matches the current search." />
             ) : (
@@ -507,7 +507,7 @@ export default function MediaPage() {
           <section>
             <SectionTitle>AI generations ({gensShown.length}{gensShown.length !== aiJobs.length ? ` of ${aiJobs.length}` : ""})</SectionTitle>
             {aiJobs.length === 0 ? (
-              <EmptyState title="No generations" hint="Generate images from the Cut tab." />
+              <EmptyState title="No generations" hint="Generate images from the Render tab." />
             ) : gensShown.length === 0 ? (
               <EmptyState title="No matches" hint="Nothing matches the current search or filter." />
             ) : (
@@ -578,6 +578,29 @@ export default function MediaPage() {
                       <div className="kv-nums" style={{ fontSize: 11, color: "var(--kv-muted)" }}>
                         {j.id} · {j.status}
                       </div>
+                      {j.status === "done" && j.kind === "image" && (
+                        <div style={{ marginTop: 6 }}>
+                          <Btn
+                            small
+                            disabled={busy === "Framing…"}
+                            onClick={async () => {
+                              if (!project) return;
+                              setBusy("Framing…");
+                              try {
+                                const f = await api.frameFromMedia(project.id, `@gen:${j.id}`);
+                                setFrames(await api.listFrames(project.id));
+                                setNotice(`Framed as '${f.name}' — open it in Draw.`);
+                              } catch (e) {
+                                setNotice(`Frame failed: ${(e as Error).message}`);
+                              } finally {
+                                setBusy("");
+                              }
+                            }}
+                          >
+                            Frame it
+                          </Btn>
+                        </div>
+                      )}
                     </div>
                   </div>
                 ))}
@@ -615,7 +638,7 @@ export default function MediaPage() {
           <section>
             <SectionTitle>Renders ({exports.length})</SectionTitle>
             {exports.length === 0 ? (
-              <EmptyState title="No renders" hint="Export the timeline from the Cut tab." />
+              <EmptyState title="No renders" hint="Export the timeline from the Render tab." />
             ) : (
               <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
                 {exports.map((j) => (

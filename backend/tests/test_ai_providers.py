@@ -10,7 +10,7 @@ import pytest
 from conftest import create_user
 from fastapi import BackgroundTasks, HTTPException
 from PIL import Image
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, select
 from sqlalchemy.orm import sessionmaker
 
 import komaverse.agent as agent_mod
@@ -36,7 +36,7 @@ from komaverse.api.ai import (
 )
 from komaverse.api.scans import ProjectCreate, create_project
 from komaverse.config import settings
-from komaverse.db_models import Base, UserRow
+from komaverse.db_models import Base, UsageEventRow, UserRow
 
 
 @pytest.fixture
@@ -646,17 +646,18 @@ def test_agent_cloud_turn_uses_meta_config(factory, user, monkeypatch):
     monkeypatch.setattr(settings, "meta_api_key", "mk-test")
     seen = {}
     script = iter([
-        {"tool_calls": [{"id": "c1",
+        ({"tool_calls": [{"id": "c1",
                          "function": {"name": "project_status",
                                       "arguments": "{}"}}]},
-        {"content": "all good"},
+         {"input": 10, "output": 5, "total": 15}),
+        ({"content": "all good"}, {"input": 3, "output": 2, "total": 5}),
     ])
 
     def _fake_chat(**kw):
         seen.update(kw)
         return next(script)
 
-    monkeypatch.setattr(agent_mod, "chat_complete", _fake_chat)
+    monkeypatch.setattr(agent_mod, "chat_complete_with_usage", _fake_chat)
     with factory() as s:
         project = create_project(ProjectCreate(name="AI"), s, user)
     with factory() as s:
@@ -665,6 +666,14 @@ def test_agent_cloud_turn_uses_meta_config(factory, user, monkeypatch):
     assert seen["model"] == "muse-spark-1.3"
     assert actions and actions[0]["tool"] == "project_status"
     assert reply == "all good"
+    with factory() as s:
+        rows = s.execute(
+            select(UsageEventRow).where(
+                UsageEventRow.user_id == user.id,
+                UsageEventRow.kind == "chat",
+            )
+        ).scalars().all()
+    assert sum(r.tokens for r in rows) == 20  # 15 + 5 provider-reported
 
 
 def test_agent_falls_back_to_demo_when_meta_down(factory, user, monkeypatch):

@@ -3,16 +3,20 @@ all data scoped to the current user."""
 
 from __future__ import annotations
 
+import base64
 import io
 import json
 import logging
+import re
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Response
 from fastapi.responses import FileResponse
+from PIL import Image
 from pydantic import BaseModel
 from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
+from komaverse import storage
 from komaverse.api.usage import record_usage
 from komaverse.auth import ensure_owner, get_current_user, own_project
 from komaverse.config import settings
@@ -567,6 +571,195 @@ def duplicate_frame(
     session.commit()
     session.refresh(copy, ["layers"])
     return copy.to_schema()
+
+
+def parse_media_source(text: str):
+    """@-mention or 'page N' into (kind, id).
+
+    Panels ride along: a panel crops to a frame as well as clipping to
+    the timeline.
+    """
+    m = re.search(r"@(media|gen|frame|panel):([A-Za-z0-9_-]+)", text)
+    if m:
+        return (m.group(1), m.group(2))
+    m = re.search(r"\b(?:page|pg)\s*(\d+)\b", text)
+    if m:
+        return ("page_index", m.group(1))
+    return None
+
+
+def load_media_image(session: Session, user: UserRow, project_id: str, source):
+    """Resolve a media source to (png_bytes, label). Raises HTTPException."""
+    project = own_project(session, user, project_id)
+    parsed = parse_media_source(source) if isinstance(source, str) else None
+    if isinstance(source, str) and parsed is None:
+        parsed = ("id", source.strip())
+    kind, ref = parsed
+    if kind == "id":
+        page = session.get(PageRow, ref)
+        if page is not None and page.project_id == project.id:
+            kind, ref = "page", ref
+        else:
+            job = session.get(JobRow, ref)
+            if (
+                job is not None
+                and job.user_id == user.id
+                and job.project_id == project.id
+            ):
+                kind = "gen"
+            else:
+                row = session.get(FrameRow, ref)
+                if row is not None and row.project_id == project.id:
+                    kind = "frame"
+                else:
+                    raise HTTPException(
+                        400,
+                        f"Unknown media {ref} - use @media:/@gen:/@frame:/@panel: or 'page N'.",
+                    )
+    if kind == "page_index":
+        pages = session.execute(
+            select(PageRow)
+            .where(PageRow.project_id == project.id)
+            .order_by(PageRow.index)
+        ).scalars().all()
+        try:
+            i = int(ref) - 1
+        except (TypeError, ValueError):
+            i = -1
+        if not 0 <= i < len(pages):
+            raise HTTPException(
+                400, f"Page {ref} does not exist - this project has {len(pages)}."
+            )
+        kind, ref = "page", pages[i].id
+    if kind == "page" or kind == "media":
+        page = session.get(PageRow, ref)
+        if page is None or page.project_id != project.id:
+            raise HTTPException(400, f"Unknown scan page {ref} in this project.")
+        try:
+            data = storage.resolve(page.image_path).read_bytes()
+        except OSError:
+            raise HTTPException(400, f"Scan file for page {page.index + 1} is missing.")
+        return (data, f"scan page {page.index + 1}")
+    if kind == "panel":
+        panel = session.get(PanelRow, ref)
+        page = session.get(PageRow, panel.page_id) if panel else None
+        if panel is None or page is None or page.project_id != project.id:
+            raise HTTPException(400, f"Unknown panel {ref} in this project.")
+        try:
+            img = Image.open(
+                io.BytesIO(storage.resolve(page.image_path).read_bytes())
+            ).convert("RGB")
+        except Exception:
+            raise HTTPException(400, f"Scan file for page {page.index + 1} is missing.")
+        w, h = img.size
+        x0, y0 = max(0, int(panel.x)), max(0, int(panel.y))
+        x1, y1 = min(w, int(panel.x + panel.w)), min(h, int(panel.y + panel.h))
+        if x1 <= x0 or y1 <= y0:
+            raise HTTPException(400, f"Panel {ref} has an empty box.")
+        buf = io.BytesIO()
+        img.crop((x0, y0, x1, y1)).save(buf, format="PNG")
+        return (
+            buf.getvalue(),
+            f"panel {panel.reading_order + 1} on page {page.index + 1}",
+        )
+    if kind == "gen":
+        job = session.get(JobRow, ref)
+        if job is None or job.user_id != user.id or job.project_id != project.id:
+            raise HTTPException(400, f"Unknown generation {ref}.")
+        if job.kind != "image":
+            raise HTTPException(
+                400,
+                "Only image generations can become frames - video renders stay in the Generate panel.",
+            )
+        if job.status != "done" or not job.result_url:
+            raise HTTPException(
+                400, f"Job {ref} is still {job.status} - ask me to check it when done."
+            )
+        rel = job.result_url.split("/media/", 1)[-1]
+        try:
+            data = storage.resolve(rel).read_bytes()
+        except OSError:
+            raise HTTPException(400, f"Artifact for job {ref} is missing.")
+        return (data, f"generation '{job.prompt[:40]}'")
+    if kind == "frame":
+        row = session.get(FrameRow, ref)
+        if row is None or row.project_id != project.id:
+            raise HTTPException(400, f"Unknown frame {ref} in this project.")
+        buf = io.BytesIO()
+        composite_frame_image(row).convert("RGB").save(buf, format="PNG")
+        return (buf.getvalue(), f"frame '{row.name or 'Untitled'}'")
+    raise HTTPException(
+        400, f"Unknown media {ref} - use @media:/@gen:/@frame:/@panel: or 'page N'."
+    )
+
+
+def frame_from_media_source(
+    session: Session,
+    user: UserRow,
+    project_id: str,
+    source,
+    name: str | None = None,
+) -> DrawFrame:
+    """Create a draw frame from a scan page, panel, generation, or frame.
+
+    Shared by the agent tool, MCP, and the from-media route so manual and
+    automatic framing behave identically.
+    """
+    data, label = load_media_image(session, user, project_id, source)
+    try:
+        img = Image.open(io.BytesIO(data))
+        w, h = img.size
+        fmt = (img.format or "PNG").upper()
+    except Exception:
+        raise HTTPException(400, f"Could not decode {label}.")
+    longest = max(w, h)
+    if longest > MAX_FRAME_DIM:
+        scale = MAX_FRAME_DIM / longest
+        w, h = max(8, round(w * scale)), max(8, round(h * scale))
+    w, h = max(8, w), max(8, h)
+    if fmt not in ("PNG", "JPEG", "JPG"):
+        buf = io.BytesIO()
+        img.convert("RGB").save(buf, format="PNG")
+        data, fmt = buf.getvalue(), "PNG"
+    mime = "image/jpeg" if fmt in ("JPEG", "JPG") else "image/png"
+    schema = create_frame(
+        project_id,
+        FrameCreate(name=(name or f"Media: {label}")[:200], width=w, height=h),
+        session,
+        user,
+    )
+    b64 = base64.b64encode(data).decode()
+    session.add(
+        LayerRow(
+            frame_id=schema.id,
+            name="media",
+            layer_order=0,
+            data_url=f"data:{mime};base64,{b64}",
+        )
+    )
+    session.commit()
+    fresh = session.get(FrameRow, schema.id)
+    return fresh.to_schema() if fresh is not None else schema
+
+
+class FrameFromMedia(BaseModel):
+    source: str = ""  # @media:/@gen:/@frame:/@panel: id, or 'page N'
+    name: str | None = None
+
+
+@router.post(
+    "/projects/{project_id}/frames/from-media",
+    response_model=DrawFrame,
+    status_code=201,
+)
+def frame_from_media(
+    project_id: str,
+    body: FrameFromMedia,
+    session: Session = Depends(get_session),
+    user: UserRow = Depends(get_current_user),
+):
+    """Manual framing: the UI twin of the agent's frame-from-media tool."""
+    return frame_from_media_source(session, user, project_id, body.source, body.name)
 
 
 @router.get("/frames/{frame_id}/thumbnail")

@@ -404,7 +404,7 @@ html {
   background: transparent;
 }
 
-/* Two-column workspace layout shared by Scan/Draw/Animate. */
+/* Two-column workspace layout shared by Scan/Draw/Render. */
 .kv-grid {
   display: flex;
   gap: 16px;

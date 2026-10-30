@@ -6,7 +6,7 @@ build first. Source: live vendor docs + in-repo audit, Oct 30 2026.
 ## Rivals in one line each
 
 - **Higgsfield** — AI-native video suite: 30+ models, 50–70+ camera presets,
-  Soul/Soul ID character consistency, Speak avatars. Starts where our Animate
+  Soul/Soul ID character consistency, Speak avatars. Starts where our Render
   tab ends (generative motion). No drawing, no timeline, no manga pipeline.
 - **AI image/video leaders** — Midjourney (art quality, cheapest image→video),
   Kling (motion realism, multi-shot Director, native audio), Runway (camera
