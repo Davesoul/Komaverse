@@ -481,6 +481,144 @@ class FakeProvider:
         return [{"x": 0.0, "y": 0.0, "w": float(w), "h": float(h)}]
 
 
+def parse_freetts_voice(value: str | None) -> tuple[str, str]:
+    """Split a free-tts voice id ("engine:voice") into its parts.
+
+    Blank falls back to the studio default; a bare name without a colon
+    is a Kokoro voice on the default engine.
+    """
+    raw = (value or "").strip() or settings.freetts_voice_model
+    if ":" in raw:
+        engine, voice = raw.split(":", 1)
+        return (engine.strip() or "kokoro", voice.strip() or "af_sarah")
+    return ("kokoro", raw.strip() or "af_sarah")
+
+
+class ElevenLabsProvider:
+    """ElevenLabs cloud TTS (https://api.elevenlabs.io). Voiceovers only."""
+
+    name = "elevenlabs"
+
+    def synthesize(
+        self,
+        text: str,
+        *,
+        voice: str | None = None,
+        model: str | None = None,
+    ) -> bytes:
+        """Text -> MP3 bytes via /v1/text-to-speech/{voice_id}."""
+        if not settings.elevenlabs_api_key:
+            raise ProviderError(
+                "elevenlabs voice needs ELEVENLABS_API_KEY (elevenlabs.io)"
+            )
+        body = (text or "").strip()
+        if not body:
+            raise ProviderError("nothing to speak: text is empty")
+        voice_id = (voice or "").strip() or settings.elevenlabs_voice_model
+        url = (
+            f"{settings.elevenlabs_base_url.rstrip('/')}"
+            f"/v1/text-to-speech/{voice_id}"
+        )
+        try:
+            res = httpx.post(
+                url,
+                headers={
+                    "xi-api-key": settings.elevenlabs_api_key,
+                    "Content-Type": "application/json",
+                    "Accept": "audio/mpeg",
+                },
+                json={
+                    "text": body,
+                    "model_id": model or settings.elevenlabs_tts_model,
+                },
+                timeout=180.0,
+            )
+        except httpx.HTTPError as exc:
+            raise ProviderUnavailable(
+                f"elevenlabs request failed: {exc}"
+            ) from exc
+        if res.status_code == 401:
+            raise ProviderError(
+                "elevenlabs rejected the API key (401) — check ELEVENLABS_API_KEY"
+            )
+        if res.status_code == 429:
+            raise ProviderError(
+                "elevenlabs rate limit exceeded (429) — retry later"
+            )
+        if res.status_code == 422:
+            raise ProviderError(
+                f"elevenlabs rejected the voice/model (422): {res.text[:200]}"
+            )
+        if res.status_code >= 400:
+            raise ProviderError(
+                f"elevenlabs TTS failed ({res.status_code}): {res.text[:200]}"
+            )
+        data = res.content
+        if not data:
+            raise ProviderError("elevenlabs returned empty audio")
+        return data
+
+
+def synthesize_freetts(
+    text: str,
+    *,
+    engine: str | None = None,
+    voice: str | None = None,
+    lang: str = "en",
+) -> bytes:
+    """Text -> MP3 bytes via the local free-tts server (/api/generate).
+
+    The server must be running (`python server.py` in D:\\Coding\\free-tts);
+    Komaverse never spawns it — the 400 names the fix when it is down.
+    Returns the generated file bytes (fetched from /api/files/<name>).
+    """
+    body = (text or "").strip()
+    if not body:
+        raise ProviderError("nothing to speak: text is empty")
+    base = settings.freetts_base_url.rstrip("/")
+    default_engine, default_voice = parse_freetts_voice(settings.freetts_voice_model)
+    payload = {
+        "text": body,
+        "engine": (engine or "").strip() or default_engine,
+        "voice": (voice or "").strip() or default_voice,
+        "lang": (lang or "").strip() or "en",
+    }
+    timeout = max(settings.freetts_timeout_sec, 30)
+    try:
+        res = httpx.post(f"{base}/api/generate", json=payload, timeout=timeout)
+    except httpx.HTTPError as exc:
+        raise ProviderUnavailable(
+            "free-tts server unreachable at "
+            f"{base} — start it with `python server.py` in D:\\Coding\\free-tts "
+            f"({exc})"
+        ) from exc
+    if res.status_code >= 400:
+        detail = ""
+        try:
+            detail = str(res.json().get("error") or "")
+        except ValueError:
+            detail = res.text[:200]
+        raise ProviderError(f"free-tts generate failed ({res.status_code}): {detail[:200]}")
+    try:
+        data = res.json()
+    except ValueError as exc:
+        raise ProviderError("free-tts returned non-JSON") from exc
+    if not data.get("ok"):
+        raise ProviderError(f"free-tts refused: {data.get('error') or 'unknown'}")
+    name = (data.get("file") or {}).get("name") or ""
+    if not name:
+        raise ProviderError("free-tts gave no file name")
+    try:
+        got = httpx.get(f"{base}/api/files/{name}", timeout=timeout)
+    except httpx.HTTPError as exc:
+        raise ProviderUnavailable(f"free-tts file fetch failed: {exc}") from exc
+    if got.status_code >= 400 or not got.content:
+        raise ProviderError(
+            f"free-tts file fetch failed ({got.status_code})"
+        )
+    return got.content
+
+
 def get_provider(name: str) -> AIProvider:
     if name == "cloud":
         return CloudProvider()

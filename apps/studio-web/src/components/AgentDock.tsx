@@ -176,6 +176,8 @@ export default function AgentDock() {
     image: "",
     video: "",
     transcribe: "",
+    voiceProvider: "free-tts",
+    voice: "",
   });
   const [brainSaving, setBrainSaving] = useState(false);
   const [brainError, setBrainError] = useState<string | null>(null);
@@ -1075,6 +1077,7 @@ export default function AgentDock() {
     vision: ["meta", "openrouter", "cloud", "local"],
     image: ["meta", "openrouter", "cloud", "local", "comfyui"],
     transcribe: ["meta"],
+    voice: ["elevenlabs", "free-tts"],
   };
   const BRAIN_KIND_LABEL: Record<string, string> = {
     chat: "Chat",
@@ -1082,6 +1085,7 @@ export default function AgentDock() {
     image: "Image",
     video: "Video",
     transcribe: "Transcribe",
+    voice: "Voice",
   };
   const ROUTE_VIA: Record<string, string> = {
     meta: "Meta direct",
@@ -1089,12 +1093,16 @@ export default function AgentDock() {
     cloud: "custom endpoint",
     local: "local server",
     comfyui: "ComfyUI",
+    elevenlabs: "ElevenLabs cloud",
+    "free-tts": "free-tts local",
   };
   const BRAIN_PREFIX: Record<string, string> = {
     meta: "meta_",
     openrouter: "openrouter_",
     cloud: "ai_",
     local: "local_",
+    elevenlabs: "elevenlabs_",
+    "free-tts": "freetts_",
   };
   const brainOverridden = new Set(agentInfo?.overrides ?? []);
   const brainCustom = (field: string) => (brainOverridden.has(field) ? " •" : "");
@@ -1126,16 +1134,23 @@ export default function AgentDock() {
     setShowBrain((v) => !v);
   };
   // Verified options for each row's provider (free text still takes any id).
-  type BrainKind = "chat" | "vision" | "image" | "video" | "transcribe";
+  type BrainKind = "chat" | "vision" | "image" | "video" | "transcribe" | "voice";
   const brainRowProvider = (kind: BrainKind): string =>
     kind === "video"
       ? "openrouter"
       : kind === "transcribe"
         ? "meta"
-        : brainForm[`${kind}Provider` as "chatProvider" | "visionProvider" | "imageProvider"];
+        : brainForm[`${kind}Provider` as "chatProvider" | "visionProvider" | "imageProvider" | "voiceProvider"];
   const brainOptions = (
     kind: BrainKind,
   ): { id: string; label: string; maker?: string }[] => {
+    if (kind === "voice") {
+      // No catalog section: two known-good defaults, free text takes any id
+      // (ElevenLabs voice id, or free-tts "engine:voice").
+      return brainRowProvider(kind) === "elevenlabs"
+        ? [{ id: "21m00Tcm4TlvDq8ikWAM", label: "Rachel (default)" }]
+        : [{ id: "kokoro:af_sarah", label: "Kokoro af_sarah (default)" }];
+    }
     if (!brainCatalog) return [];
     const p = brainRowProvider(kind);
     if (kind === "image") {
@@ -1164,16 +1179,19 @@ export default function AgentDock() {
           chat_provider: "",
           vision_provider: "",
           image_provider: "",
+          voice_provider: "",
           chat_model: "",
           vision_model: "",
           image_model: "",
           video_model: "",
           transcribe_model: "",
+          voice_model: "",
         }
       : {
           chat_provider: brainForm.chatProvider,
           vision_provider: brainForm.visionProvider,
           image_provider: brainForm.imageProvider,
+          voice_provider: brainForm.voiceProvider,
         };
     if (!reset) {
       const put = (key: string, v: string) => {
@@ -1184,6 +1202,7 @@ export default function AgentDock() {
       put("image_model", brainForm.image);
       put("video_model", brainForm.video);
       put("transcribe_model", brainForm.transcribe);
+      put("voice_model", brainForm.voice);
     }
     setBrainSaving(true);
     setBrainError(null);
@@ -1191,7 +1210,7 @@ export default function AgentDock() {
       const st = await api.agentConfig(body);
       setAgentInfo(st);
       if (!reset) {
-        setBrainForm((f) => ({ ...f, chat: "", vision: "", image: "", video: "", transcribe: "" }));
+        setBrainForm((f) => ({ ...f, chat: "", vision: "", image: "", video: "", transcribe: "", voice: "" }));
       }
     } catch (e) {
       setBrainError((e as Error).message);
@@ -1279,6 +1298,7 @@ export default function AgentDock() {
                 `Image: ${agentInfo.providers.image ?? "?"} · ${agentInfo.image_model ?? "—"}`,
                 `Video: ${agentInfo.providers.video ?? "?"} · ${agentInfo.video_model ?? "—"}`,
                 `Transcribe: ${agentInfo.providers.transcribe ?? "?"} · ${agentInfo.transcribe_model ?? "—"}`,
+                `Voice: ${agentInfo.providers.voice ?? "?"} · ${agentInfo.voice_model ?? "—"}`,
               ].join(" · ")}
             >
               {agentInfo.cloud
@@ -1333,6 +1353,7 @@ export default function AgentDock() {
               { kind: "image", value: agentInfo?.image_model },
               { kind: "video", value: agentInfo?.video_model },
               { kind: "transcribe", value: agentInfo?.transcribe_model },
+              { kind: "voice", value: agentInfo?.voice_model },
             ] as const
           ).map(({ kind, value }) => {
             const rowProvider = brainRowProvider(kind);
@@ -1397,7 +1418,7 @@ export default function AgentDock() {
               </div>
             );
           })}
-          {(["chat", "vision", "image", "video", "transcribe"] as const).map((kind) => (
+          {(["chat", "vision", "image", "video", "transcribe", "voice"] as const).map((kind) => (
             <datalist key={kind} id={`kv-brain-${kind}`}>
               {brainOptions(kind).map((m) => (
                 <option key={m.id} value={m.id}>

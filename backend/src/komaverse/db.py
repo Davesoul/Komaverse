@@ -90,6 +90,12 @@ def init_db() -> None:
         "ALTER TABLE clips ADD COLUMN transition_duration FLOAT",
         "ALTER TABLE clips ADD COLUMN fade_in FLOAT",
         "ALTER TABLE clips ADD COLUMN fade_out FLOAT",
+        "ALTER TABLE clips ADD COLUMN text_content TEXT",
+        "ALTER TABLE clips ADD COLUMN text_size INTEGER",
+        "ALTER TABLE clips ADD COLUMN text_color VARCHAR(16)",
+        "ALTER TABLE clips ADD COLUMN text_position VARCHAR(16)",
+        "ALTER TABLE clips ADD COLUMN text_anim VARCHAR(16)",
+        "ALTER TABLE clips ADD COLUMN clip_filter VARCHAR(32)",
         "ALTER TABLE pages ADD COLUMN name VARCHAR(200)",
         "ALTER TABLE panels ADD COLUMN name VARCHAR(200)",
     ):

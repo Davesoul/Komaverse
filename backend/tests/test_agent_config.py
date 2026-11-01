@@ -254,6 +254,7 @@ def test_provider_for_falls_back_to_global(factory, user):
     assert provider_for("vision") == "cloud"
     assert provider_for("image") == "cloud"
     assert provider_for("video") == "openrouter"
+    assert provider_for("voice") == "free-tts"
 
 
 def test_agent_config_mixed_per_kind_routing(factory, user, saved_settings):
@@ -276,6 +277,7 @@ def test_agent_config_mixed_per_kind_routing(factory, user, saved_settings):
         "image": "openrouter",
         "video": "openrouter",
         "transcribe": "meta",
+        "voice": "free-tts",
     }
     assert out.chat_model == "muse-spark-1.3-contributor"
     assert out.image_model == "qwen/qwen-image-2.1-turbo"

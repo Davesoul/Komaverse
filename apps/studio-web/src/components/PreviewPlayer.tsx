@@ -10,6 +10,8 @@ export interface PreviewClip {
   video?: string;
   duration: number;
   motion: string;
+  /** CSS filter preview of the export color grade ("" = none). */
+  filter?: string;
 }
 
 /** A timeline video clip: muted playback synced to play/pause and seeks. */
@@ -83,6 +85,9 @@ function motionStyle(motion: string, p: number, reduceMotion: boolean): React.CS
       return { transform: `scale(1.15) translateY(${4 - 8 * p}%)` };
     case "pan-down":
       return { transform: `scale(1.15) translateY(${-4 + 8 * p}%)` };
+    case "drift":
+      // Diagonal drift: top-left settles to bottom-right, same language as pans.
+      return { transform: `scale(1.15) translate(${-4 + 8 * p}%, ${-4 + 8 * p}%)` };
     default:
       return {};
   }
@@ -348,6 +353,7 @@ export function PreviewPlayer({
               // stage letterboxes the rest, which the Ken Burns drift plays on.
               objectFit: "contain",
               background: "#000",
+              filter: current.filter || undefined,
               ...motionStyle(current.motion, local, motionOff),
             }}
           />

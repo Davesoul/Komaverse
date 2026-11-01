@@ -29,6 +29,9 @@ AI_OVERRIDE_KEYS = (
     "openrouter_vision_model",
     "openrouter_image_model",
     "openrouter_video_model",
+    "voice_provider",
+    "elevenlabs_voice_model",
+    "freetts_voice_model",
     "ai_chat_model",
     "ai_vision_model",
     "ai_image_model",
@@ -43,6 +46,8 @@ PROVIDER_PREFIX = {
     "openrouter": "openrouter_",
     "cloud": "ai_",
     "local": "local_",
+    "elevenlabs": "elevenlabs_",
+    "free-tts": "freetts_",
 }
 
 # Honest per-kind provider menus (mirrors backend capabilities: chat and
@@ -51,15 +56,17 @@ PROVIDER_PREFIX = {
 CHAT_PROVIDERS = ("meta", "openrouter", "cloud", "local")
 VISION_PROVIDERS = ("meta", "openrouter", "cloud", "local")
 IMAGE_PROVIDERS = ("meta", "openrouter", "cloud", "local", "comfyui")
+VOICE_PROVIDERS = ("elevenlabs", "free-tts")
 KIND_PROVIDERS = {
     "chat": CHAT_PROVIDERS,
     "vision": VISION_PROVIDERS,
     "image": IMAGE_PROVIDERS,
+    "voice": VOICE_PROVIDERS,
 }
 
 
 def provider_for(kind: str) -> str:
-    """Effective provider for chat/vision/image/video.
+    """Effective provider for chat/vision/image/video/voice.
 
     A per-kind studio override wins; otherwise the global default. Video
     has no provider override (OpenRouter-only), so it always resolves
@@ -69,6 +76,13 @@ def provider_for(kind: str) -> str:
         return "openrouter"
     if kind == "transcribe":
         return "meta"
+    if kind == "voice":
+        # Selectable, but needs a working default with no override: cloud
+        # voices when keyed, otherwise the local free-tts server.
+        specific = getattr(settings, "voice_provider", None)
+        if specific:
+            return specific
+        return "elevenlabs" if settings.elevenlabs_api_key else "free-tts"
     specific = getattr(settings, f"{kind}_provider", None)
     return specific or settings.ai_provider
 

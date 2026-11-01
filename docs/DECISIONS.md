@@ -294,7 +294,9 @@ of transition/fade/ratio words.
 Amendment: Brain routing, streaming, voice, mentions, gallery-first generation.
 Per-kind providers replace the single AI_PROVIDER switch in the Brain
 (chat/vision/image selectable Meta/OpenRouter/cloud/local/ComfyUI,
-video OpenRouter-only, transcribe Meta-only): `provider_for(kind)` +
+video OpenRouter-only, transcribe Meta-only, voice selectable
+ElevenLabs/free-tts with a keyed-cloud-else-local default):
+`provider_for(kind)` +
 verified model catalogs (maker + route shown, no guessing) drive every
 call, persisted as studio-settings overrides via PUT /agent/config.
 Agent answers stream over SSE (`/agent/chat/stream`: token/tool_start/
@@ -333,3 +335,16 @@ tiles, transition badges on timeline clips), speed-line utilities, and an
 gold/deep-red/dim-paper; the pricing burst goes gold. Test hermeticity:
 model ids are pinned in conftest so a user .env (e.g. a cheaper chat
 variant) can't break default assertions.
+
+Amendment: voice generation + text cards + grades. TTS is a Brain-routed
+`voice` kind (ElevenLabs cloud via `ELEVENLABS_API_KEY`, else the local
+free-tts server over HTTP — Komaverse never spawns it; downtime errors
+name `python server.py`). `POST /projects/{id}/audio/synthesize` lands a
+normal take (waveforms, cues, mix all work) with optional one-trip cueing.
+Timeline gains `text` clips (backend-rastered title cards: size/color/
+position/entrance fade-rise, `GET /clips/{id}/preview` artwork, Draw ▸
+hidden since cards live on the timeline), per-clip grades
+(none/grayscale/sepia/vintage/vivid, CSS preview + export burn-in), drift
+motion, and wipe-right/push-left/fade-white transitions. free-tts itself
+stays untouched (its `_run_cli` NameError and missing `--list-voices`
+are its own bugs, avoided by using `/api/generate` + `/api/files`).

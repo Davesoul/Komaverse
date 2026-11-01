@@ -86,16 +86,25 @@ class Sequence(BaseModel):
 class Clip(BaseModel):
     id: str = Field(default_factory=uuid_short)
     scene_id: str
-    kind: Literal["panel", "frame", "media", "video", "ai"] = "panel"
-    source_id: str  # panel id, frame id, or media/asset id
+    kind: Literal["panel", "frame", "media", "video", "ai", "text"] = "panel"
+    source_id: str  # panel id, frame id, or media/asset id ("" for text)
     start: float = 0.0  # seconds on timeline
     duration: float = 2.0
-    motion: str = "none"  # none | zoom-* | pan-*
-    transition: str = "none"  # into this clip: none | crossfade | fade-black | wipe-left | impact
+    motion: str = "none"  # none | zoom-* | pan-* | drift
+    transition: str = "none"  # into this clip: none | crossfade | fade-black | fade-white | wipe-left | wipe-right | push-left | impact
     transition_duration: float = 0.5
     fade_in: float = 0.0
     fade_out: float = 0.0
     order: int = 0
+    # Text title cards (kind == "text" only): full-frame card rendered by
+    # the backend, CapCut-style.
+    text: str = ""
+    text_size: int = 64
+    text_color: str = "#ffffff"
+    text_position: str = "center"  # top | center | bottom
+    text_anim: str = "none"  # none | fade | rise
+    # Color grade burned into the export (and previewed via CSS).
+    filter: str = "none"  # none | grayscale | sepia | vintage | vivid
 
 
 class AudioTake(BaseModel):

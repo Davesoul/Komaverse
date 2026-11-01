@@ -38,8 +38,11 @@ import { PreviewPlayer, type PreviewClip } from "../components/PreviewPlayer";
 import { Timeline, fmtTC, type TimelineCueInfo } from "../components/Timeline";
 import { getCurrentProject, getCurrentScene, getCurrentSequence, gotoTab, setCurrentProject, setCurrentScene, setCurrentSequence, setDrawFrame } from "../lib/studio";
 
-const MOTIONS = ["none", "zoom-in", "zoom-out", "pan-left", "pan-right", "pan-up", "pan-down"];
-const TRANSITIONS = ["none", "crossfade", "fade-black", "wipe-left", "impact"];
+const MOTIONS = ["none", "zoom-in", "zoom-out", "pan-left", "pan-right", "pan-up", "pan-down", "drift"];
+const TRANSITIONS = ["none", "crossfade", "fade-black", "fade-white", "wipe-left", "wipe-right", "push-left", "impact"];
+const FILTERS = ["none", "grayscale", "sepia", "vintage", "vivid"];
+const TEXT_POSITIONS = ["top", "center", "bottom"];
+const TEXT_ANIMS = ["none", "fade", "rise"];
 const POLL_MS = 1500;
 // Mirror backend ai/direction.py keys; the server validates unknown ids.
 const STYLES = [
@@ -90,6 +93,10 @@ function labelFor(clip: Clip, project: Project | null, frames: DrawFrame[]): str
     const i = project.pages.findIndex((p) => p.id === clip.source_id);
     return i >= 0 ? `Page ${i + 1} still` : "Still (missing)";
   }
+  if (clip.kind === "text") {
+    const snippet = (clip.text || "").trim().slice(0, 32);
+    return snippet ? `Text: ${snippet}` : "Text (empty)";
+  }
   return clip.kind;
 }
 
@@ -98,13 +105,34 @@ function labelFor(clip: Clip, project: Project | null, frames: DrawFrame[]): str
  * side (preview player); thumbs use the small 320 defaults so rows stay
  * light. Page stills are full files either way.
  */
-function clipImageFor(clip: Clip, project: Project | null, hiRes = false): string {
+function clipImageFor(clip: Clip, project: Project | null, hiRes = false, art: string | number = ""): string {
   if (clip.kind === "panel")
     return api.panelPreviewUrl(clip.source_id, hiRes ? 960 : undefined);
   if (clip.kind === "frame")
     return api.frameThumbnailUrl(clip.source_id, hiRes ? 960 : undefined);
+  if (clip.kind === "text") {
+    const url = api.clipPreviewUrl(clip.id, hiRes ? 960 : undefined);
+    // Text edits keep the same URL: bust the image cache explicitly.
+    return art ? `${url}&v=${art}` : url;
+  }
   const page = project?.pages.find((p) => p.id === clip.source_id);
   return page ? mediaUrl(page.image_url) : "";
+}
+
+/** CSS preview of the export color grade (the MP4 burns the real one). */
+function cssFilterFor(filter: string): string {
+  switch (filter) {
+    case "grayscale":
+      return "grayscale(1)";
+    case "sepia":
+      return "sepia(0.85)";
+    case "vintage":
+      return "sepia(0.45) contrast(0.92) brightness(0.96)";
+    case "vivid":
+      return "saturate(1.4) contrast(1.08)";
+    default:
+      return "";
+  }
 }
 
 /** Duration field that commits on blur, Enter, or 600ms of quiet. */
@@ -204,6 +232,11 @@ export default function RenderPage() {
   const [pagePick, setPagePick] = useState("");
   const [panelPick, setPanelPick] = useState("");
   const [videoPick, setVideoPick] = useState("");
+  const [textPick, setTextPick] = useState("");
+  /** Bumps whenever a text card's copy changes (same artwork URL). */
+  const [artNonce, setArtNonce] = useState(0);
+  /** In-progress title-card edit, keyed by clip (commits on blur/Enter). */
+  const [textDraft, setTextDraft] = useState<{ id: string; v: string } | null>(null);
   const [doneVideos, setDoneVideos] = useState<Job[]>([]);
   const [fps, setFps] = useState("12");
   const [expW, setExpW] = useState("1280");
@@ -401,12 +434,26 @@ export default function RenderPage() {
       transition_duration?: number;
       fade_in?: number;
       fade_out?: number;
+      filter?: string;
+      text?: string;
+      text_size?: number;
+      text_color?: string;
+      text_position?: string;
+      text_anim?: string;
     },
     previewMotion = false,
   ) => {
     if (!project || !scene) return;
     try {
       await api.patchClip(id, patch);
+      if (
+        "text" in patch ||
+        "text_size" in patch ||
+        "text_color" in patch ||
+        "text_position" in patch
+      ) {
+        setArtNonce((n) => n + 1);
+      }
       await refresh(project.id, scene.id);
       if (previewMotion) {
         // A picked motion is invisible on a paused preview — replay from
@@ -474,13 +521,14 @@ export default function RenderPage() {
         id: c.id,
         kind: c.kind,
         label: `${i + 1} · ${c.kind === "video" ? (videoJobs[c.source_id]?.label ?? "Video") : labelFor(c, project, frames)}`,
-        image: clipImageFor(c, project, true),
+        image: clipImageFor(c, project, true, artNonce),
         video: videoJobs[c.source_id]?.url,
         duration: c.duration,
         motion: c.motion,
         transition: c.transition,
+        filter: cssFilterFor(c.filter),
       })),
-    [clips, project, frames, videoJobs],
+    [clips, project, frames, videoJobs, artNonce],
   );
 
   const onTime = useCallback((t: number) => setPlayhead(t), []);
@@ -538,6 +586,10 @@ export default function RenderPage() {
         setCurrentSequence(project.id, target.id);
         if (made.length > 0) setDrawFrame(project.id, made[0].id);
         gotoTab("draw");
+        return;
+      }
+      if (clip.kind === "text") {
+        setNotice("Text cards live on the timeline — edit the copy in the inspector.");
         return;
       }
       setNotice("AI clips have no draw source.");
@@ -1109,6 +1161,37 @@ export default function RenderPage() {
                   }}
                 >
                   Add
+                </Btn>
+              </div>
+              <div style={{ display: "flex", gap: 6, marginTop: 8 }}>
+                <TextInput
+                  style={{ flex: 1 }}
+                  value={textPick}
+                  onChange={(e) => setTextPick(e.target.value)}
+                  placeholder="Title card text…"
+                  aria-label="Text for a new title card"
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" && textPick.trim()) {
+                      const v = textPick;
+                      setTextPick("");
+                      void (async () => {
+                        await api.addClip(scene.id, { kind: "text", source_id: "", text: v, duration: 2 });
+                        await refresh(project.id, scene.id);
+                      })();
+                    }
+                  }}
+                />
+                <Btn
+                  disabled={!textPick.trim()}
+                  onClick={async () => {
+                    if (!project) return;
+                    const v = textPick;
+                    setTextPick("");
+                    await api.addClip(scene.id, { kind: "text", source_id: "", text: v, duration: 2 });
+                    await refresh(project.id, scene.id);
+                  }}
+                >
+                  Add text
                 </Btn>
               </div>
             </div>
@@ -1694,11 +1777,12 @@ export default function RenderPage() {
                         c.kind === "video"
                           ? (videoJobs[c.source_id]?.label ?? "Video")
                           : labelFor(c, project, frames),
-                      image: clipImageFor(c, project),
+                      image: clipImageFor(c, project, false, artNonce),
                       video: videoJobs[c.source_id]?.url,
                       duration: c.duration,
                       motion: c.motion,
                       transition: c.transition,
+                      filter: c.filter,
                     }))}
                     cues={cueInfos}
                     total={total}
@@ -1753,7 +1837,7 @@ export default function RenderPage() {
                   ) : (
                     <img
                       crossOrigin="use-credentials"
-                      src={clipImageFor(selectedClip, project)}
+                      src={clipImageFor(selectedClip, project, false, artNonce)}
                       alt=""
                       width={96}
                       height={54}
@@ -1770,6 +1854,8 @@ export default function RenderPage() {
                     <div className="kv-nums" style={{ fontSize: 12, color: "var(--kv-muted)" }}>
                       starts {fmtTC(clips.slice(0, clips.indexOf(selectedClip)).reduce((a, c) => a + c.duration, 0))} ·{" "}
                       {selectedClip.kind} · {selectedClip.motion}
+                      {selectedClip.filter && selectedClip.filter !== "none" &&
+                        ` · ${selectedClip.filter}`}
                       {selectedClip.transition !== "none" &&
                         ` · ${selectedClip.transition} ${selectedClip.transition_duration}s`}
                       {(selectedClip.fade_in > 0 || selectedClip.fade_out > 0) &&
@@ -1832,6 +1918,92 @@ export default function RenderPage() {
                   </span>
                 </div>
                 <div style={{ display: "flex", gap: 6, alignItems: "center", marginTop: 10, flexWrap: "wrap" }}>
+                  <span style={{ fontSize: 12, color: "var(--kv-muted)" }}>Filter</span>
+                  <SelectInput
+                    value={selectedClip.filter || "none"}
+                    onChange={(e) =>
+                      void commitClipPatch(selectedClip.id, { filter: e.target.value })
+                    }
+                    aria-label="Clip color filter"
+                    title="Color grade burned into the MP4 export (preview approximates it)"
+                  >
+                    {FILTERS.map((f) => (
+                      <option key={f} value={f}>{f}</option>
+                    ))}
+                  </SelectInput>
+                  <span style={{ fontSize: 11, color: "var(--kv-faint)" }}>
+                    Grades preview live; the export burns the real one.
+                  </span>
+                </div>
+                {selectedClip.kind === "text" && (
+                  <div style={{ display: "flex", flexDirection: "column", gap: 6, marginTop: 10 }}>
+                    <span style={{ fontSize: 12, color: "var(--kv-muted)" }}>Title card</span>
+                    <textarea
+                      value={textDraft?.id === selectedClip.id ? textDraft.v : selectedClip.text}
+                      onChange={(e) => setTextDraft({ id: selectedClip.id, v: e.target.value })}
+                      onBlur={() => {
+                        const v = textDraft?.id === selectedClip.id ? textDraft.v : selectedClip.text;
+                        setTextDraft(null);
+                        if (v !== selectedClip.text) void commitClipPatch(selectedClip.id, { text: v });
+                      }}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter" && !e.shiftKey) {
+                          e.preventDefault();
+                          (e.target as HTMLTextAreaElement).blur();
+                        }
+                      }}
+                      rows={2}
+                      aria-label="Title card text"
+                      style={{ width: "100%", resize: "vertical" }}
+                    />
+                    <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
+                      <span style={{ fontSize: 12, color: "var(--kv-muted)" }}>Size</span>
+                      <SecInput
+                        value={selectedClip.text_size}
+                        label="Text size pixels"
+                        title="Text size in pixels (16–256)"
+                        onCommit={(v) =>
+                          void commitClipPatch(selectedClip.id, { text_size: Math.round(v) })
+                        }
+                      />
+                      <span style={{ fontSize: 12, color: "var(--kv-muted)" }}>Color</span>
+                      <input
+                        type="color"
+                        value={/^#[0-9a-fA-F]{6}$/.test(selectedClip.text_color) ? selectedClip.text_color : "#ffffff"}
+                        onChange={(e) => void commitClipPatch(selectedClip.id, { text_color: e.target.value })}
+                        aria-label="Text color"
+                        title="Text color"
+                        style={{ width: 36, height: 26, padding: 0, border: "1px solid var(--kv-border)", borderRadius: 4, background: "none" }}
+                      />
+                      <span style={{ fontSize: 12, color: "var(--kv-muted)" }}>At</span>
+                      <SelectInput
+                        value={selectedClip.text_position}
+                        onChange={(e) =>
+                          void commitClipPatch(selectedClip.id, { text_position: e.target.value })
+                        }
+                        aria-label="Text position"
+                      >
+                        {TEXT_POSITIONS.map((p) => (
+                          <option key={p} value={p}>{p}</option>
+                        ))}
+                      </SelectInput>
+                      <span style={{ fontSize: 12, color: "var(--kv-muted)" }}>Enter</span>
+                      <SelectInput
+                        value={selectedClip.text_anim}
+                        onChange={(e) =>
+                          void commitClipPatch(selectedClip.id, { text_anim: e.target.value }, true)
+                        }
+                        aria-label="Text entrance animation"
+                        title="Entrance animation (export only; preview shows the settled card)"
+                      >
+                        {TEXT_ANIMS.map((a) => (
+                          <option key={a} value={a}>{a}</option>
+                        ))}
+                      </SelectInput>
+                    </div>
+                  </div>
+                )}
+                <div style={{ display: "flex", gap: 6, alignItems: "center", marginTop: 10, flexWrap: "wrap" }}>
                   <span style={{ fontSize: 12, color: "var(--kv-muted)" }}>Blend in</span>
                   <SelectInput
                     value={selectedClip.transition}
@@ -1870,13 +2042,15 @@ export default function RenderPage() {
                     Blends and fades render in the MP4 export.
                   </span>
                   <span style={{ marginLeft: "auto", display: "flex", gap: 6 }}>
-                    <Btn
-                      small
-                      title="Open this clip's source in the Draw tab (frames open directly; panels and stills become new frames; videos explode frame by frame)"
-                      onClick={() => void openClipInDraw(selectedClip)}
-                    >
-                      Draw ▸
-                    </Btn>
+                    {selectedClip.kind !== "text" && (
+                      <Btn
+                        small
+                        title="Open this clip's source in the Draw tab (frames open directly; panels and stills become new frames; videos explode frame by frame)"
+                        onClick={() => void openClipInDraw(selectedClip)}
+                      >
+                        Draw ▸
+                      </Btn>
+                    )}
                     <IconBtn label="Move clip earlier" onClick={() => moveClip(selectedClip.id, -1)}>↑</IconBtn>
                     <IconBtn label="Move clip later" onClick={() => moveClip(selectedClip.id, 1)}>↓</IconBtn>
                     <Btn

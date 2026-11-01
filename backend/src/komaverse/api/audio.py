@@ -14,7 +14,14 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from komaverse import storage
-from komaverse.ai.providers import MetaProvider, ProviderError
+from komaverse.ai.providers import (
+    ElevenLabsProvider,
+    MetaProvider,
+    ProviderError,
+    parse_freetts_voice,
+    synthesize_freetts,
+)
+from komaverse.studio_settings import provider_for
 from komaverse.api.usage import record_usage
 from komaverse.auth import ensure_owner, get_current_user, own_project
 from komaverse.config import settings
@@ -70,6 +77,26 @@ class Transcript(BaseModel):
     transcript: str
     duration_sec: float = 0.0
     turns: list[TranscriptTurn] = []
+
+
+class SynthCreate(BaseModel):
+    """Generate a voice take from text (TTS).
+
+    voice is provider-shaped and optional (blank = Brain default):
+    an ElevenLabs voice id, or free-tts "engine:voice". engine/lang
+    override the free-tts call only. cue_scene_id cues the new take at
+    cue_start_sec in one round trip.
+    """
+
+    text: str = ""
+    voice: str | None = None
+    engine: str | None = None
+    lang: str = "en"
+    cue_scene_id: str | None = None
+    cue_start_sec: float = 0.0
+
+
+MAX_SYNTH_CHARS = 2000
 
 
 def _get_scene(session: Session, user: UserRow, scene_id: str) -> SceneRow:
@@ -258,6 +285,91 @@ def transcribe_take(
         duration_sec=(res.get("audioDurationMs") or 0) / 1000,
         turns=turns,
     )
+
+
+@router.post(
+    "/projects/{project_id}/audio/synthesize",
+    response_model=AudioTake,
+    status_code=201,
+)
+def synthesize_take(
+    project_id: str,
+    body: SynthCreate,
+    session: Session = Depends(get_session),
+    user: UserRow = Depends(get_current_user),
+):
+    """Text-to-speech into the take library (Render tab "Generate").
+
+    Provider comes from the Brain voice row: ElevenLabs cloud voices
+    (needs ELEVENLABS_API_KEY) or the local free-tts server (needs
+    `python server.py` running in D:\\Coding\\free-tts). The MP3 lands
+    as a normal take, so waveforms, cues, and the export mix just work.
+    Duration stays 0 (unknown until decoded); the mux tolerates that.
+    """
+    project = own_project(session, user, project_id)
+    text = (body.text or "").strip()
+    if not text:
+        raise HTTPException(400, "text is required")
+    if len(text) > MAX_SYNTH_CHARS:
+        raise HTTPException(
+            400, f"text too long ({len(text)} > {MAX_SYNTH_CHARS} chars)"
+        )
+    provider = provider_for("voice")
+    try:
+        if provider == "elevenlabs":
+            data = ElevenLabsProvider().synthesize(text, voice=body.voice)
+            model = settings.elevenlabs_tts_model
+        elif provider == "free-tts":
+            engine, voice = parse_freetts_voice(body.voice)
+            data = synthesize_freetts(
+                text,
+                engine=(body.engine or "").strip() or engine,
+                voice=voice,
+                lang=body.lang,
+            )
+            model = settings.freetts_voice_model
+        else:  # pragma: no cover — provider_for only returns the two above
+            raise HTTPException(400, f'voice provider "{provider}" is not a TTS engine')
+    except ProviderError as exc:
+        raise HTTPException(400, f"voice generation failed: {exc}") from None
+    if not data:
+        raise HTTPException(400, "voice generation returned empty audio")
+    try:
+        storage.check_quota(project.id, len(data))
+    except storage.QuotaExceededError as exc:
+        raise HTTPException(413, str(exc)) from None
+    rel, url = storage.save_upload(project.id, "voice.mp3", data)
+    if not audio_has_stream(storage.resolve(rel)):
+        storage.remove_file(rel)
+        raise HTTPException(400, "generated audio is undecodable")
+    row = AudioTakeRow(
+        project_id=project.id,
+        name=f"Voice: {text[:40]}",
+        file_path=rel,
+        url=url,
+        mime="audio/mpeg",
+        duration_sec=0.0,
+    )
+    session.add(row)
+    session.commit()
+    record_usage(session, user.id, "voice", model, len(text) // 4)
+    if body.cue_scene_id:
+        scene = session.get(SceneRow, body.cue_scene_id)
+        if scene is None or scene.project_id != project.id:
+            raise HTTPException(400, "cue scene belongs to another project")
+        ensure_owner(session, user, scene.project_id)
+        _check_cue_timing(
+            body.cue_start_sec, 0.0, None, 0, 1.0, 0.0, 0.0, 0.0,
+        )
+        session.add(
+            AudioCueRow(
+                scene_id=scene.id,
+                audio_id=row.id,
+                start_sec=body.cue_start_sec,
+            )
+        )
+        session.commit()
+    return row.to_schema()
 
 
 @router.post("/scenes/{scene_id}/cues", response_model=AudioCue, status_code=201)

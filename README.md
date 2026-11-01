@@ -31,8 +31,13 @@ started Oct 28, 2026.
   (panels, frames, stills) with audio waveforms on cues and Ctrl+wheel
   zoom + fit-to-width, sidebar grouped by sequence with search,
   clips open back in Draw (frames directly, stills place, video
-  explodes), Ken Burns motion, voiceover recording over
-  playback with auto-cue, SRT subtitles (S1 lane, preview captions, burned
+  explodes), Ken Burns motion (drift added), transitions (wipe-right,
+  push-left, fade-white added), per-clip color grades (grayscale/sepia/
+  vintage/vivid, previewed live, burned into export), text title cards
+  with entrance anims (fade/rise), voiceover recording over
+  playback with auto-cue, TTS voice generation (ElevenLabs cloud or local
+  free-tts server, Brain voice row picks the engine, one-tap cue at the
+  playhead), SRT subtitles (S1 lane, preview captions, burned
   into MP4 + VTT sidecar), H.264 MP4 export with contain-fit hi-res preview
 - **Media:** per-project library grid (scans, takes, generations, renders)
   with search/filters/sort, lightbox viewer, storage usage. Takes reach the
@@ -40,10 +45,10 @@ started Oct 28, 2026.
 - **AI:** pluggable providers — Meta Model API (Muse Spark/Wonder
   brain, Muse Image generation, Voice Transcribe takes, SAM 3.1
   segmentation), OpenRouter (chat, image + async video models),
-  generic cloud endpoint (incl. hosted open weights), local ComfyUI,
-  fake demo — background jobs with polling; generations land in the
-  Media gallery (frames only on explicit request), videos preview in
-  the Generate panel
+  ElevenLabs + local free-tts TTS voices, generic cloud endpoint
+  (incl. hosted open weights), local ComfyUI, fake demo — background
+  jobs with polling; generations land in the Media gallery (frames only
+  on explicit request), videos preview in the Generate panel
 - **Credits:** append-only ledger, per-operation costs, 402 enforcement,
   dev grants (no Stripe in v1)
 - **Usage dashboard:** Home tab section with requests/calls, estimated

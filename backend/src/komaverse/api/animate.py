@@ -39,15 +39,19 @@ from komaverse.db_models import (
 )
 from komaverse.models import Clip, DrawFrame, ExportReport, Job, Scene, Sequence, uuid_short
 from komaverse.observability import metrics
-from komaverse.renderer import MAX_TOTAL_SEC, composite_frame_image, render_project
+from komaverse.renderer import MAX_TOTAL_SEC, composite_frame_image, render_project, resolve_clip_image
 
 logger = logging.getLogger("komaverse.animate")
 
 router = APIRouter(prefix="/api/v1")
 
-CLIP_KINDS = ("panel", "frame", "media", "video", "ai")
-MOTIONS = ("none", "zoom-in", "zoom-out", "pan-left", "pan-right", "pan-up", "pan-down")
-TRANSITIONS = ("none", "crossfade", "fade-black", "wipe-left", "impact")
+CLIP_KINDS = ("panel", "frame", "media", "video", "ai", "text")
+MOTIONS = ("none", "zoom-in", "zoom-out", "pan-left", "pan-right", "pan-up", "pan-down", "drift")
+TRANSITIONS = ("none", "crossfade", "fade-black", "fade-white", "wipe-left", "wipe-right", "push-left", "impact")
+FILTERS = ("none", "grayscale", "sepia", "vintage", "vivid")
+TEXT_POSITIONS = ("top", "center", "bottom")
+TEXT_ANIMS = ("none", "fade", "rise")
+MAX_TEXT_CHARS = 500
 
 
 def _check_fx(motion: str, transition: str, transition_duration: float, fade_in: float, fade_out: float) -> tuple[str, float, float, float]:
@@ -62,6 +66,62 @@ def _check_fx(motion: str, transition: str, transition_duration: float, fade_in:
         min(max(fade_in, 0.0), 10.0),
         min(max(fade_out, 0.0), 10.0),
     )
+
+
+def _check_filter(clip_filter: str) -> str:
+    """Validate a clip color grade (CapCut-style filter)."""
+    if clip_filter not in FILTERS:
+        raise HTTPException(400, f"unknown filter: {clip_filter}")
+    return clip_filter
+
+
+def _check_text_fields(
+    text: str, text_size: int, text_color: str,
+    text_position: str, text_anim: str,
+) -> tuple[str, int, str, str, str]:
+    """Validate text-card fields; returns cleaned values."""
+    body = (text or "").strip()
+    if len(body) > MAX_TEXT_CHARS:
+        raise HTTPException(
+            400, f"text too long ({len(body)} > {MAX_TEXT_CHARS} chars)"
+        )
+    size = min(max(int(text_size or 64), 16), 256)
+    color = (text_color or "#ffffff").strip() or "#ffffff"
+    if not re.fullmatch(r"#[0-9a-fA-F]{6}", color):
+        raise HTTPException(400, f"bad text_color {color!r} (want #rrggbb)")
+    if text_position not in TEXT_POSITIONS:
+        raise HTTPException(400, f"unknown text_position: {text_position}")
+    if text_anim not in TEXT_ANIMS:
+        raise HTTPException(400, f"unknown text_anim: {text_anim}")
+    return body, size, color, text_position, text_anim
+
+
+def _clip_text_filter(
+    kind: str, text: str, text_size: int, text_color: str,
+    text_position: str, text_anim: str, clip_filter: str,
+) -> dict:
+    """Cleaned text-card + filter columns for one ClipCreate-shaped entry.
+
+    Text kinds must carry copy (source_id stays empty); every other kind
+    stores pristine defaults so a later kind change can't resurrect copy.
+    """
+    filt = _check_filter(clip_filter or "none")
+    if kind == "text":
+        ttext, tsize, tcolor, tpos, tanim = _check_text_fields(
+            text, text_size, text_color, text_position, text_anim
+        )
+        if not ttext:
+            raise HTTPException(400, "text clips need text")
+    else:
+        ttext, tsize, tcolor, tpos, tanim = "", 64, "#ffffff", "center", "none"
+    return {
+        "clip_filter": filt,
+        "text_content": ttext,
+        "text_size": tsize,
+        "text_color": tcolor,
+        "text_position": tpos,
+        "text_anim": tanim,
+    }
 
 MIN_FRAME_DIM = 8
 MAX_FRAME_DIM = 4096
@@ -135,6 +195,12 @@ class ClipCreate(BaseModel):
     transition_duration: float = 0.5
     fade_in: float = 0.0
     fade_out: float = 0.0
+    filter: str = "none"
+    text: str = ""
+    text_size: int = 64
+    text_color: str = "#ffffff"
+    text_position: str = "center"
+    text_anim: str = "none"
 
 
 class ClipBatchCreate(BaseModel):
@@ -158,6 +224,12 @@ class ClipPatch(BaseModel):
     fade_out: float | None = None
     order: int | None = None
     start: float | None = None
+    filter: str | None = None
+    text: str | None = None
+    text_size: int | None = None
+    text_color: str | None = None
+    text_position: str | None = None
+    text_anim: str | None = None
 
 
 class FrameCreate(BaseModel):
@@ -203,6 +275,8 @@ def _get_scene(session: Session, user: UserRow, scene_id: str) -> SceneRow:
 
 def _require_clip_source(session: Session, user: UserRow, kind: str, source_id: str) -> None:
     """Reject dangling or foreign clip sources at write time (never silently)."""
+    if kind == "text":
+        return  # text cards carry their copy inline; no source row
     if kind == "panel":
         row = session.get(PanelRow, source_id)
         project_id = row.page.project_id if row and row.page else None
@@ -624,9 +698,13 @@ def add_clip(
     _, tdur, fi, fo = _check_fx(body.motion, body.transition, body.transition_duration, body.fade_in, body.fade_out)
     if body.kind == "ai":
         raise HTTPException(400, "ai clips land in M4")
-    if not body.source_id:
+    if body.kind != "text" and not body.source_id:
         raise HTTPException(400, "source_id is required")
     _require_clip_source(session, user, body.kind, body.source_id)
+    extra = _clip_text_filter(
+        body.kind, body.text, body.text_size, body.text_color,
+        body.text_position, body.text_anim, body.filter,
+    )
     existing = session.execute(select(ClipRow).where(ClipRow.scene_id == scene.id))
     row = ClipRow(
         scene_id=scene.id,
@@ -639,6 +717,7 @@ def add_clip(
         fade_in=fi,
         fade_out=fo,
         order=len(existing.scalars().all()),
+        **extra,
     )
     session.add(row)
     session.commit()
@@ -663,14 +742,22 @@ def add_clips_batch(
         _check_fx(entry.motion, entry.transition, entry.transition_duration, entry.fade_in, entry.fade_out)
         if entry.kind == "ai":
             raise HTTPException(400, "ai clips land in M4")
-        if not entry.source_id:
+        if entry.kind != "text" and not entry.source_id:
             raise HTTPException(400, "source_id is required")
         _require_clip_source(session, user, entry.kind, entry.source_id)
+        _clip_text_filter(
+            entry.kind, entry.text, entry.text_size, entry.text_color,
+            entry.text_position, entry.text_anim, entry.filter,
+        )
     existing = session.execute(select(ClipRow).where(ClipRow.scene_id == scene.id))
     order = len(existing.scalars().all())
     rows: list[ClipRow] = []
     for entry in body.clips:
         _, tdur, fi, fo = _check_fx(entry.motion, entry.transition, entry.transition_duration, entry.fade_in, entry.fade_out)
+        extra = _clip_text_filter(
+            entry.kind, entry.text, entry.text_size, entry.text_color,
+            entry.text_position, entry.text_anim, entry.filter,
+        )
         row = ClipRow(
             scene_id=scene.id,
             kind=entry.kind,
@@ -682,6 +769,7 @@ def add_clips_batch(
             fade_in=fi,
             fade_out=fo,
             order=order,
+            **extra,
         )
         order += 1
         session.add(row)
@@ -742,8 +830,64 @@ def patch_clip(
         row.order = body.order
     if body.start is not None:
         row.start = body.start
+    if body.filter is not None:
+        row.clip_filter = _check_filter(body.filter or "none")
+    text_touched = any(
+        v is not None
+        for v in (
+            body.text, body.text_size, body.text_color,
+            body.text_position, body.text_anim,
+        )
+    )
+    if text_touched:
+        if row.kind != "text":
+            raise HTTPException(400, "only text clips carry copy")
+        ttext, tsize, tcolor, tpos, tanim = _check_text_fields(
+            body.text if body.text is not None else (row.text_content or ""),
+            body.text_size if body.text_size is not None else (row.text_size or 64),
+            body.text_color if body.text_color is not None else (row.text_color or "#ffffff"),
+            body.text_position if body.text_position is not None else (row.text_position or "center"),
+            body.text_anim if body.text_anim is not None else (row.text_anim or "none"),
+        )
+        if not ttext:
+            raise HTTPException(400, "text clips need text")
+        row.text_content = ttext
+        row.text_size = tsize
+        row.text_color = tcolor
+        row.text_position = tpos
+        row.text_anim = tanim
     session.commit()
     return row.to_schema()
+
+
+@router.get("/clips/{clip_id}/preview")
+def clip_preview(
+    clip_id: str,
+    px: int | None = None,
+    session: Session = Depends(get_session),
+    user: UserRow = Depends(get_current_user),
+):
+    """Small PNG artwork for one clip (text cards + stills).
+
+    Powers the timeline thumbs and the preview player for text clips,
+    which have no source file. Video/ai kinds have no still: 404.
+    """
+    row = session.get(ClipRow, clip_id)
+    if row is None:
+        raise HTTPException(404, "clip not found")
+    ensure_owner(session, user, row.scene.project_id)
+    img = resolve_clip_image(row, session)
+    if img is None or img.size == 0:
+        raise HTTPException(404, "clip has no still artwork")
+    side = min(max(px or THUMB_MAX_DIM, 32), 960)
+    h, w = img.shape[:2]
+    scale = side / max(h, w)
+    if scale < 1:
+        img = cv2.resize(img, (max(int(w * scale), 1), max(int(h * scale), 1)))
+    ok, buf = cv2.imencode(".png", img)
+    if not ok:
+        raise HTTPException(500, "could not encode clip preview")
+    return Response(content=bytes(buf), media_type="image/png")
 
 
 @router.delete("/clips/{clip_id}", status_code=204)

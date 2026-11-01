@@ -63,6 +63,9 @@ export function AudioDeck({
   const [cueTake, setCueTake] = useState("");
   const [cueStart, setCueStart] = useState("0");
   const [cueVolume, setCueVolume] = useState("1");
+  const [genText, setGenText] = useState("");
+  const [genBusy, setGenBusy] = useState(false);
+  const [genCue, setGenCue] = useState(true);
   const recRef = useRef<RecState | null>(null);
   const voiceoverRef = useRef<number | null>(null);
   const playersRef = useRef(new Map<string, HTMLAudioElement>());
@@ -246,6 +249,32 @@ export function AudioDeck({
     if (fileRef.current) fileRef.current.value = "";
   };
 
+  const generateVoice = async () => {
+    const text = genText.trim();
+    if (!text || genBusy) return;
+    setGenBusy(true);
+    try {
+      const take = await api.synthesizeVoice(projectId, {
+        text,
+        cue_scene_id: genCue && scene ? scene.id : undefined,
+        cue_start_sec: Math.max(playhead, 0),
+      });
+      setGenText("");
+      onTakes();
+      if (genCue && scene) {
+        onScene();
+        scrollToLane();
+        notify(`“${take.name}” generated and cued at ${Math.max(playhead, 0).toFixed(1)}s.`);
+      } else {
+        notify(`“${take.name}” generated into the library.`);
+      }
+    } catch (e) {
+      notify(`Voice generation failed: ${(e as Error).message}`);
+    } finally {
+      setGenBusy(false);
+    }
+  };
+
   const removeTake = async (take: AudioTake) => {
     if (!window.confirm(`Delete take "${take.name || "Untitled"}"? This can't be undone.`)) return;
     try {
@@ -337,6 +366,36 @@ export function AudioDeck({
           )}
         </div>
       )}
+
+      <div style={{ marginBottom: 8, border: "1px solid var(--kv-border)", borderRadius: 6, padding: 8 }}>
+        <div style={{ fontSize: 12, color: "var(--kv-muted)", marginBottom: 6 }}>
+          Generate voice — engine and voice come from the Brain voice row
+          (ElevenLabs cloud or the local free-tts server).
+        </div>
+        <textarea
+          value={genText}
+          onChange={(e) => setGenText(e.target.value)}
+          placeholder="Type what the voice should say…"
+          aria-label="Voiceover text to generate"
+          rows={2}
+          style={{ width: "100%", resize: "vertical", marginBottom: 6 }}
+        />
+        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          <Btn small disabled={genBusy || !genText.trim()} onClick={() => void generateVoice()}>
+            {genBusy ? "Generating…" : "Generate"}
+          </Btn>
+          <label style={{ display: "flex", gap: 4, alignItems: "center", fontSize: 12, color: "var(--kv-muted)" }}>
+            <input
+              type="checkbox"
+              checked={genCue}
+              disabled={!scene}
+              onChange={(e) => setGenCue(e.target.checked)}
+              aria-label="Cue the generated take at the playhead"
+            />
+            Cue at playhead{scene ? "" : " (pick a scene first)"}
+          </label>
+        </div>
+      </div>
 
       <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 8 }}>
         {takes.map((t, i) => (

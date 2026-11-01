@@ -42,7 +42,7 @@ export interface DetectResult {
 export interface Clip {
   id: string;
   scene_id: string;
-  kind: "panel" | "frame" | "media" | "video" | "ai";
+  kind: "panel" | "frame" | "media" | "video" | "ai" | "text";
   source_id: string;
   start: number;
   duration: number;
@@ -52,6 +52,14 @@ export interface Clip {
   fade_in: number;
   fade_out: number;
   order: number;
+  /** Text title cards (kind "text" only). */
+  text: string;
+  text_size: number;
+  text_color: string;
+  text_position: string;
+  text_anim: string;
+  /** CapCut-style color grade burned into the export. */
+  filter: string;
 }
 
 export interface AudioTake {
@@ -253,6 +261,7 @@ export interface AgentStatus {
   image_model: string | null;
   video_model: string | null;
   transcribe_model: string | null;
+  voice_model: string | null;
   providers: Record<string, string>;
   overrides: string[];
 }
@@ -262,11 +271,13 @@ export interface AgentConfigBody {
   chat_provider?: string | null;
   vision_provider?: string | null;
   image_provider?: string | null;
+  voice_provider?: string | null;
   chat_model?: string | null;
   vision_model?: string | null;
   image_model?: string | null;
   video_model?: string | null;
   transcribe_model?: string | null;
+  voice_model?: string | null;
 }
 
 export interface ChatTurn {
@@ -474,12 +485,38 @@ export const api = {
       transition_duration?: number;
       fade_in?: number;
       fade_out?: number;
+      filter?: string;
+      text?: string;
+      text_size?: number;
+      text_color?: string;
+      text_position?: string;
+      text_anim?: string;
     },
   ) =>
     req<Clip>(`/api/v1/scenes/${sceneId}/clips`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(clip),
+    }),
+  /** Still artwork for one clip (text cards + stills; usable in <img>). */
+  clipPreviewUrl: (clipId: string, px?: number) =>
+    `${apiBase()}/api/v1/clips/${clipId}/preview${px ? `?px=${px}` : ""}`,
+  /** Text-to-speech into the take library (Brain voice row picks engine). */
+  synthesizeVoice: (
+    projectId: string,
+    body: {
+      text: string;
+      voice?: string;
+      engine?: string;
+      lang?: string;
+      cue_scene_id?: string;
+      cue_start_sec?: number;
+    },
+  ) =>
+    req<AudioTake>(`/api/v1/projects/${projectId}/audio/synthesize`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
     }),
   patchClip: (clipId: string, patch: Partial<Clip>) =>
     req<Clip>(`/api/v1/clips/${clipId}`, {
@@ -580,6 +617,12 @@ export const api = {
       transition_duration?: number;
       fade_in?: number;
       fade_out?: number;
+      filter?: string;
+      text?: string;
+      text_size?: number;
+      text_color?: string;
+      text_position?: string;
+      text_anim?: string;
     }[],
   ) =>
     req<Clip[]>(`/api/v1/scenes/${sceneId}/clips/batch`, {

@@ -79,7 +79,8 @@ class AgentStatusOut(BaseModel):
     image_model: str | None
     video_model: str | None
     transcribe_model: str | None
-    # Effective provider per kind (chat/vision/image routable, video fixed).
+    voice_model: str | None
+    # Effective provider per kind (chat/vision/image/voice routable, video fixed).
     providers: dict[str, str] = {}
     # Studio override keys currently active (env wins when absent).
     overrides: list[str] = []
@@ -94,11 +95,13 @@ class AgentConfigBody(BaseModel):
     chat_provider: str | None = None
     vision_provider: str | None = None
     image_provider: str | None = None
+    voice_provider: str | None = None
     chat_model: str | None = None
     vision_model: str | None = None
     image_model: str | None = None
     video_model: str | None = None
     transcribe_model: str | None = None
+    voice_model: str | None = None
 
 
 class ChatTurnOut(BaseModel):
@@ -264,6 +267,7 @@ def agent_status(
         "image": provider_for("image"),
         "video": "openrouter",
         "transcribe": "meta",
+        "voice": provider_for("voice"),
     }
     try:
         chat_model = get_chat_config()[2]
@@ -290,6 +294,10 @@ def agent_status(
     }
     videos = {"openrouter": settings.openrouter_video_model}
     transcribes = {"meta": settings.meta_transcribe_model}
+    voices = {
+        "elevenlabs": settings.elevenlabs_voice_model,
+        "free-tts": settings.freetts_voice_model,
+    }
     return AgentStatusOut(
         provider=provider,
         cloud=chat_configured(),
@@ -298,6 +306,7 @@ def agent_status(
         image_model=images.get(providers["image"]),
         video_model=videos.get(providers["video"]),
         transcribe_model=transcribes.get(providers["transcribe"]),
+        voice_model=voices.get(providers["voice"]),
         providers=providers,
         overrides=sorted(get_ai_overrides(session).keys()),
     )
@@ -315,7 +324,8 @@ def agent_config(
     restart is needed. Unknown providers and off-catalog OpenRouter
     image/video models fail loudly instead of billing surprises. Video is
     OpenRouter-only end to end, so it takes a model but no provider;
-    transcription is Meta-only the same way.
+    transcription is Meta-only the same way. Voice (TTS) routes between
+    ElevenLabs cloud and the local free-tts server like chat/vision/image.
     """
     if body.provider is not None:
         text = body.provider.strip().lower()
@@ -330,7 +340,7 @@ def agent_config(
             # Blank provider clears the override back to the env default.
             set_ai_override(session, "ai_provider", None)
     # Phase 1: per-kind providers, so phase 2 maps models against them.
-    for kind in ("chat", "vision", "image"):
+    for kind in ("chat", "vision", "image", "voice"):
         wanted = getattr(body, f"{kind}_provider")
         if wanted is None:
             continue
@@ -347,7 +357,7 @@ def agent_config(
             set_ai_override(session, f"{kind}_provider", None)
     apply_ai_overrides(session)
     # Phase 2: models against the now-effective providers.
-    for kind in ("chat", "vision", "image", "video", "transcribe"):
+    for kind in ("chat", "vision", "image", "video", "transcribe", "voice"):
         wanted = getattr(body, f"{kind}_model")
         if wanted is None:
             continue

@@ -3,10 +3,12 @@
 Clip sources: panel crops (page image + box), frame composites (layer PNGs),
 page stills (kind=media, source_id=page id), video files (kind=video,
 source_id=finished generation job id; looped to the clip length, Ken Burns
-moves apply over the moving picture). Motion: none, zoom-in, zoom-out,
-pan-left, pan-right, pan-up, pan-down. Per-clip fade in/out plus
-transitions into a clip (crossfade, fade-black, wipe-left, impact)
-overlap the boundary frames. Timeline audio cues are mixed in a second ffmpeg pass
+moves apply over the moving picture). Text title cards (kind=text) are
+rastered in-process with entrance anims (none/fade/rise). Motion: none,
+zoom-in, zoom-out, pan-left, pan-right, pan-up, pan-down, drift.
+Per-clip fade in/out, a color grade (none/grayscale/sepia/vintage/vivid),
+plus transitions into a clip (crossfade, fade-black, fade-white,
+wipe-left, wipe-right, push-left, impact) overlap the boundary frames. Timeline audio cues are mixed in a second ffmpeg pass
 (adelay/volume/afade per cue, amix, AAC). Encoding via the imageio-ffmpeg
 bundled binary (libx264/yuv420p/faststart) so output plays everywhere.
 """
@@ -18,12 +20,13 @@ import io
 import logging
 import subprocess
 import tempfile
+import textwrap
 from pathlib import Path
 
 import cv2
 import imageio_ffmpeg
 import numpy as np
-from PIL import Image, ImageChops
+from PIL import Image, ImageChops, ImageDraw, ImageFont
 from sqlalchemy.orm import Session
 
 from komaverse import storage
@@ -133,6 +136,10 @@ def motion_frame(base: np.ndarray, w: int, h: int, t: float, motion: str) -> np.
     elif motion == "pan-down":
         ww, hh = w, h
         x, y = (bw - ww) // 2, int((bh - hh) * t)
+    elif motion == "drift":
+        # Slow diagonal drift: top-left settles to bottom-right.
+        ww, hh = w, h
+        x, y = int((bw - ww) * t), int((bh - hh) * t)
     else:  # none
         ww, hh = w, h
         x, y = (bw - ww) // 2, (bh - hh) // 2
@@ -148,6 +155,99 @@ def fade_frame(frame: np.ndarray, alpha: float) -> np.ndarray:
     if alpha <= 0.0:
         return np.zeros_like(frame)
     return (frame.astype(np.float32) * alpha).astype(np.uint8)
+
+
+TEXT_CARD_BG = (13, 13, 18)  # near-black title-card ground (RGB)
+
+
+def render_text_image(
+    text: str,
+    *,
+    size: int = 64,
+    color: str = "#ffffff",
+    position: str = "center",
+    w: int = 1920,
+    h: int = 1080,
+    anim: str = "none",
+    progress: float = 1.0,
+) -> np.ndarray:
+    """Full-frame text title card (BGR uint8): the export look for text clips.
+
+    Entrance anims play over the first stretch of the clip: fade dissolves
+    in, rise floats up while dissolving. Static callers pass the defaults.
+    """
+    body = (text or "").strip()
+    size = min(max(int(size or 64), 16), 256)
+    try:
+        font = ImageFont.load_default(size=size)
+    except Exception:
+        font = ImageFont.load_default()
+    # Rough char budget from the point size, then hard-wrap.
+    per_line = max(10, int(w / max(size * 0.55, 1)))
+    lines: list[str] = []
+    for para in body.splitlines() or [""]:
+        lines.extend(textwrap.wrap(para, width=per_line) or [""])
+    lines = lines[:12]
+    p = min(max(progress, 0.0), 1.0)
+    if anim == "fade":
+        alpha = min(1.0, p / 0.25) if p < 1.0 else 1.0
+        dy = 0.0
+    elif anim == "rise":
+        k = min(1.0, p / 0.35)
+        alpha = k
+        dy = (1.0 - k) * size * 1.2
+    else:
+        alpha, dy = 1.0, 0.0
+    try:
+        rgb = tuple(int(color.lstrip("#")[i : i + 2], 16) for i in (0, 2, 4))
+    except (ValueError, IndexError):
+        rgb = (255, 255, 255)
+    card = Image.new("RGB", (w, h), TEXT_CARD_BG)
+    layer = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(layer)
+    cy = h * 0.22 if position == "top" else h * 0.78 if position == "bottom" else h / 2
+    anchor = "ma" if position in ("top", "bottom") else "mm"
+    draw.multiline_text(
+        (w / 2, cy - dy),
+        "\n".join(lines),
+        font=font,
+        fill=(*rgb, int(255 * alpha)),
+        anchor=anchor,
+        align="center",
+        spacing=max(size // 3, 4),
+    )
+    out = Image.alpha_composite(card.convert("RGBA"), layer).convert("RGB")
+    return cv2.cvtColor(np.asarray(out), cv2.COLOR_RGB2BGR)
+
+
+def apply_filter(frame: np.ndarray, name: str) -> np.ndarray:
+    """CapCut-style color grade on one BGR frame (export burn-in)."""
+    if not name or name == "none":
+        return frame
+    if name == "grayscale":
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        return cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
+    if name == "sepia":
+        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB).astype(np.float32)
+        mat = np.array(
+            [[0.393, 0.769, 0.189], [0.349, 0.686, 0.168], [0.272, 0.534, 0.131]]
+        )
+        graded = np.clip(rgb @ mat.T, 0, 255).astype(np.uint8)
+        return cv2.cvtColor(graded, cv2.COLOR_RGB2BGR)
+    if name == "vintage":
+        aged = apply_filter(frame, "sepia").astype(np.float32)
+        aged = np.clip(aged * 0.55 + frame.astype(np.float32) * 0.45, 0, 255)
+        h, w = frame.shape[:2]
+        yy, xx = np.mgrid[0:h, 0:w].astype(np.float32)
+        dist = np.sqrt(((xx - w / 2) / (w / 2)) ** 2 + ((yy - h / 2) / (h / 2)) ** 2) / 2
+        mask = np.clip(1.0 - 0.45 * dist, 0.0, 1.0)[..., None]
+        return (aged * mask).astype(np.uint8)
+    if name == "vivid":
+        hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV).astype(np.float32)
+        hsv[..., 1] = np.clip(hsv[..., 1] * 1.35, 0, 255)
+        back = cv2.cvtColor(hsv.astype(np.uint8), cv2.COLOR_HSV2BGR).astype(np.float32)
+        return np.clip((back - 128) * 1.08 + 128, 0, 255).astype(np.uint8)
+    return frame
 
 
 def fade_alpha(i: int, n: int, fps: int, fade_in: float, fade_out: float) -> float:
@@ -182,6 +282,25 @@ def blend_frames(a: np.ndarray, b: np.ndarray, j: int, k: int, kind: str) -> np.
         out = a.copy()
         out[:, :cut] = b[:, :cut]
         return out
+    if kind == "wipe-right":
+        cut = int(a.shape[1] * t)
+        out = a.copy()
+        out[:, a.shape[1] - cut :] = b[:, b.shape[1] - cut :]
+        return out
+    if kind == "push-left":
+        # b slides in from the right, pushing a out to the left.
+        cut = int(a.shape[1] * t)
+        out = a.copy()
+        out[:, : a.shape[1] - cut] = a[:, cut:]
+        out[:, a.shape[1] - cut :] = b[:, :cut]
+        return out
+    if kind == "fade-white":
+        white = np.full_like(a, 255).astype(np.float32)
+        if t < 0.5:
+            u = 2.0 * t
+            return (a.astype(np.float32) * (1.0 - u) + white * u).astype(np.uint8)
+        u = 2.0 * t - 1.0
+        return (white * (1.0 - u) + b.astype(np.float32) * u).astype(np.uint8)
     # crossfade
     return (a.astype(np.float32) * (1.0 - t) + b.astype(np.float32) * t).astype(np.uint8)
 
@@ -238,6 +357,15 @@ def resolve_clip_image(clip: ClipRow, session: Session) -> np.ndarray | None:
         if page is None:
             return None
         return cv2.imread(str(storage.resolve(page.image_path)))
+    if clip.kind == "text":
+        if not (clip.text_content or "").strip():
+            return None
+        return render_text_image(
+            clip.text_content or "",
+            size=clip.text_size or 64,
+            color=clip.text_color or "#ffffff",
+            position=clip.text_position or "center",
+        )
     return None  # ai clips land in M4
 
 
@@ -565,10 +693,25 @@ def render_project(
                 on_progress(done, total_frames)
 
         def still_frame(clip, src, i: int, n: int) -> np.ndarray:
-            return finish_frame(
-                src, clip.motion, i, n, w, h, fps,
+            raw = src
+            if clip.kind == "text" and (clip.text_anim or "none") != "none":
+                # Entrance anims re-raster per frame; the resolved card is
+                # the settled end state the thumbs show.
+                raw = render_text_image(
+                    clip.text_content or "",
+                    size=clip.text_size or 64,
+                    color=clip.text_color or "#ffffff",
+                    position=clip.text_position or "center",
+                    w=w,
+                    h=h,
+                    anim=clip.text_anim or "none",
+                    progress=i / max(n - 1, 1),
+                )
+            out = finish_frame(
+                raw, clip.motion, i, n, w, h, fps,
                 clip.fade_in or 0.0, clip.fade_out or 0.0,
             )
+            return apply_filter(out, clip.clip_filter or "none")
 
         def tail_frame(idx: int, j: int) -> np.ndarray:
             """Transition contributor: tail frame j of the overlap into
@@ -581,18 +724,24 @@ def render_project(
                 a_raw = read_video_frame(pvpath, pvdur, (pn - k + j) / fps, w, h)
             else:
                 a_raw = psrc
-            a = finish_frame(
-                a_raw, pclip.motion, pn - k + j, pn, w, h, fps,
-                pclip.fade_in or 0.0, pclip.fade_out or 0.0,
+            a = apply_filter(
+                finish_frame(
+                    a_raw, pclip.motion, pn - k + j, pn, w, h, fps,
+                    pclip.fade_in or 0.0, pclip.fade_out or 0.0,
+                ),
+                pclip.clip_filter or "none",
             )
             if isinstance(src, tuple):
                 _, vpath, vdur = src
                 b_raw = read_video_frame(vpath, vdur, j / fps, w, h)
             else:
                 b_raw = src
-            b = finish_frame(
-                b_raw, clip.motion, j, n, w, h, fps,
-                clip.fade_in or 0.0, clip.fade_out or 0.0,
+            b = apply_filter(
+                finish_frame(
+                    b_raw, clip.motion, j, n, w, h, fps,
+                    clip.fade_in or 0.0, clip.fade_out or 0.0,
+                ),
+                clip.clip_filter or "none",
             )
             return blend_frames(a, b, j, k, clip.transition or "crossfade")
 
@@ -618,9 +767,12 @@ def render_project(
                             frame = last
                             if frame is None:
                                 frame = np.full((h, w, 3), PAPER_RGB[::-1], dtype=np.uint8)
-                            emit(finish_frame(
-                                frame, clip.motion, i, n, w, h, fps,
-                                clip.fade_in or 0.0, clip.fade_out or 0.0,
+                            emit(apply_filter(
+                                finish_frame(
+                                    frame, clip.motion, i, n, w, h, fps,
+                                    clip.fade_in or 0.0, clip.fade_out or 0.0,
+                                ),
+                                clip.clip_filter or "none",
                             ))
                     finally:
                         cap.release()

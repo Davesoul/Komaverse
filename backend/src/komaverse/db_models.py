@@ -259,6 +259,12 @@ class ClipRow(Base):
     fade_in: Mapped[float] = mapped_column(default=0.0)
     fade_out: Mapped[float] = mapped_column(default=0.0)
     order: Mapped[int] = mapped_column(default=0)
+    text_content: Mapped[str] = mapped_column(Text, default="")
+    text_size: Mapped[int] = mapped_column(default=64)
+    text_color: Mapped[str] = mapped_column(String(16), default="#ffffff")
+    text_position: Mapped[str] = mapped_column(String(16), default="center")
+    text_anim: Mapped[str] = mapped_column(String(16), default="none")
+    clip_filter: Mapped[str] = mapped_column(String(32), default="none")
 
     scene: Mapped[SceneRow] = relationship(back_populates="clips")
 
@@ -280,6 +286,14 @@ class ClipRow(Base):
             fade_in=self.fade_in if self.fade_in is not None else 0.0,
             fade_out=self.fade_out if self.fade_out is not None else 0.0,
             order=self.order,
+            # Pre-text rows hold NULL (ALTER backfill): serialize them as
+            # the schema defaults instead of 500ing the list.
+            text=self.text_content or "",
+            text_size=self.text_size if self.text_size is not None else 64,
+            text_color=self.text_color or "#ffffff",
+            text_position=self.text_position or "center",
+            text_anim=self.text_anim or "none",
+            filter=self.clip_filter or "none",
         )
 
 

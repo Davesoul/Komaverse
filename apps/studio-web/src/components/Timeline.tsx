@@ -12,6 +12,8 @@ export interface TimelineClipInfo {
   motion: string;
   /** Blend into this clip from the previous one ("none" hides the badge). */
   transition: string;
+  /** Export color grade ("none" hides the badge). */
+  filter: string;
 }
 
 export interface TimelineCueInfo {
@@ -56,6 +58,7 @@ const KIND_BAR: Record<string, string> = {
   media: "#7d9cc4",
   video: "#4a6fa5",
   ai: "#ff5a5f",
+  text: "#e0a100",
 };
 
 const RULER_H = 26;
@@ -617,6 +620,14 @@ export function Timeline({
                             </span>
                           </>
                         )}
+                        {clip.filter && clip.filter !== "none" && (
+                          <>
+                            {" · "}
+                            <span className="kv-sfx kv-sfx-sm" title={`Color grade burned into the export: ${clip.filter}`}>
+                              {clip.filter}
+                            </span>
+                          </>
+                        )}
                       </div>
                     </div>
                     {edgeHandle("l", handlesVisible, (e) =>
@@ -638,7 +649,7 @@ export function Timeline({
               })}
               {clips.length === 0 && (
                 <span style={{ fontSize: 12, color: "var(--kv-faint)", padding: 8, display: "block" }}>
-                  No clips — auto-direct the timeline or add panels, frames, stills, and videos.
+                  No clips — auto-direct the timeline or add panels, frames, stills, videos, and texts.
                 </span>
               )}
             </div>
