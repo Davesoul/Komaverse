@@ -348,7 +348,9 @@ free-tts `tts.py` (lazy imports, first-available auto-pick, WAV
 intermediates, 192k MP3 — but MP3 via the bundled imageio-ffmpeg, WAV
 via stdlib `wave`, no soundfile dep, no PATH ffmpeg). pyttsx3 ships in
 main deps (out-of-box system voice); Kokoro is a `voice` extra
-(`pykokoro`, weights fetch on first run); XTTS cloning is refused
+(`pykokoro` + `onnxruntime` CPU inference, weights fetch on first run —
+without them every Kokoro pick silently sounds like the system voice);
+XTTS cloning is refused
 loudly (GBs of weights — not vendored). SAPI speaks on a dedicated
 fresh STA thread per call: uvicorn reuses worker threads and a prior
 MTA init there fails SAPI with "Cannot change thread mode" (proven;

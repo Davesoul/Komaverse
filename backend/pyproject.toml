@@ -26,7 +26,8 @@ dependencies = [
 dev = ["pytest>=8", "httpx>=0.27"]
 # Neural local voice (Kokoro): torch is already required; the voice
 # weights (~300 MB) download from Hugging Face on first synthesis.
-voice = ["pykokoro>=0.9.0"]
+# onnxruntime is Kokoro's CPU inference engine (pykokoro leaves it optional).
+voice = ["pykokoro>=0.9.0", "onnxruntime>=1.20"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/komaverse"]

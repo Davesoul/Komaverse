@@ -144,19 +144,34 @@ def _write_wav_mono(path: Path, audio: np.ndarray, sample_rate: int) -> None:
 
 def _run_kokoro(text: str, voice: str, lang: str, mp3_path: Path) -> None:
     try:
-        from pykokoro import GenerationConfig, KokoroPipeline, PipelineConfig
+        from pykokoro import GenerationConfig, SynthesisConfig
+        from pykokoro.synthesizer import KokoroSynthesizer
     except Exception as exc:
         raise ProviderError(
             "kokoro voice needs `pip install pykokoro` in the backend "
             f"environment ({exc})"
         ) from exc
-    pipeline = KokoroPipeline(
-        PipelineConfig(voice=voice or "af_sarah", generation=GenerationConfig(lang=lang or "en"))
-    )
-    res = pipeline.run(text)
+    try:
+        synth = KokoroSynthesizer(
+            SynthesisConfig(
+                voice=voice or "af_sarah",
+                generation=GenerationConfig(lang=lang or "en"),
+            )
+        )
+    except Exception as exc:
+        raise ProviderError(f"kokoro failed to start: {exc}") from exc
+    try:
+        seg = synth.synthesize_text(text, language=lang or "en")
+    except Exception as exc:
+        raise ProviderError(f"kokoro synthesis failed: {exc}") from exc
+    finally:
+        try:
+            synth.close()
+        except Exception:
+            pass
     wav_path = mp3_path.with_suffix(".wav")
     try:
-        _write_wav_mono(wav_path, res.audio, res.sample_rate)
+        _write_wav_mono(wav_path, seg.audio, seg.sample_rate)
         _wav_to_mp3(wav_path, mp3_path)
     finally:
         wav_path.unlink(missing_ok=True)
