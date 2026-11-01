@@ -46,7 +46,22 @@ logger = logging.getLogger("komaverse.animate")
 router = APIRouter(prefix="/api/v1")
 
 CLIP_KINDS = ("panel", "frame", "media", "video", "ai")
-MOTIONS = ("none", "zoom-in", "zoom-out", "pan-left", "pan-right")
+MOTIONS = ("none", "zoom-in", "zoom-out", "pan-left", "pan-right", "pan-up", "pan-down")
+TRANSITIONS = ("none", "crossfade", "fade-black", "wipe-left", "impact")
+
+
+def _check_fx(motion: str, transition: str, transition_duration: float, fade_in: float, fade_out: float) -> tuple[str, float, float, float]:
+    """Validate clip motion/transition/fades; returns clamped values."""
+    if motion not in MOTIONS:
+        raise HTTPException(400, f"unknown motion: {motion}")
+    if transition not in TRANSITIONS:
+        raise HTTPException(400, f"unknown transition: {transition}")
+    return (
+        motion,
+        min(max(transition_duration, 0.1), 2.0),
+        min(max(fade_in, 0.0), 10.0),
+        min(max(fade_out, 0.0), 10.0),
+    )
 
 MIN_FRAME_DIM = 8
 MAX_FRAME_DIM = 4096
@@ -116,6 +131,10 @@ class ClipCreate(BaseModel):
     source_id: str = ""
     duration: float = 2.0
     motion: str = "none"
+    transition: str = "none"  # into this clip from the previous one
+    transition_duration: float = 0.5
+    fade_in: float = 0.0
+    fade_out: float = 0.0
 
 
 class ClipBatchCreate(BaseModel):
@@ -133,6 +152,10 @@ class FrameOrder(BaseModel):
 class ClipPatch(BaseModel):
     duration: float | None = None
     motion: str | None = None
+    transition: str | None = None
+    transition_duration: float | None = None
+    fade_in: float | None = None
+    fade_out: float | None = None
     order: int | None = None
     start: float | None = None
 
@@ -469,7 +492,22 @@ def list_sequences(
     user: UserRow = Depends(get_current_user),
 ):
     project = own_project(session, user, project_id)
-    return [s.to_schema() for s in _sequence_rows(session, project.id)]
+    seqs = list(_sequence_rows(session, project.id))
+    if not seqs and any(
+        f.sequence_id is None for f in _frame_rows(session, project.id)
+    ):
+        # Legacy projects predate sequences: listing must not strand
+        # their frames with nothing to select — create "Sequence 1" and
+        # adopt the orphans. Committed so the frames list (a separate
+        # request) sees the adopted sequence ids too. Frameless projects
+        # still list empty.
+        seqs = ensure_project_sequences(session, project)
+        session.commit()
+        # expire_on_commit is off: reload so the embedded frames reflect
+        # the just-adopted orphans instead of the pre-adoption collection.
+        session.expire_all()
+        seqs = list(_sequence_rows(session, project.id))
+    return [s.to_schema() for s in seqs]
 
 
 @router.patch("/sequences/{sequence_id}", response_model=Sequence)
@@ -583,8 +621,7 @@ def add_clip(
     scene = _get_scene(session, user, scene_id)
     if body.kind not in CLIP_KINDS:
         raise HTTPException(400, f"unknown clip kind: {body.kind}")
-    if body.motion not in MOTIONS:
-        raise HTTPException(400, f"unknown motion: {body.motion}")
+    _, tdur, fi, fo = _check_fx(body.motion, body.transition, body.transition_duration, body.fade_in, body.fade_out)
     if body.kind == "ai":
         raise HTTPException(400, "ai clips land in M4")
     if not body.source_id:
@@ -597,6 +634,10 @@ def add_clip(
         source_id=body.source_id,
         duration=max(body.duration, 0.1),
         motion=body.motion,
+        transition=body.transition,
+        transition_duration=tdur,
+        fade_in=fi,
+        fade_out=fo,
         order=len(existing.scalars().all()),
     )
     session.add(row)
@@ -619,8 +660,7 @@ def add_clips_batch(
     for entry in body.clips:
         if entry.kind not in CLIP_KINDS:
             raise HTTPException(400, f"unknown clip kind: {entry.kind}")
-        if entry.motion not in MOTIONS:
-            raise HTTPException(400, f"unknown motion: {entry.motion}")
+        _check_fx(entry.motion, entry.transition, entry.transition_duration, entry.fade_in, entry.fade_out)
         if entry.kind == "ai":
             raise HTTPException(400, "ai clips land in M4")
         if not entry.source_id:
@@ -630,12 +670,17 @@ def add_clips_batch(
     order = len(existing.scalars().all())
     rows: list[ClipRow] = []
     for entry in body.clips:
+        _, tdur, fi, fo = _check_fx(entry.motion, entry.transition, entry.transition_duration, entry.fade_in, entry.fade_out)
         row = ClipRow(
             scene_id=scene.id,
             kind=entry.kind,
             source_id=entry.source_id,
             duration=max(entry.duration, 0.1),
             motion=entry.motion,
+            transition=entry.transition,
+            transition_duration=tdur,
+            fade_in=fi,
+            fade_out=fo,
             order=order,
         )
         order += 1
@@ -683,6 +728,16 @@ def patch_clip(
         if body.motion not in MOTIONS:
             raise HTTPException(400, f"unknown motion: {body.motion}")
         row.motion = body.motion
+    if body.transition is not None:
+        if body.transition not in TRANSITIONS:
+            raise HTTPException(400, f"unknown transition: {body.transition}")
+        row.transition = body.transition
+    if body.transition_duration is not None:
+        row.transition_duration = min(max(body.transition_duration, 0.1), 2.0)
+    if body.fade_in is not None:
+        row.fade_in = min(max(body.fade_in, 0.0), 10.0)
+    if body.fade_out is not None:
+        row.fade_out = min(max(body.fade_out, 0.0), 10.0)
     if body.order is not None:
         row.order = body.order
     if body.start is not None:
@@ -1349,6 +1404,11 @@ def run_export_job(job_id: str, factory=None) -> None:
         job = session.get(JobRow, job_id)
         if job is None:
             return
+        # Expire only the cancel flag, never a full refresh (it would
+        # discard staged worker state on this session).
+        session.expire(job, ["status"])
+        if job.status == "cancelled":
+            return
         job.status = "running"
         job.progress = 0.0
         session.commit()
@@ -1378,6 +1438,9 @@ def run_export_job(job_id: str, factory=None) -> None:
                 scene_id=params.get("scene_id"),
             )
         except ValueError as exc:
+            session.expire(job, ["status"])
+            if job.status == "cancelled":
+                return
             job.status = "failed"
             job.error = str(exc)
             session.commit()
@@ -1385,11 +1448,17 @@ def run_export_job(job_id: str, factory=None) -> None:
             record_usage(session, job.user_id, "export", "failed")
             return
         except Exception as exc:  # noqa: BLE001 — job must never hang
+            session.expire(job, ["status"])
+            if job.status == "cancelled":
+                return
             job.status = "failed"
             job.error = f"unexpected: {exc}"
             session.commit()
             metrics.record_job("failed")
             record_usage(session, job.user_id, "export", "failed")
+            return
+        session.expire(job, ["status"])
+        if job.status == "cancelled":
             return
         job.status = "done"
         job.progress = 1.0
@@ -1412,8 +1481,14 @@ def run_export_job(job_id: str, factory=None) -> None:
         session.commit()
         metrics.record_job("done")
         metrics.record_export()
+        # Exported frames as the compute proxy: no LLM tokens exist here,
+        # but the dashboard scales on this column — one unit per frame.
         record_usage(
-            session, job.user_id, "export", f"{out['width']}x{out['height']}@{out['fps']}"
+            session,
+            job.user_id,
+            "export",
+            f"{out['width']}x{out['height']}@{out['fps']}",
+            max(1, round(out["duration_sec"] * out["fps"])),
         )
 
 

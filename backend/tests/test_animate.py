@@ -36,7 +36,9 @@ from komaverse.api.animate import (
     frame_thumbnail,
     get_export_report,
     get_frame,
+    list_frames,
     list_scenes,
+    list_sequences,
     order_clips,
     patch_clip,
     patch_scene,
@@ -528,6 +530,12 @@ def test_export_renders_mp4(factory, user):
     assert report.clips_rendered >= 2
     assert report.url == done.result_url
     assert (report.fps, report.width, report.height) == (5, 320, 240)
+    from komaverse.db_models import UsageEventRow
+
+    with factory() as s:
+        usage = s.query(UsageEventRow).filter_by(kind="export").all()
+    # Exported frames as the compute proxy: one unit per rendered frame.
+    assert usage and usage[-1].tokens == max(1, round(report.rendered_sec * report.fps))
 
 
 def test_export_reports_clamps_and_skips(factory, user):
@@ -678,7 +686,7 @@ def test_motion_frame_moves_pixels_for_every_motion():
 
     rng = np.random.default_rng(7)
     base = rng.integers(0, 255, (360, 640, 3)).astype("uint8")
-    for motion in ("zoom-in", "zoom-out", "pan-left", "pan-right"):
+    for motion in ("zoom-in", "zoom-out", "pan-left", "pan-right", "pan-up", "pan-down"):
         first = motion_frame(base, 320, 180, 0.0, motion)
         last = motion_frame(base, 320, 180, 1.0, motion)
         assert not np.array_equal(first, last), motion
@@ -820,6 +828,23 @@ def test_legacy_frames_auto_group(factory, user):
         assert third.sequence_id == seqs[0].id
 
 
+def test_list_sequences_rescues_legacy_orphan_frames(factory, user):
+    """Pre-sequence rows (frames, zero sequences): listing creates
+    Sequence 1 and adopts the orphans, so Draw never dead-ends on
+    'No frames yet'. Frameless projects still list empty."""
+    with factory() as s:
+        project = create_project(ProjectCreate(name="Legacy"), s, user)
+        s.add(FrameRow(project_id=project.id, name="Old", sequence_id=None))
+        s.commit()
+    with factory() as s:
+        (seq,) = list_sequences(project.id, s, user)
+    assert seq.name == "Sequence 1"
+    assert [f.name for f in seq.frames] == ["Old"]
+    with factory() as s:
+        (frame,) = list_frames(project.id, s, user)
+    assert frame.sequence_id == seq.id
+
+
 def _video_bytes(n=8, w=64, h=48) -> bytes:
     import os
     import tempfile
@@ -911,3 +936,69 @@ def test_duplicate_scene_and_scoped_export(factory, user):
     with factory() as s:
         done = get_job(job.id, s, user)
     assert done.status == "done" and (done.result_url or "").endswith(".mp4")
+
+
+def test_clip_fx_validated_and_patched(factory, user):
+    project_id, scene_id, panels = _scene_with_panels(factory, user)
+    with factory() as s:
+        clip = add_clip(
+            scene_id,
+            ClipCreate(
+                kind="panel", source_id=panels[0], duration=1.0, motion="pan-up",
+                transition="crossfade", transition_duration=0.4,
+                fade_in=0.2, fade_out=0.3,
+            ),
+            s, user,
+        )
+    assert (clip.transition, clip.transition_duration, clip.fade_in, clip.fade_out) == ("crossfade", 0.4, 0.2, 0.3)
+    with factory() as s:
+        with pytest.raises(HTTPException):
+            add_clip(scene_id, ClipCreate(kind="panel", source_id=panels[0], transition="star-wipe"), s, user)
+        with pytest.raises(HTTPException):
+            add_clip(scene_id, ClipCreate(kind="panel", source_id=panels[0], motion="barrel-roll"), s, user)
+    with factory() as s:
+        patched = patch_clip(clip.id, ClipPatch(transition="fade-black", transition_duration=5.0, fade_in=99.0), s, user)
+    assert patched.transition == "fade-black"
+    assert patched.transition_duration == 2.0  # clamped, never silent
+    assert patched.fade_in == 10.0
+
+
+def test_export_with_impact_flash(factory, user):
+    project_id, scene_id, panels = _scene_with_panels(factory, user)
+    with factory() as s:
+        add_clip(scene_id, ClipCreate(kind="panel", source_id=panels[0], duration=1.0), s, user)
+        second = add_clip(
+            scene_id,
+            ClipCreate(kind="panel", source_id=panels[1], duration=1.0, transition="impact"),
+            s, user,
+        )
+    assert second.transition == "impact"
+    with factory() as s:
+        job = export_project(project_id, ExportRequest(fps=5, width=320, height=240), BackgroundTasks(), s, user)
+    run_export_job(job.id, factory)
+    with factory() as s:
+        done = get_job(job.id, s, user)
+    assert done.status == "done" and (done.result_url or "").endswith(".mp4")
+
+
+def test_export_with_transition_and_fades(factory, user):
+    project_id, scene_id, panels = _scene_with_panels(factory, user)
+    with factory() as s:
+        first = add_clip(scene_id, ClipCreate(kind="panel", source_id=panels[0], duration=1.0, fade_out=0.3), s, user)
+        second = add_clip(
+            scene_id,
+            ClipCreate(kind="panel", source_id=panels[1], duration=1.0, motion="pan-down",
+                       transition="crossfade", transition_duration=0.4, fade_in=0.2),
+            s, user,
+        )
+    assert second.transition == "crossfade"
+    with factory() as s:
+        job = export_project(project_id, ExportRequest(fps=5, width=320, height=240), BackgroundTasks(), s, user)
+    run_export_job(job.id, factory)
+    with factory() as s:
+        done = get_job(job.id, s, user)
+        report = get_export_report(job.id, s, user)
+    assert done.status == "done" and (done.result_url or "").endswith(".mp4")
+    assert report.clips_rendered == 2
+    video_path = settings.media_dir / (done.result_url or "").removeprefix("/media/")
+    assert video_path.exists() and video_path.stat().st_size > 1000

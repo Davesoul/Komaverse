@@ -34,6 +34,14 @@ class Settings(BaseSettings):
     mcp_user_email: str = Field(default="", validation_alias="KOMAVERSE_MCP_USER")
 
     ai_provider: str = Field(default="cloud", validation_alias="AI_PROVIDER")
+    # Per-kind studio overrides (widget Brain panel; blank = ai_provider).
+    chat_provider: str | None = Field(default=None, validation_alias="CHAT_PROVIDER")
+    vision_provider: str | None = Field(
+        default=None, validation_alias="VISION_PROVIDER"
+    )
+    image_provider: str | None = Field(
+        default=None, validation_alias="IMAGE_PROVIDER"
+    )
     ai_base_url: str | None = Field(default=None, validation_alias="AI_BASE_URL")
     ai_api_key: str | None = Field(default=None, validation_alias="AI_API_KEY")
     ai_image_model: str = Field(default="image", validation_alias="AI_IMAGE_MODEL")

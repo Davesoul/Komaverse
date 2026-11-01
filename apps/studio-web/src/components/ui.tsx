@@ -1,7 +1,9 @@
 import { useEffect, useState } from "react";
 import type {
   ButtonHTMLAttributes,
+  CSSProperties,
   InputHTMLAttributes,
+  MouseEvent as ReactMouseEvent,
   ReactNode,
   Ref,
   SelectHTMLAttributes,
@@ -337,24 +339,50 @@ const BURST_PATH =
   "M50 0 L61 28 L92 12 L74 40 L100 50 L74 60 L92 88 L61 72 " +
   "L50 100 L39 72 L8 88 L26 60 L0 50 L26 40 L8 12 L39 28 Z";
 
+// Impact bubble: jagged starburst, generated once with a seeded PRNG so
+// every render paints the same spikes. Anime-style means few bold spikes,
+// a thick ink outline, and a paper halo behind the color fill.
+function impactPath(
+  spikes = 12,
+  rOuter = 49,
+  rInner = 27,
+): string {
+  let seed = 7;
+  const rnd = () => {
+    seed = (seed * 16807) % 2147483647;
+    return seed / 2147483647;
+  };
+  const pts: string[] = [];
+  for (let i = 0; i < spikes * 2; i++) {
+    const r = (i % 2 === 0 ? rOuter : rInner) * (0.85 + rnd() * 0.3);
+    const a = (i / (spikes * 2)) * Math.PI * 2 - Math.PI / 2;
+    pts.push(`${(50 + r * Math.cos(a)).toFixed(1)} ${(50 + r * Math.sin(a)).toFixed(1)}`);
+  }
+  return "M" + pts.join(" L") + " Z";
+}
+const IMPACT_BURST_PATH = impactPath();
+
 export function ImpactBurst({
   text,
   size = 120,
+  tone = "red",
+  shape = "burst",
+  onClick,
+  label,
 }: {
   text: string;
   size?: number;
+  /** Red shouts, gold crowns (awards, featured, best). */
+  tone?: "red" | "gold";
+  /** Soft blob star or a jagged impact bubble. */
+  shape?: "burst" | "impact";
+  /** When set, the bubble is a real button (e.g. a GO CTA). */
+  onClick?: (e: ReactMouseEvent<HTMLButtonElement>) => void;
+  label?: string;
 }) {
-  return (
-    <div
-      role="img"
-      aria-label={text}
-      style={{
-        position: "relative",
-        width: size,
-        height: size,
-        flexShrink: 0,
-      }}
-    >
+  const fill = tone === "gold" ? "var(--kv-gold)" : "var(--kv-accent)";
+  const body = (
+    <>
       <svg
         viewBox="0 0 100 100"
         aria-hidden
@@ -363,10 +391,27 @@ export function ImpactBurst({
           inset: 0,
           width: "100%",
           height: "100%",
-          filter: "drop-shadow(4px 4px 0 rgba(0,0,0,0.6))",
+          filter: "drop-shadow(2px 3px 0 rgba(0,0,0,0.55))",
         }}
       >
-        <path d={BURST_PATH} fill="var(--kv-accent)" stroke="#000" strokeWidth={2} />
+        {shape === "impact" && (
+          <g transform="translate(50 50) scale(1.14) translate(-50 -50)">
+            <path
+              d={IMPACT_BURST_PATH}
+              fill="var(--kv-paper)"
+              stroke="#000"
+              strokeWidth={2.5}
+              strokeLinejoin="round"
+            />
+          </g>
+        )}
+        <path
+          d={shape === "impact" ? IMPACT_BURST_PATH : BURST_PATH}
+          fill={fill}
+          stroke="#000"
+          strokeWidth={shape === "impact" ? 3 : 2}
+          strokeLinejoin="round"
+        />
       </svg>
       <span
         className="kv-sfx"
@@ -378,14 +423,38 @@ export function ImpactBurst({
           justifyContent: "center",
           textAlign: "center",
           fontSize: Math.max(10, size / 7),
-          color: "#fff",
+          color: tone === "gold" ? "var(--kv-gold-ink)" : "#fff",
           padding: "20%",
           lineHeight: 1.05,
         }}
       >
         {text}
       </span>
-    </div>
+    </>
+  );
+  const box: CSSProperties = {
+    position: "relative",
+    width: size,
+    height: size,
+    flexShrink: 0,
+  };
+  if (!onClick) {
+    return (
+      <div role="img" aria-label={text} style={box}>
+        {body}
+      </div>
+    );
+  }
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      aria-label={label ?? text}
+      className="kv-burstbtn"
+      style={box}
+    >
+      {body}
+    </button>
   );
 }
 

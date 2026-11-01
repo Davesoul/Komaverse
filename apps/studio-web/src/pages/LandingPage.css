@@ -22,7 +22,7 @@
 .lv-bg-overlay {
   position: absolute;
   inset: 0;
-  background: rgba(13, 13, 23, 0.74);
+  background: rgba(11, 11, 13, 0.74);
 }
 
 .lv-splash {
@@ -260,13 +260,67 @@
   gap: 12px;
 }
 .lv-bento-card {
+  position: relative;
   background: var(--kv-surface);
   border: 1px solid var(--kv-border);
   border-radius: var(--kv-radius);
   padding: 24px;
+  transition: transform 200ms cubic-bezier(0.33, 1, 0.68, 1);
 }
 .lv-bento-card.large {
   grid-column: span 3;
+}
+/* Splash panel: the focal tile breaks the rectangle — diagonal corner
+ * cuts like a manga splash, with a drop-shadow filter for depth. */
+.lv-bento-card.large {
+  border-width: 2px;
+  clip-path: polygon(
+    0 0,
+    calc(100% - 26px) 0,
+    100% 26px,
+    100% 100%,
+    26px 100%,
+    0 calc(100% - 26px)
+  );
+  filter: drop-shadow(6px 6px 0 rgba(0, 0, 0, 0.6));
+}
+.lv-bento-card.large:hover {
+  transform: rotate(0deg);
+}
+/* The splash card's corner cuts clip anything sticking out — including the
+ * red SFX sticker — so on the large tile the shout lives inside the frame
+ * instead of above it. */
+.lv-bento-card.large .lv-sfx {
+  top: 12px;
+  right: 22px;
+}
+/* Tilted panels for dynamism: alternating angles, straight on hover. */
+.lv-bento-card:nth-child(odd) {
+  transform: rotate(-0.9deg);
+}
+.lv-bento-card:nth-child(even) {
+  transform: rotate(0.9deg);
+}
+.lv-bento-card:hover {
+  transform: rotate(0deg);
+}
+/* SFX shout on a tile: hand-drawn sound as image (kakimoji).
+ * White on signal red is the documented 6.2:1 fill pair. */
+.lv-sfx {
+  position: absolute;
+  top: -14px;
+  right: 18px;
+  font-style: italic;
+  font-weight: 800;
+  font-size: 20px;
+  letter-spacing: 0.04em;
+  color: var(--kv-accent-ink);
+  background: var(--kv-accent);
+  border: 1px solid var(--kv-paper);
+  box-shadow: var(--kv-shadow-hard);
+  border-radius: 3px;
+  padding: 2px 10px;
+  transform: rotate(3deg);
 }
 .lv-bento-icon {
   color: var(--kv-accent-text);
@@ -437,6 +491,22 @@
   gap: 24px;
   flex-wrap: wrap;
 }
+/* Impact bubble as a button: unstyled native button, stamps down on
+ * hover like ink hitting paper. */
+.kv-burstbtn {
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  transition: transform var(--kv-motion-fast) ease;
+}
+.kv-burstbtn:hover {
+  transform: scale(1.07);
+}
+.kv-burstbtn:focus-visible {
+  outline: 2px solid var(--kv-accent-text);
+  outline-offset: 4px;
+}
 
 .lv-footer {
   border-top: 1px solid var(--kv-border);
@@ -503,6 +573,16 @@
   .lv-splash {
     transition: none;
   }
+  .lv-reel-title {
+    transition: none;
+  }
+  .lv-reel:hover .lv-reel-title,
+  .lv-reel:focus-visible .lv-reel-title {
+    transform: none;
+  }
+  .kv-burstbtn:hover {
+    transform: none;
+  }
 }
 
 .lv-word { display: inline-block; will-change: transform, opacity; }
@@ -517,19 +597,29 @@
 .lv-link:hover { background-size: 100% 1px; }
 
 .lv-section.lv-wide { max-width: 1280px; }
+/* Manga page sheet: ruled tiers read right-to-left, top-to-bottom, so DOM
+ * order maps to tier 1 establishing (wide + tall side panel), tier 2 busy
+ * action trio, tier 3 full-bleed splash finale. Open even gutters and page
+ * margins — panels never touch except for the splash beat. */
 .lv-reels {
   display: grid;
   grid-template-columns: repeat(12, 1fr);
-  gap: 4px;
+  direction: rtl;
+  gap: 12px;
   align-items: stretch;
   margin-top: var(--kv-space-6);
+  padding: 12px;
+  border: 2px solid rgba(244, 239, 228, 0.28);
+  background: rgba(0, 0, 0, 0.35);
 }
 .lv-reel {
   position: relative;
   margin: 0;
   min-width: 0;
+  /* Sharp ink corners — manga panels don't do rounded boxes, which also
+   * retires the corner-clipping issue entirely. */
   border: 2px solid rgba(244, 239, 228, 0.2);
-  border-radius: var(--kv-radius-lg);
+  border-radius: 0;
   overflow: hidden;
   cursor: pointer;
   background: #000;
@@ -542,12 +632,111 @@
   transform: translateY(-4px);
   border-color: var(--kv-accent-text);
 }
+/* Panels keep their frames and gutters; emphasis comes from the SFX
+ * caption, not card motion. The finale breaks its frame: borderless,
+ * near-bleed, with a diagonal-cut top edge slicing in from the tier
+ * above — the classic splash entry. */
+.lv-reel.span-12 {
+  border: none;
+  box-shadow: none;
+  border-bottom: 3px solid var(--kv-accent);
+  clip-path: polygon(0 28px, 100% 0, 100% 100%, 0 100%);
+}
+.lv-reel:hover,
+.lv-reel:focus-visible {
+  border-color: var(--kv-accent-text);
+}
+.lv-reel:hover .lv-reel-title,
+.lv-reel:focus-visible .lv-reel-title {
+  transform: scale(1.08);
+  color: var(--kv-accent-text);
+}
+.lv-reel.span-12:hover,
+.lv-reel.span-12:focus-visible {
+  border-bottom-color: var(--kv-accent-text);
+}
+/* Diagonal + irregular beats. Grid position never changes, so the
+ * right-to-left reading order survives — only the painted frame breaks.
+ * cut-slash: a parallelogram speed frame. clip-path would eat a real
+ * border, so the ink stroke is redrawn with a zero-blur drop-shadow
+ * stack that follows the clipped silhouette, plus a hard offset shadow.
+ * cut-drop: a tall panel that invades the tier below through the gutter,
+ * the classic manga tier-break. */
+.lv-reel.cut-slash,
+.lv-reel.cut-slash-l,
+.lv-reel.cut-slash-r {
+  border: none;
+  box-shadow: none;
+  filter:
+    drop-shadow(2px 0 0 rgba(244, 239, 228, 0.2))
+    drop-shadow(-2px 0 0 rgba(244, 239, 228, 0.2))
+    drop-shadow(0 2px 0 rgba(244, 239, 228, 0.2))
+    drop-shadow(0 -2px 0 rgba(244, 239, 228, 0.2))
+    drop-shadow(5px 5px 0 rgba(0, 0, 0, 0.8));
+  /* This outranks the reveal transition, so carry its opacity/transform
+   * with the same tokens — shaped panels fade/slide in like the rest. */
+  transition:
+    opacity var(--kv-dur-slow) var(--kv-ease-out) var(--kv-reveal-delay, 0ms),
+    transform var(--kv-dur-slow) var(--kv-ease-out) var(--kv-reveal-delay, 0ms),
+    filter var(--kv-motion-fast) ease;
+}
+/* Pixel lean, not percent: the three panels have different widths, so a
+ * percent slant would cut each at a different angle and the facing edges
+ * would converge. A fixed 24px shift over the full tier height keeps
+ * every inner edge parallel, so each divider reads as one clean diagonal
+ * channel without carving a double gutter — the grid gap itself stays at
+ * the page standard everywhere. */
+.lv-reel.cut-slash {
+  clip-path: polygon(24px 0, 100% 0, calc(100% - 24px) 100%, 0 100%);
+}
+.lv-reel.cut-slash-l {
+  clip-path: polygon(24px 0, 100% 0, 100% 100%, 0 100%);
+}
+.lv-reel.cut-slash-r {
+  clip-path: polygon(0 0, 100% 0, calc(100% - 24px) 100%, 0 100%);
+}
+.lv-reel.cut-slash:hover,
+.lv-reel.cut-slash:focus-visible,
+.lv-reel.cut-slash-l:hover,
+.lv-reel.cut-slash-l:focus-visible,
+.lv-reel.cut-slash-r:hover,
+.lv-reel.cut-slash-r:focus-visible {
+  border: none;
+  filter:
+    drop-shadow(2px 0 0 var(--kv-accent-text))
+    drop-shadow(-2px 0 0 var(--kv-accent-text))
+    drop-shadow(0 2px 0 var(--kv-accent-text))
+    drop-shadow(0 -2px 0 var(--kv-accent-text))
+    drop-shadow(5px 5px 0 rgba(0, 0, 0, 0.8));
+}
+.lv-reel.cut-drop {
+  margin-bottom: -20px;
+  z-index: 1;
+}
+/* Middle-row gutters stay at the page standard: even panels, even
+ * spacing, one shared beat. */
+@media (max-width: 860px) {
+  .lv-reel.cut-slash,
+  .lv-reel.cut-slash-l,
+  .lv-reel.cut-slash-r {
+    clip-path: none;
+    border: 2px solid rgba(244, 239, 228, 0.2);
+    box-shadow: var(--kv-shadow-hard);
+    filter: none;
+  }
+  .lv-reel.cut-drop {
+    margin-bottom: 0;
+  }
+}
 .lv-reel video {
   width: 100%;
   height: 100%;
   object-fit: cover;
   display: block;
   background: #000;
+  /* Own compositor layer: the slashed frames repaint ink filters every
+   * frame, so keep each video's texture uploads off the main paint path. */
+  transform: translateZ(0);
 }
 .lv-reel figcaption {
   position: absolute;
@@ -555,6 +744,7 @@
   right: 0;
   bottom: 0;
   display: flex;
+  direction: ltr;
   align-items: baseline;
   justify-content: flex-start;
   gap: 8px;
@@ -563,7 +753,12 @@
   pointer-events: none;
   text-shadow: 2px 2px 0 #000;
 }
-.lv-reel-title { font-size: 13px; }
+.lv-reel-title {
+  display: inline-block;
+  font-size: 13px;
+  transform-origin: left bottom;
+  transition: transform var(--kv-motion-fast) ease, color var(--kv-motion-fast) ease;
+}
 .lv-reel-tag { margin-left: auto; }
 .lv-dock-live {
   display: inline-flex;
@@ -628,27 +823,28 @@
 @media (max-width: 860px) {
   .lv-instrument { grid-template-columns: 1fr; }
 }
-/* Dock split: pen rest zone (the traveler glides in here) beside the
-   permanent lineup of the other models. Both zones keep the black inset
-   so the set reads as one instrument. */
+/* Dock: one plain panel holding the whole set — the traveling pen glides
+   in and rests among the permanent lineup, no visible split between the
+   zones. Geometry (flex ratios) still marks the rest and lineup areas,
+   but visually it is a single instrument. */
 .lv-dock {
   display: flex;
-  gap: 8px;
+  gap: 0;
   padding: 8px;
-  background: transparent;
+  background: #060608;
+  border: 1px solid var(--kv-border);
+  border-radius: calc(var(--kv-radius) - 4px);
+  overflow: hidden;
   /* Fall-through for the docked pen: the rest zone is transparent so the
      behind-content traveler shows through it, and clicks reach the canvas
-     for drag-turn. The lineup zone keeps its own dark backdrop. */
+     for drag-turn. */
   pointer-events: none;
 }
 .lv-dock-rest {
   position: relative;
   flex: 1.05;
   min-width: 0;
-  border-radius: calc(var(--kv-radius) - 4px);
-  overflow: hidden;
   background: transparent;
-  border: 1px dashed var(--kv-border-strong);
   pointer-events: none;
 }
 .lv-dock-rest .kv-halftone,
@@ -659,9 +855,7 @@
   position: relative;
   flex: 1;
   min-width: 0;
-  border-radius: calc(var(--kv-radius) - 4px);
-  overflow: hidden;
-  background: #060608;
+  background: transparent;
   /* Re-enabled inside the click-through dock so the lineup keeps its
      drag-to-turn. */
   pointer-events: auto;

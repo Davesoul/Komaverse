@@ -12,6 +12,7 @@ import {
   SelectInput,
   Spinner,
   StatusBar,
+  TextInput,
 } from "../components/ui";
 
 type Mode = "select" | "reshape" | "draw";
@@ -378,6 +379,21 @@ export default function ScanPage() {
     }
   };
 
+  const [renamingPanel, setRenamingPanel] = useState<string | null>(null);
+  const [renamePanelValue, setRenamePanelValue] = useState("");
+  const commitPanelRename = async () => {
+    if (!renamingPanel) return;
+    const id = renamingPanel;
+    const name = renamePanelValue.trim();
+    setRenamingPanel(null);
+    try {
+      const saved = await api.patchPanel(id, { name: name.slice(0, 200) });
+      setPanels((prev) => prev.map((pl) => (pl.id === id ? { ...pl, ...saved } : pl)));
+    } catch (e) {
+      setNotice(`Rename failed: ${(e as Error).message}`);
+    }
+  };
+
   const moveSelected = async (delta: -1 | 1) => {
     if (!page || !selectedId) return;
     const ordered = [...panels].sort((a, b) => a.reading_order - b.reading_order);
@@ -612,8 +628,8 @@ export default function ScanPage() {
                     small
                     active={p.id === selectedId}
                     onClick={() => setSelectedId(p.id)}
-                    title={`Panel ${p.reading_order + 1}`}
-                    aria-label={`Select panel ${p.reading_order + 1}`}
+                    title={`${p.name || `Panel ${p.reading_order + 1}`} — click to select`}
+                    aria-label={`Select ${p.name || `panel ${p.reading_order + 1}`}`}
                     style={{ display: "inline-flex", alignItems: "center", gap: 4 }}
                   >
                     {p.crop_url && (
@@ -627,18 +643,44 @@ export default function ScanPage() {
                         loading="lazy"
                       />
                     )}
-                    {p.reading_order + 1}
+                    {p.name || p.reading_order + 1}
                   </Btn>
                 ))}
             </div>
             {selectedId && (
-              <div style={{ display: "flex", gap: 4, marginTop: 6 }}>
+              <div style={{ display: "flex", gap: 4, marginTop: 6, alignItems: "center", flexWrap: "wrap" }}>
                 <IconBtn label="Move panel earlier in reading order" onClick={() => moveSelected(-1)}>
                   ←
                 </IconBtn>
                 <IconBtn label="Move panel later in reading order" onClick={() => moveSelected(1)}>
                   →
                 </IconBtn>
+                {renamingPanel === selectedId ? (
+                  <TextInput
+                    autoFocus
+                    value={renamePanelValue}
+                    onChange={(e) => setRenamePanelValue(e.target.value)}
+                    onBlur={() => void commitPanelRename()}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") void commitPanelRename();
+                      if (e.key === "Escape") setRenamingPanel(null);
+                    }}
+                    aria-label="Panel name"
+                    style={{ width: 140 }}
+                  />
+                ) : (
+                  <Btn
+                    small
+                    title="Rename this panel"
+                    onClick={() => {
+                      const p = panels.find((x) => x.id === selectedId);
+                      setRenamingPanel(selectedId);
+                      setRenamePanelValue(p?.name ?? "");
+                    }}
+                  >
+                    Rename
+                  </Btn>
+                )}
               </div>
             )}
           </div>

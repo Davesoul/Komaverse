@@ -2,16 +2,20 @@ import { useEffect, useRef, useState } from "react";
 import { prefersReducedMotion } from "./Reveal";
 import { PIXEL, createStage } from "../lib/models3d";
 
-/* Instrument section lineup: the rest of the set (micron pen set + studio
- * pen) living permanently inside the dock panel. The traveling tablet pen
- * (ScrollCompanion) rests in the adjacent rest zone beside them — never on
- * top. One small stage, slow turntable, renders only while visible;
- * models load when the section nears the viewport so first paint costs
- * nothing. Drag to turn. Any failure removes it quietly. */
+/* Instrument section lineup: the rest of the set (micron pen set +
+ * dip-pen holder + studio pen) living permanently inside the dock panel.
+ * The traveling tablet pen (ScrollCompanion) rests in the adjacent rest
+ * zone beside them — never on top. One small stage, slow turntable,
+ * renders only while visible; models load when the section nears the
+ * viewport so first paint costs nothing. Drag to turn. Any failure
+ * removes it quietly. */
 const LINEUP = [
   { src: "/models/pin.fbx", skin: "pin" },
+  { src: "/models/holder.fbx", skin: "holder" },
   { src: "/models/stylo.fbx", skin: "studio" },
 ] as const;
+// Rest angles, outer pieces turned slightly inward, middle facing forward.
+const YAW = [0.5, 0, -0.4];
 
 export default function InstrumentModels() {
   const hostRef = useRef<HTMLDivElement>(null);
@@ -61,8 +65,8 @@ export default function InstrumentModels() {
       fill.position.set(0, 1, 6);
       scene.add(fill);
 
-      // Load both pieces in parallel, normalize to a shared height, and
-      // set them side by side so the pair reads as one lineup. Each piece
+      // Load all pieces in parallel, normalize to a shared height, and
+      // set them side by side so the trio reads as one lineup. Each piece
       // joins the scene the moment it is ready — the micron set never
       // waits on the 2MB studio pen.
       const group = new THREE.Group();
@@ -74,14 +78,18 @@ export default function InstrumentModels() {
       const layout = () => {
         const halfH = Math.tan(THREE.MathUtils.degToRad(14)) * 7;
         const halfW = halfH * camera.aspect;
-        const off = halfW * 0.42;
+        const off = halfW * 0.5;
         const H = Math.min(2.7, halfH * 2 * 0.82);
         group.children.forEach((child: any, i: number) => {
           const h = child.userData.nativeH || 1;
           const s = H / h;
           child.scale.setScalar(s);
+          // One piece sits centered; pairs keep the original spread and
+          // larger odd lineups fan out around the middle.
+          const n = group.children.length;
+          const slot = n === 1 ? 0 : n > 2 ? i - (n - 1) / 2 : i === 0 ? -1 : 1;
           child.position.set(
-            (i === 0 ? -off : off) - child.userData.cx * s,
+            slot * off - child.userData.cx * s,
             -child.userData.cy * s,
             -child.userData.cz * s,
           );
@@ -99,7 +107,7 @@ export default function InstrumentModels() {
         object.userData.cx = center.x;
         object.userData.cy = center.y;
         object.userData.cz = center.z;
-        object.rotation.y = i === 0 ? 0.5 : -0.4;
+        object.rotation.y = YAW[i] ?? -0.4;
         group.add(object);
         placed += 1;
         canvas.dataset.models = `${spec.src.split("/").pop()}:${Math.round(object.userData.nativeH * 100)}:${placed}`;
@@ -125,7 +133,7 @@ export default function InstrumentModels() {
 
       const render = (t: number) => {
         group.children.forEach((child: any, i: number) => {
-          child.rotation.y = (i === 0 ? 0.5 : -0.4) + spin + yawUser;
+          child.rotation.y = (YAW[i] ?? -0.4) + spin + yawUser;
           child.position.y = reduced ? 0 : Math.sin(t * 0.7 + i * 2.1) * 0.06;
         });
         renderer.render(scene, camera);

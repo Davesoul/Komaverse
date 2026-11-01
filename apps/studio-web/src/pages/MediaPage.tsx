@@ -248,6 +248,21 @@ export default function MediaPage() {
   const [transcripts, setTranscripts] = useState<Record<string, Transcript>>({});
   const [transcribing, setTranscribing] = useState<string | null>(null);
   const [lightbox, setLightbox] = useState<LightboxState>(null);
+  const [renamingPage, setRenamingPage] = useState<string | null>(null);
+  const [renamePageValue, setRenamePageValue] = useState("");
+  const commitPageRename = async () => {
+    if (!renamingPage) return;
+    const name = renamePageValue.trim();
+    const id = renamingPage;
+    setRenamingPage(null);
+    if (!name) return;
+    try {
+      await api.patchPage(id, { name: name.slice(0, 200) });
+      await refresh(project?.id ?? null);
+    } catch (e) {
+      setNotice(`Rename failed: ${(e as Error).message}`);
+    }
+  };
   // Collapsed sections persist across visits; show-all resets per visit so a
   // full library never surprises on load.
   const [collapsed, setCollapsed] = useState<Record<MediaSectionKey, boolean>>(() => ({
@@ -778,9 +793,33 @@ export default function MediaPage() {
                       <PageThumb page={pg} />
                     </button>
                     <div style={{ padding: 8, fontSize: 12 }}>
-                      <div className="kv-nums" style={{ color: "var(--kv-text)", fontWeight: 700 }}>
-                        PG {String(i + 1).padStart(2, "0")}
-                      </div>
+                      {renamingPage === pg.id ? (
+                        <TextInput
+                          autoFocus
+                          value={renamePageValue}
+                          onChange={(e) => setRenamePageValue(e.target.value)}
+                          onBlur={() => void commitPageRename()}
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter") void commitPageRename();
+                            if (e.key === "Escape") setRenamingPage(null);
+                          }}
+                          onClick={(e) => e.stopPropagation()}
+                          aria-label="Page name"
+                        />
+                      ) : (
+                        <div
+                          className="kv-nums"
+                          style={{ color: "var(--kv-text)", fontWeight: 700, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
+                          title={pg.name ? `${pg.name} — double-click to rename` : `PG ${i + 1} — double-click to rename`}
+                          onDoubleClick={(e) => {
+                            e.stopPropagation();
+                            setRenamingPage(pg.id);
+                            setRenamePageValue(pg.name || `Page ${i + 1}`);
+                          }}
+                        >
+                          {pg.name || `PG ${String(i + 1).padStart(2, "0")}`}
+                        </div>
+                      )}
                       <div className="kv-nums" style={{ color: "var(--kv-muted)" }}>
                         {pg.width}×{pg.height} · {pg.panels.length} panel{pg.panels.length === 1 ? "" : "s"}
                       </div>
@@ -1105,7 +1144,7 @@ export default function MediaPage() {
 
       {lightbox?.kind === "page" && (
         <Lightbox
-          title={`PG ${lightbox.index + 1}`}
+          title={lightbox.page.name || `PG ${lightbox.index + 1}`}
           meta={`${lightbox.page.width}×${lightbox.page.height} · ${lightbox.page.panels.length} panels`}
           onClose={() => setLightbox(null)}
         >

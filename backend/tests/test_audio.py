@@ -45,7 +45,7 @@ from komaverse.api.scans import (
     upload_page,
 )
 from komaverse.config import settings
-from komaverse.db_models import Base, UserRow
+from komaverse.db_models import AudioCueRow, Base, UserRow
 
 
 @pytest.fixture
@@ -382,3 +382,22 @@ def test_export_skips_unreadable_audio(factory, user):
         report = get_export_report(job.id, s, user)
     assert report.audio_cues == 0
     assert any("audio" in w.lower() for w in report.warnings)
+
+
+def test_legacy_cue_without_fades_serializes():
+    """Pre-fade cue rows hold NULL (ALTER-added columns on old DBs are
+    nullable): to_schema must emit the schema defaults instead of 500ing
+    the scene."""
+    row = AudioCueRow(
+        id="q1",
+        scene_id="s1",
+        audio_id="a1",
+        start_sec=0.0,
+        offset_sec=0.0,
+        volume=1.0,
+        fade_in=None,
+        fade_out=None,
+    )
+    cue = row.to_schema()
+    assert cue.fade_in == 0.0
+    assert cue.fade_out == 0.0

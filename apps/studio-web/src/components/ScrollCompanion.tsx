@@ -121,6 +121,42 @@ export default function ScrollCompanion({
       };
       refreshPageMax();
 
+      // Docking reparents the canvas into the rest zone: a normal child
+      // of the panel can never slip under it, whatever stacking contexts
+      // sit above the fixed travel layer. Undocking moves it back out.
+      const placeCanvas = (dockedNow: boolean) => {
+        const rest = dockRef.current;
+        if (dockedNow && rest && canvas.parentElement !== rest) {
+          rest.appendChild(canvas);
+          canvas.style.position = "absolute";
+          canvas.style.inset = "0";
+          canvas.style.width = "100%";
+          canvas.style.height = "100%";
+          canvas.style.cursor = "grab";
+          canvas.style.pointerEvents = "auto";
+          canvas.style.touchAction = "pan-y";
+          el.style.display = "none";
+        } else if (!dockedNow && canvas.parentElement !== el) {
+          el.appendChild(canvas);
+          canvas.style.position = "";
+          canvas.style.inset = "";
+          canvas.style.width = "100%";
+          canvas.style.height = "100%";
+          canvas.style.pointerEvents = "none";
+          el.style.display = "";
+        }
+        const parent = canvas.parentElement;
+        if (parent) {
+          const w = parent.clientWidth;
+          const h = parent.clientHeight;
+          if (w > 0 && h > 0) {
+            camera.aspect = w / h;
+            camera.updateProjectionMatrix();
+            baseScale = stage.fitScale(size, w / h, 0.7);
+          }
+        }
+      };
+
       // Pen-rest geometry, document-relative so the per-frame viewport
       // position is pure arithmetic (scrollY is layout-free). Refreshed
       // on layout events, never in the hot loop.
@@ -177,13 +213,14 @@ export default function ScrollCompanion({
       };
       // Last geometry target, for glide-settled checks.
       const tgt = { x: 0, y: 0, w: 0, h: 0 };
-      // One layer forever: the stage stays behind page content and the
-      // rest zone is transparent, so docking needs no z cut and no fade —
-      // the pen simply glides in (passing behind the dark lineup zone on
-      // the way reads as flying behind the set). Pointer events alone
-      // toggle: the transparent zones let clicks fall through to the
-      // canvas while docked.
-      el.style.zIndex = "-1";
+      // One layer forever: the stage stays behind page content (.lv at
+      // z-index 1, this canvas at 0 — never negative, which flickers on
+      // fast scrolls) and the rest zone is transparent, so docking needs
+      // no fade — the pen simply glides in (passing behind the dark
+      // lineup zone on the way reads as flying behind the set). Pointer
+      // events alone toggle: the transparent zones let clicks fall
+      // through to the canvas while docked.
+      el.style.zIndex = "0";
       const applyGeo = (instant: boolean) => {
         const t = targetGeo();
         tgt.x = t.x;
@@ -192,7 +229,7 @@ export default function ScrollCompanion({
         tgt.h = t.h;
         if (t.docked !== docked) {
           docked = t.docked;
-          el.style.pointerEvents = docked ? "auto" : "none";
+          placeCanvas(docked);
           if (!cancelled) onDock(docked);
         }
         if (instant) {
@@ -364,8 +401,11 @@ export default function ScrollCompanion({
       let backingW = 0;
       let backingH = 0;
       const ro = new ResizeObserver(() => {
-        const w = el.clientWidth;
-        const h = el.clientHeight;
+        // Follow the canvas wherever it lives (travel host or rest zone).
+        const host = canvas.parentElement;
+        if (!host) return;
+        const w = host.clientWidth;
+        const h = host.clientHeight;
         if (!w || !h) return;
         const aspect = w / h;
         camera.aspect = aspect;
@@ -384,6 +424,7 @@ export default function ScrollCompanion({
         }
       });
       ro.observe(el);
+      if (dockRef.current) ro.observe(dockRef.current);
 
       // First frame: snap onto the travel rail with the pen already aboard.
       applyGeo(true);

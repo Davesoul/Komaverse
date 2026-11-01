@@ -122,6 +122,7 @@ def test_mcp_tools_list_covers_studio():
         "manage_sequences",
         "manage_timelines",
         "video_to_frames",
+        "cancel_job",
     } <= names
     for tool in TOOLS():
         assert tool["description"]
@@ -187,6 +188,27 @@ def test_mcp_missing_job_reports_text(factory, uid):
     assert "not found" in res["result"]["content"][0]["text"]
 
 
+def test_mcp_cancel_job(factory, user, uid):
+    with factory() as s:
+        job = JobRow(user_id=user.id, kind="image", status="queued")
+        s.add(job)
+        s.commit()
+        jid = job.id
+    res = dispatch(
+        {
+            "jsonrpc": "2.0",
+            "id": 7,
+            "method": "tools/call",
+            "params": {"name": "cancel_job", "arguments": {"job": jid}},
+        },
+        factory,
+        uid,
+    )
+    assert "Cancelled" in res["result"]["content"][0]["text"]
+    with factory() as s:
+        assert s.get(JobRow, jid).status == "cancelled"
+
+
 def test_mcp_export_returns_immediately(factory, user):
     from komaverse import agent as agent_mod
 
@@ -207,7 +229,7 @@ def test_mcp_generate_returns_immediately(factory, user):
     pid = seed_project(factory, user)
     with factory() as s:
         summary = agent_mod.tool_generate(
-            s, user, pid, "a moonlit robot", factory, background=True
+            s, user, pid, "a moonlit robot", factory, background=True, attach_frame=True
         )
     assert "[job " in summary
     jid = re.search(r"\[job ([A-Za-z0-9_-]+)\]", summary).group(1)

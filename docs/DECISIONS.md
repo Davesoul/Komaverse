@@ -60,6 +60,13 @@ Legacy stack (React 19, Vite, TS, FastAPI) worked; keep it. npm workspaces for
   draw→frame→clip→export E2E. Full brush port deferred to M5 polish.
 - New projects auto-create "Scene 1" so panels can become clips immediately.
 
+Amendment: Draw select/transform. Strokes select once on first marquee
+(`lib/draw/ink.ts` snapshot sampling), then move/resize/rotate via
+`lib/draw/transform.ts` without re-picking canvas content, zoom-on-click,
+or background resets; cross-layer copy/cut/paste rides the same
+snapshot. The agent and Media/scan handoffs share a current-frame
+notion so "draw on this frame" lands where the user is looking.
+
 ## ADR-9: M4/M5 finish pragmatics (accepted)
 
 - AI jobs run **in-process via BackgroundTasks** (fresh session per task),
@@ -254,3 +261,57 @@ image/video/audio files, and sends a video to the current timeline as a
 clip or to the current sequence frame by frame; video clip duration uses
 the job's `seconds` (new on the `Job` schema). Agent/MCP: `video_to_frames`
 plus the existing video `add_clip`.
+
+Amendment: cancel, usage tokens, mid-composer mentions. `POST
+/ai/jobs/{id}/cancel` marks a queued/running job `cancelled` (new on the
+`Job` status); workers check only that flag via `session.expire(job,
+["status"])` — never a full refresh, which would discard the staged seed
+and prompt. The dock polls to `cancelled`, posts a note, and each progress
+card has a Cancel button; the agent/MCP expose `cancel_job`. Usage tokens
+are estimated where no provider reports them: transcript length for
+transcription, the 512px-tile convention for detection, rendered frames
+for export. The @-mention picker is cursor-aware, so references insert
+mid-composer with the caret restored after the token.
+
+Amendment: ratios + timeline effects. Generation takes an aspect ratio:
+the Render tab derives image w/h from a ratio preset + long edge, the
+agent derives it from chat ("wide shot" → 16:9) or explicit width/height,
+video gets a prompt-level framing hint (the OpenRouter video API takes no
+size). Timeline clips gain Ken Burns pan-up/pan-down, a blend-in
+transition (crossfade, fade-black, wipe-left — overlapping boundary
+frames), and per-clip fade in/out; the inspector edits them, the preview
+shows the new pans (blends render on export only). Agent/MCP: new args on
+`add_clip`/`manage_clips`, size args on `create_image`, and demo parsing
+of transition/fade/ratio words.
+
+Amendment: Brain routing, streaming, voice, mentions, gallery-first generation.
+Per-kind providers replace the single AI_PROVIDER switch in the Brain
+(chat/vision/image selectable Meta/OpenRouter/cloud/local/ComfyUI,
+video OpenRouter-only, transcribe Meta-only): `provider_for(kind)` +
+verified model catalogs (maker + route shown, no guessing) drive every
+call, persisted as studio-settings overrides via PUT /agent/config.
+Agent answers stream over SSE (`/agent/chat/stream`: token/tool_start/
+tool_result/tool/text/result/error) with live tool chips and inline
+generating/image/video JobCards; greetings stay words-only and never
+mutate the canvas. A reference-intent gate keeps unrelated frames out
+of generation context (no phantom frames). Voice input posts raw mic
+audio to `POST /ai/transcribe`, normalized server-side to 16kHz mono
+WAV (bundled ffmpeg) before Meta's transcribe model — MediaRecorder
+webm/opus is rejected by Meta with `param: audio`. The @-mention
+picker is a live, progressively loading recent-first list with page/
+panel thumbs and renamable names (`Page.name`/`Panel.name` columns,
+renamed from Media/Scan/Draw). Generation is gallery-first: jobs land
+in Media, `attach_frame` defaults to false on the API, the agent tool,
+and MCP — frames are created only on explicit request ("as a frame",
+"add it", timeline placement), staged in an "AI generations" sequence
+so hand-drawn sequences are never polluted.
+
+Amendment: manga UI feel + impact flash. Diagonal language: alternating
+tilted bento tiles, a corner-cut splash panel on the focal tile, tilted
+Media cards that straighten on hover/focus, SFX tags (kakimoji shouts on
+tiles, transition badges on timeline clips), speed-line utilities, and an
+"Energetic ink" motion personality in tokens. New `impact` transition
+(white flash on the cut) across renderer/UI/agent/demo. Palette grows
+gold/deep-red/dim-paper; the pricing burst goes gold. Test hermeticity:
+model ids are pinned in conftest so a user .env (e.g. a cheaper chat
+variant) can't break default assertions.

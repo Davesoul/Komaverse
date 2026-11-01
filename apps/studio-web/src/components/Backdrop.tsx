@@ -1,5 +1,7 @@
-import { useEffect, useRef, useState } from "react";
+import { Suspense, lazy, useEffect, useRef, useState } from "react";
 import { VIDEOS } from "../lib/media";
+
+const InkDots = lazy(() => import("./InkDots"));
 
 /* Fixed cinematic backdrop: one full-bleed reel at a time, crossfading to
  * the next every 4.5s. Owns its own state so the rotation never
@@ -8,6 +10,27 @@ import { VIDEOS } from "../lib/media";
 export default function Backdrop() {
   const [activeIdx, setActiveIdx] = useState(0);
   const bgRefs = useRef<(HTMLVideoElement | null)[]>([]);
+  // Hero-first overlay: the dimming veil sits lighter over the hero so the
+  // reels show through, then eases to full once the content scrolls in.
+  const [veil, setVeil] = useState(1);
+  useEffect(() => {
+    let raf = 0;
+    const update = () => {
+      raf = 0;
+      const ramp = Math.max(window.innerHeight * 0.6, 1);
+      const p = Math.min(Math.max(window.scrollY / ramp, 0), 1);
+      setVeil(0.72 + 0.28 * p);
+    };
+    update();
+    const onScroll = () => {
+      if (!raf) raf = requestAnimationFrame(update);
+    };
+    window.addEventListener("scroll", onScroll, { passive: true });
+    return () => {
+      window.removeEventListener("scroll", onScroll);
+      if (raf) cancelAnimationFrame(raf);
+    };
+  }, []);
 
   useEffect(() => {
     const timer = setInterval(() => {
@@ -49,7 +72,10 @@ export default function Backdrop() {
           className={i === activeIdx ? "active" : ""}
         />
       ))}
-      <div className="lv-bg-overlay" />
+      <Suspense fallback={null}>
+        <InkDots />
+      </Suspense>
+      <div className="lv-bg-overlay" style={{ opacity: veil }} />
     </div>
   );
 }

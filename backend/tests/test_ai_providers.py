@@ -176,6 +176,70 @@ def test_chat_complete_transport_propagates(monkeypatch):
         chat_complete(base_url="https://x", api_key="k", model="m", messages=[])
 
 
+def test_chat_complete_stream_assembles_tokens_and_tools(monkeypatch):
+    """SSE deltas merge into tokens plus one message shaped like the sync call."""
+    import json
+
+    from komaverse.ai.providers import chat_complete_stream
+
+    args = json.dumps({"a": 1})
+    chunks = [
+        'data: {"choices": [{"delta": {"role": "assistant", "content": "Hi"}}]}',
+        "data: " + json.dumps({"choices": [{"delta": {"tool_calls": [
+            {"index": 0, "id": "c1",
+             "function": {"name": "project_status", "arguments": args[:6]}},
+        ]}}]}),
+        "data: " + json.dumps({"choices": [{"delta": {"tool_calls": [
+            {"index": 0, "function": {"arguments": args[6:]}},
+        ]}}]}),
+        "data: " + json.dumps({
+            "choices": [{"delta": {}, "finish_reason": "tool_calls"}],
+            "usage": {"prompt_tokens": 3, "completion_tokens": 7, "total_tokens": 10},
+        }),
+        "data: [DONE]",
+    ]
+
+    class _Stream:
+        def __init__(self, status=200):
+            self.status_code = status
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def iter_lines(self):
+            return iter(chunks)
+
+    seen = {}
+
+    def _stream(method, url, json=None, headers=None, timeout=None):
+        seen["body"] = json
+        return _Stream()
+
+    monkeypatch.setattr(httpx, "stream", _stream)
+    events = list(
+        chat_complete_stream(
+            base_url="https://x", api_key="k", model="m",
+            messages=[{"role": "user", "content": "yo"}],
+        )
+    )
+    assert events[0] == ("token", "Hi")
+    kind, (message, usage) = events[-1]
+    assert kind == "message"
+    assert message["tool_calls"][0]["id"] == "c1"
+    assert json.loads(message["tool_calls"][0]["function"]["arguments"]) == {"a": 1}
+    assert usage == {"input": 3, "output": 7, "total": 10}
+    assert seen["body"]["stream"] is True
+
+    monkeypatch.setattr(httpx, "stream", lambda *a, **k: _Stream(401))
+    with pytest.raises(ProviderError, match="401"):
+        list(chat_complete_stream(
+            base_url="https://x", api_key="k", model="m", messages=[]
+        ))
+
+
 # ----------------------------------------------------------------- meta ---
 
 
@@ -637,7 +701,7 @@ def test_agent_tool_generate_meta_uses_muse_image(factory, user, monkeypatch):
     with factory() as s:
         grant(GrantRequest(amount=100), s, user)
     with factory() as s:
-        reply = agent_mod.tool_generate(s, user, project.id, "a robot", factory)
+        reply = agent_mod.tool_generate(s, user, project.id, "a robot", factory, attach_frame=True)
     assert "generated and attached" in reply.lower()
 
 

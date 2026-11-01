@@ -21,7 +21,7 @@ from komaverse.config import settings
 from komaverse.db import get_session
 from komaverse.db_models import AudioCueRow, AudioTakeRow, SceneRow, UserRow
 from komaverse.models import AudioCue, AudioTake
-from komaverse.renderer import audio_has_stream
+from komaverse.renderer import audio_has_stream, transcode_to_wav
 
 router = APIRouter(prefix="/api/v1")
 
@@ -221,14 +221,24 @@ def transcribe_take(
     except OSError as exc:
         raise HTTPException(400, f"cannot read take audio: {exc}") from None
     try:
+        wav = transcode_to_wav(audio, Path(row.file_path).suffix)
+    except RuntimeError as exc:
+        raise HTTPException(400, f"cannot prepare audio: {exc}") from None
+    try:
         res = MetaProvider().transcribe_audio(
-            audio,
-            Path(row.file_path).name,
+            wav,
+            Path(row.file_path).stem + ".wav",
             mode=(mode or "ENDPOINTING").upper(),
         )
     except ProviderError as exc:
         raise HTTPException(400, f"transcription failed: {exc}") from None
-    record_usage(session, user.id, "transcribe", settings.meta_transcribe_model)
+    record_usage(
+        session,
+        user.id,
+        "transcribe",
+        settings.meta_transcribe_model,
+        len(res.get("transcript") or "") // 4,
+    )
     turns = []
     for t in res.get("turns") or []:
         text = str(t.get("transcript") or "").strip()

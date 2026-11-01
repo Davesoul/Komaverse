@@ -34,8 +34,9 @@ started Oct 28, 2026.
   brain, Muse Image generation, Voice Transcribe takes, SAM 3.1
   segmentation), OpenRouter (chat, image + async video models),
   generic cloud endpoint (incl. hosted open weights), local ComfyUI,
-  fake demo — background jobs with polling; generated images attach
-  as frames, videos preview in the Generate panel
+  fake demo — background jobs with polling; generations land in the
+  Media gallery (frames only on explicit request), videos preview in
+  the Generate panel
 - **Credits:** append-only ledger, per-operation costs, 402 enforcement,
   dev grants (no Stripe in v1)
 - **Usage dashboard:** Home tab section with requests/calls, estimated
@@ -60,7 +61,17 @@ started Oct 28, 2026.
   switcher, Media overview) and multiple timelines (Render switcher,
   per-timeline export), all agent-operated. Media imports image, video,
   and audio files; videos also drop onto the current timeline as clips
-  or explode into the current sequence frame by frame
+  or explode into the current sequence frame by frame. Jobs cancel from
+  the dock progress cards or via the agent (`cancel_job`); usage tokens
+  cover transcription, detection, and export estimates; `@`-mentions
+  insert anywhere in the composer. Generation honors aspect ratios; the
+  timeline has transitions (crossfade, fade-black, wipe-left), per-clip
+  fades, and more Ken Burns moves — all agent-operated. Replies
+  stream with live tool chips and inline generating/image/video cards;
+  the Brain sets a provider + verified model per kind (chat/vision/
+  image/video/transcribe); `@`-mentions offer a live preview list over
+  renamable pages, panels, and frames; the mic button dictates via
+  Meta transcription
 
 ## Layout
 
@@ -140,7 +151,11 @@ no email verification.
 `AI_PROVIDER` selects the studio brain and generation backend
 (`cloud` default, `meta`, `openrouter`, `comfyui`, `fake`). Without any
 key everything still works: the agent uses its demo brain and image jobs
-use the fake provider (non-production).
+use the fake provider (non-production). The Brain tab routes per kind
+instead of one global switch — e.g. Meta for chat and image,
+OpenRouter for video (video is OpenRouter-only, transcription is
+Meta-only) — with verified model ids and their makers shown, persisted
+via `PUT /api/v1/agent/config`.
 
 - **Agent (Muse Spark / Wonder):** `AI_PROVIDER=meta` + `META_API_KEY`
   (from dev.meta.ai). The chat agent talks to the Meta Model API
@@ -215,7 +230,7 @@ with `KOMAVERSE_MCP_USER` in the environment. Claude Desktop
 ## Tests
 
 ```bash
-cd backend && python -m pytest -q     # 153 tests, no sockets needed
+cd backend && python -m pytest -q     # 311 tests, no sockets needed
 cd ../apps/studio-web && npx tsc --noEmit && npm run build
 ```
 

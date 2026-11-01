@@ -278,8 +278,9 @@ export default function UsageCard() {
             </tbody>
           </table>
           <p style={{ fontSize: 11, color: "var(--kv-faint)", margin: "8px 0 0" }}>
-            Tokens are provider-reported when available, estimated otherwise.
-            Detection, transcription, and export calls are counted by tool.
+            Tokens are provider-reported when available, estimated otherwise:
+            transcript length for transcription, the standard vision-tile
+            estimate for detection, rendered frames for export.
           </p>
         </>
       )}

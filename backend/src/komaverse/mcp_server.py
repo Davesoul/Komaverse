@@ -34,6 +34,7 @@ from komaverse.agent import (
     tool_add_cue,
     tool_add_subtitles,
     tool_auto_direct,
+    tool_cancel_job,
     tool_check_job,
     tool_create_frame,
     tool_create_project,
@@ -130,6 +131,7 @@ def call_tool(
             references=args.get("references"),
             entity_ids=args.get("entity_ids"),
             background=True,
+            attach_frame=bool(args.get("attach_frame")),
         )
     if name == "create_video":
         return tool_create_video(
@@ -155,6 +157,10 @@ def call_tool(
             args.get("scene"),
             _float(args, "duration", 2.0),
             _str(args, "motion") or "none",
+            _str(args, "transition") or "none",
+            args.get("transition_duration"),
+            args.get("fade_in"),
+            args.get("fade_out"),
         )
     if name == "add_subtitles":
         return tool_add_subtitles(
@@ -208,6 +214,7 @@ def call_tool(
             args.get("blend"),
             args.get("position"),
             args.get("sequence"),
+            args.get("shapes"),
         )
     if name == "tone_layer":
         return tool_tone_layer(
@@ -276,6 +283,10 @@ def call_tool(
             args.get("duration"),
             args.get("motion"),
             args.get("clip_ids"),
+            args.get("transition"),
+            args.get("transition_duration"),
+            args.get("fade_in"),
+            args.get("fade_out"),
         )
     if name == "video_to_frames":
         return tool_video_to_frames(
@@ -286,6 +297,8 @@ def call_tool(
             args.get("sequence"),
             args.get("max_frames", 12),
         )
+    if name == "cancel_job":
+        return tool_cancel_job(session, user, _str(args, "job"))
     raise KeyError(f"unknown tool: {name}")
 
 
@@ -366,6 +379,18 @@ def _tool_defs() -> list[dict]:
             },
         },
         {
+            "name": "cancel_job",
+            "description": (
+                "Stop a queued or running image/video/export job. "
+                "Queued work never runs; running work is discarded."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {"job": s},
+                "required": ["job"],
+            },
+        },
+        {
             "name": "detect_panels",
             "description": (
                 "Detect manga panels on every page of a project. "
@@ -400,7 +425,7 @@ def _tool_defs() -> list[dict]:
         {
             "name": "create_image",
             "description": (
-                "Generate an image from a prompt, attached as a frame. "
+                "Generate an image from a prompt into the media gallery. "
                 "References: @-mention tokens may stay in the prompt "
                 "(@frame:/@panel:/@media:/@gen: ids), or pass structured "
                 "references/entity ids."
@@ -416,6 +441,7 @@ def _tool_defs() -> list[dict]:
                     "reference_frame_id": s,
                     "references": arr,
                     "entity_ids": arr,
+                    "attach_frame": {"type": "boolean"},
                 },
                 "required": ["project_id", "prompt"],
             },
@@ -452,7 +478,8 @@ def _tool_defs() -> list[dict]:
             "name": "add_clip",
             "description": (
                 "Add one panel, frame, scan-page, or video clip to a scene "
-                "timeline. Video source_id is a finished generation job id."
+                "timeline. Video source_id is a finished generation job id. "
+                "transition blends into this clip from the previous one."
             ),
             "inputSchema": {
                 "type": "object",
@@ -463,6 +490,10 @@ def _tool_defs() -> list[dict]:
                     "scene": s,
                     "duration": num,
                     "motion": s,
+                    "transition": s,
+                    "transition_duration": num,
+                    "fade_in": num,
+                    "fade_out": num,
                 },
                 "required": ["project_id", "kind", "source_id"],
             },
@@ -527,7 +558,9 @@ def _tool_defs() -> list[dict]:
             "description": (
                 "Draw-layer ops on one frame (frame id, @frame: mention, or name). "
                 "Ops: list, add, rename, set (opacity/visible/locked/blend), "
-                "move (position 0 is bottom), remove, duplicate, clear, merge down."
+                "move (position 0 is bottom), remove, duplicate, clear, merge down, "
+                "draw (paint shapes: stroke/rect/ellipse/fill in frame pixels; "
+                "omitted layer means the top layer)."
             ),
             "inputSchema": {
                 "type": "object",
@@ -543,6 +576,7 @@ def _tool_defs() -> list[dict]:
                     "blend": s,
                     "position": num,
                     "sequence": s,
+                    "shapes": {"type": "array"},
                 },
                 "required": ["project_id", "frame", "op"],
             },
@@ -614,7 +648,8 @@ def _tool_defs() -> list[dict]:
         {
             "name": "manage_clips",
             "description": (
-                "Timeline-clip ops: list, remove, set (duration/motion), "
+                "Timeline-clip ops: list, remove, set "
+                "(duration/motion/transition/fades), "
                 "reorder (clip_ids lists every clip id once)."
             ),
             "inputSchema": {
@@ -625,7 +660,11 @@ def _tool_defs() -> list[dict]:
                     "clip": s,
                     "scene": s,
                     "duration": num,
-                    "motion": num,
+                    "motion": s,
+                    "transition": s,
+                    "transition_duration": num,
+                    "fade_in": num,
+                    "fade_out": num,
                     "clip_ids": arr,
                 },
                 "required": ["project_id", "op"],

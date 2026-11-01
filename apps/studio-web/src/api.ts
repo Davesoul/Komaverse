@@ -8,6 +8,7 @@ export interface Panel {
   w: number;
   h: number;
   reading_order: number;
+  name: string;
   crop_url: string | null;
 }
 
@@ -18,6 +19,7 @@ export interface Page {
   image_url: string;
   width: number;
   height: number;
+  name: string;
   panels: Panel[];
 }
 
@@ -45,6 +47,10 @@ export interface Clip {
   start: number;
   duration: number;
   motion: string;
+  transition: string;
+  transition_duration: number;
+  fade_in: number;
+  fade_out: number;
   order: number;
 }
 
@@ -171,7 +177,7 @@ export interface Job {
   reference_frame_id: string | null;
   final_prompt: string;
   entities_json: string;
-  status: "queued" | "running" | "done" | "failed";
+  status: "queued" | "running" | "done" | "failed" | "cancelled";
   progress: number;
   result_url: string | null;
   error: string | null;
@@ -190,13 +196,16 @@ export interface Entity {
 export interface AiModelOption {
   id: string;
   label: string;
-  badge: "cheap" | "popular";
+  badge: string;
 }
 
 export interface AiModelCatalog {
   image: AiModelOption[];
   video: AiModelOption[];
   defaults: { image: string; video: string };
+  chat?: Record<string, AiModelOption[]>;
+  vision?: Record<string, AiModelOption[]>;
+  meta_image?: AiModelOption[];
 }
 
 export interface CreditEntry {
@@ -232,6 +241,37 @@ export interface AgentReply {
   project_id: string | null;
   project_name: string | null;
   actions: AgentAction[];
+  brain?: string;
+  cloud_error?: string | null;
+}
+
+export interface AgentStatus {
+  provider: string;
+  cloud: boolean;
+  chat_model: string | null;
+  vision_model: string | null;
+  image_model: string | null;
+  video_model: string | null;
+  transcribe_model: string | null;
+  providers: Record<string, string>;
+  overrides: string[];
+}
+
+export interface AgentConfigBody {
+  provider?: string | null;
+  chat_provider?: string | null;
+  vision_provider?: string | null;
+  image_provider?: string | null;
+  chat_model?: string | null;
+  vision_model?: string | null;
+  image_model?: string | null;
+  video_model?: string | null;
+  transcribe_model?: string | null;
+}
+
+export interface ChatTurn {
+  role: string;
+  text: string;
 }
 
 /** One @-mention: a specific frame, detected panel, voice take, or generation. */
@@ -425,7 +465,16 @@ export const api = {
     req<void>(`/api/v1/scenes/${sceneId}`, { method: "DELETE" }),
   addClip: (
     sceneId: string,
-    clip: { kind: string; source_id: string; duration?: number; motion?: string },
+    clip: {
+      kind: string;
+      source_id: string;
+      duration?: number;
+      motion?: string;
+      transition?: string;
+      transition_duration?: number;
+      fade_in?: number;
+      fade_out?: number;
+    },
   ) =>
     req<Clip>(`/api/v1/scenes/${sceneId}/clips`, {
       method: "POST",
@@ -484,6 +533,18 @@ export const api = {
     }),
   deleteFrame: (frameId: string) =>
     req<void>(`/api/v1/frames/${frameId}`, { method: "DELETE" }),
+  updateFrame: (frameId: string, patch: { name?: string }) =>
+    req<DrawFrame>(`/api/v1/frames/${frameId}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(patch),
+    }),
+  patchPage: (pageId: string, patch: { name?: string }) =>
+    req<Page>(`/api/v1/pages/${pageId}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(patch),
+    }),
   duplicateFrame: (frameId: string) =>
     req<DrawFrame>(`/api/v1/frames/${frameId}/duplicate`, { method: "POST" }),
   orderFrames: (projectId: string, frameIds: string[]) =>
@@ -510,7 +571,16 @@ export const api = {
   exportDownloadUrl: (jobId: string) => `${apiBase()}/api/v1/exports/${jobId}/download`,
   addClipsBatch: (
     sceneId: string,
-    clips: { kind: string; source_id: string; duration?: number; motion?: string }[],
+    clips: {
+      kind: string;
+      source_id: string;
+      duration?: number;
+      motion?: string;
+      transition?: string;
+      transition_duration?: number;
+      fade_in?: number;
+      fade_out?: number;
+    }[],
   ) =>
     req<Clip[]>(`/api/v1/scenes/${sceneId}/clips/batch`, {
       method: "POST",
@@ -539,6 +609,14 @@ export const api = {
     form.append("file", file, filename);
     form.append("duration_sec", String(durationSec));
     return req<AudioTake>(`/api/v1/projects/${projectId}/audio`, {
+      method: "POST",
+      body: form,
+    });
+  },
+  transcribeVoice: (file: Blob, filename: string) => {
+    const form = new FormData();
+    form.append("file", file, filename);
+    return req<{ text: string; duration_sec: number }>(`/api/v1/ai/transcribe`, {
       method: "POST",
       body: form,
     });
@@ -630,6 +708,7 @@ export const api = {
     camera_move?: string;
     entity_ids?: string[];
     reference_frame_id?: string;
+    attach_frame?: boolean;
   }) =>
     req<Job>("/api/v1/ai/generate", {
       method: "POST",
@@ -650,6 +729,8 @@ export const api = {
   deleteEntity: (entityId: string) =>
     req<void>(`/api/v1/entities/${entityId}`, { method: "DELETE" }),
   getJob: (jobId: string) => req<Job>(`/api/v1/ai/jobs/${jobId}`),
+  cancelJob: (jobId: string) =>
+    req<Job>(`/api/v1/ai/jobs/${jobId}/cancel`, { method: "POST" }),
   listJobs: () => req<Job[]>("/api/v1/ai/jobs"),
   listAiModels: () => req<AiModelCatalog>("/api/v1/ai/models"),
   me: () => req<User>("/api/v1/auth/me"),
@@ -672,13 +753,30 @@ export const api = {
     message: string,
     signal?: AbortSignal,
     refs: AgentRef[] = [],
+    current_frame_id?: string | null,
   ) =>
     req<AgentReply>("/api/v1/agent/chat", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ project_id, message, refs }),
+      body: JSON.stringify({ project_id, message, refs, current_frame_id: current_frame_id ?? null }),
       signal,
     }),
+  agentStatus: () => req<AgentStatus>("/api/v1/agent/status"),
+  agentConfig: (body: AgentConfigBody) =>
+    req<AgentStatus>("/api/v1/agent/config", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }),
+  agentHistory: (project_id: string | null) =>
+    req<ChatTurn[]>(
+      `/api/v1/agent/history${project_id ? `?project_id=${encodeURIComponent(project_id)}` : ""}`,
+    ),
+  clearAgentHistory: (project_id: string | null) =>
+    req<void>(
+      `/api/v1/agent/history${project_id ? `?project_id=${encodeURIComponent(project_id)}` : ""}`,
+      { method: "DELETE" },
+    ),
   autoDirect: (projectId: string, body?: { seconds?: number; motions?: string[] }) =>
     req<Scene>(`/api/v1/projects/${projectId}/auto-direct`, {
       method: "POST",

@@ -249,9 +249,14 @@ export default function App() {
             margin: "0 auto",
           }}
         >
-          <strong style={{ fontSize: 17, marginRight: 12, whiteSpace: "nowrap" }}>
-            Komaverse
-          </strong>
+          <span style={{ display: "inline-flex", alignItems: "center", gap: 8, marginRight: 12, whiteSpace: "nowrap" }}>
+            <img
+              src="/koma-wari-logo-sm.png"
+              alt=""
+              style={{ width: 24, height: 24, objectFit: "contain" }}
+            />
+            <strong style={{ fontSize: 17 }}>Komaverse</strong>
+          </span>
           {TABS.map((t) => (
             <Btn
               key={t.id}

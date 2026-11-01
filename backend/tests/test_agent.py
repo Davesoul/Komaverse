@@ -11,7 +11,13 @@ from sqlalchemy.orm import Session, sessionmaker
 from starlette.datastructures import Headers
 
 from komaverse.agent import parse_motions, parse_seconds, run_agent_turn
-from komaverse.api.agent import AgentChatBody, chat
+from komaverse.api.agent import (
+    AgentChatBody,
+    agent_history,
+    agent_status,
+    chat,
+    clear_agent_history,
+)
 from komaverse.api.scans import ProjectCreate, create_project, upload_page
 from komaverse.config import settings
 from komaverse.db_models import Base, UserRow
@@ -101,17 +107,6 @@ def test_agent_export_chains_auto_direct(factory, user):
     out = turn(factory, user, "render it", pid, clip_seconds=0.3)
     # No clips and no panels: agent says what is missing instead of failing.
     assert "detect" in out["reply"].lower() or ".mp4" in out["reply"]
-
-
-def test_agent_generate_fake(factory, user):
-    pid = seed_project(factory, user)
-    out = turn(factory, user, "generate a moonlit robot", pid, job_factory=factory)
-    assert out["actions"] and out["actions"][0]["tool"] == "create_image"
-    assert ".png" in out["reply"]
-    from komaverse.api.animate import list_frames
-
-    with factory() as s:
-        assert len(list_frames(pid, s, user)) == 1
 
 
 def test_agent_enforces_ownership(factory, user):
@@ -281,22 +276,6 @@ def test_agent_sees_finished_job(factory, user):
     assert ".png" in seen
 
 
-def test_agent_generate_and_add_to_timeline(factory, user):
-    from komaverse.api.animate import list_scenes
-
-    pid = seed_project(factory, user)
-    out = turn(
-        factory, user,
-        "generate a moonlit robot and add it to the timeline",
-        pid, job_factory=factory,
-    )
-    tools = [a["tool"] for a in out["actions"]]
-    assert "create_image" in tools and "add_clip" in tools
-    with factory() as s:
-        clips = list_scenes(pid, s, user)[0].clips
-    assert any(c.kind == "frame" for c in clips)
-
-
 def test_agent_add_panel_token_to_timeline(factory, user):
     from komaverse.api.animate import list_scenes
     from komaverse.api.scans import DetectRequest, detect_panels, get_project
@@ -444,86 +423,6 @@ def test_export_renders_video_clip(factory, user):
     assert video.exists() and video.stat().st_size > 1000
 
 
-def job_entities(factory, job_id):
-    import json
-
-    from komaverse.db_models import JobRow
-
-    with factory() as s:
-        return json.loads(s.get(JobRow, job_id).entities_json or "[]")
-
-
-def job_id_of(summary):
-    import re
-
-    m = re.search(r"\[job ([A-Za-z0-9_-]+)\]", summary)
-    assert m, "expected a job id in the summary"
-    return m.group(1)
-
-
-def test_agent_generate_with_panel_reference(factory, user):
-    from komaverse.api.scans import DetectRequest, detect_panels, get_project
-
-    pid = seed_project(factory, user)
-    with factory() as s:
-        page = get_project(pid, s, user).pages[0]
-    with factory() as s:
-        detected = detect_panels(
-            page.id, DetectRequest(detector="heuristic", confirm=True), s, user
-        )
-    panel_id = detected.panels[0].id
-    out = turn(
-        factory, user,
-        f"generate a warrior in the style of @panel:{panel_id}",
-        pid, job_factory=factory,
-    )
-    assert out["actions"] and out["actions"][0]["tool"] == "create_image"
-    snaps = job_entities(factory, job_id_of(out["actions"][0]["summary"]))
-    assert any(s.get("panel_id") == panel_id for s in snaps)
-
-
-def test_agent_generate_with_media_reference(factory, user):
-    from komaverse.api.scans import get_project
-
-    pid = seed_project(factory, user)
-    with factory() as s:
-        page_id = get_project(pid, s, user).pages[0].id
-    out = turn(
-        factory, user, f"redraw @media:{page_id} as night",
-        pid, job_factory=factory,
-    )
-    snaps = job_entities(factory, job_id_of(out["actions"][0]["summary"]))
-    assert any(s.get("page_id") == page_id for s in snaps)
-
-
-def test_agent_generate_names_entity(factory, user):
-    from komaverse.api.ai import EntityCreate, create_entity
-
-    pid = seed_project(factory, user)
-    with factory() as s:
-        ent = create_entity(
-            pid, EntityCreate(kind="character", name="Mika"), s, user
-        )
-    out = turn(
-        factory, user, "generate Mika in the rain",
-        pid, job_factory=factory,
-    )
-    snaps = job_entities(factory, job_id_of(out["actions"][0]["summary"]))
-    assert any(s.get("id") == ent.id for s in snaps)
-
-
-def test_agent_generate_from_finished_generation(factory, user):
-    pid = seed_project(factory, user)
-    first = turn(factory, user, "generate a moonlit robot", pid, job_factory=factory)
-    gid = job_id_of(first["actions"][0]["summary"])
-    out = turn(
-        factory, user, f"generate a darker variant of @gen:{gid}",
-        pid, job_factory=factory,
-    )
-    snaps = job_entities(factory, job_id_of(out["actions"][0]["summary"]))
-    assert any(s.get("job_id") == gid for s in snaps)
-
-
 def test_agent_media_mention_resolves(factory, user):
     from komaverse.api.scans import get_project
 
@@ -543,12 +442,6 @@ def test_agent_lists_takes(factory, user):
     out = turn(factory, user, "what takes do I have", pid)
     assert any(a["tool"] == "list_takes" for a in out["actions"])
     assert "Intro VO" in out["reply"]
-
-
-def test_agent_video_routes_to_async_job(factory, user):
-    pid = seed_project(factory, user)
-    out = turn(factory, user, "generate a video of a robot", pid, job_factory=factory)
-    assert out["actions"] and out["actions"][0]["tool"] == "create_video"
 
 
 def test_chat_threads_clip_seconds(factory, user):
@@ -609,21 +502,6 @@ def test_agent_single_take_needs_no_disambiguation(factory, user):
     assert any(a["tool"] == "add_cue" for a in out["actions"])
     out = turn(factory, user, "transcribe it", pid)
     assert any(a["tool"] == "transcribe_audio" for a in out["actions"])
-
-
-def test_agent_generate_and_add_it(factory, user):
-    from komaverse.api.animate import list_scenes
-
-    pid = seed_project(factory, user)
-    out = turn(
-        factory, user, "generate a moonlit robot and add it", pid,
-        job_factory=factory,
-    )
-    tools = [a["tool"] for a in out["actions"]]
-    assert "create_image" in tools and "add_clip" in tools
-    with factory() as s:
-        clips = list_scenes(pid, s, user)[0].clips
-    assert any(c.kind == "frame" for c in clips)
 
 
 def test_agent_frame_panel_mention(factory, user):
@@ -730,6 +608,71 @@ def test_agent_draw_tone_and_media_layer(factory, user):
         assert "Unknown media" in agent_mod.tool_layer_from_media(
             s, user, pid, fid, "nope"
         )
+
+
+def test_agent_draw_shapes_paints_pixels(factory, user):
+    import base64
+    import io
+
+    from PIL import Image
+
+    from komaverse import agent as agent_mod
+    from komaverse.db_models import FrameRow
+
+    pid = seed_draw(factory, user)
+    fid = draw_frame_id(factory, user, pid, "Canvas")
+    with factory() as s:
+        assert "Added layer 'ink'" in agent_mod.tool_manage_layers(
+            s, user, pid, fid, "add", name="ink"
+        )
+        out = agent_mod.tool_manage_layers(
+            s, user, pid, fid, "draw",
+            shapes=[
+                {"type": "fill", "color": "paper"},
+                {"type": "rect", "color": "red", "fill": True,
+                 "box": [10, 10, 40, 30]},
+            ],
+        )
+        assert "Drew 2 shape(s)" in out
+        assert "unknown color" in agent_mod.tool_manage_layers(
+            s, user, pid, fid, "draw", shapes=[{"type": "fill", "color": "nope"}]
+        ).lower()
+        assert "unknown type" in agent_mod.tool_manage_layers(
+            s, user, pid, fid, "draw", shapes=[{"type": "blob"}]
+        ).lower()
+    with factory() as s:
+        row = s.get(FrameRow, fid)
+        layer = next(layer for layer in row.layers if layer.name == "ink")
+        raw = base64.b64decode(layer.data_url.split(",", 1)[1])
+        px = Image.open(io.BytesIO(raw)).convert("RGBA")
+        assert px.getpixel((30, 25))[:3] == (214, 40, 40)
+        assert px.getpixel((px.width - 1, px.height - 1))[:3] == (244, 239, 228)
+
+
+def test_agent_demo_draws_a_shape(factory, user):
+    pid = seed_draw(factory, user)
+    draw_frame_id(factory, user, pid, "Canvas")
+    out = turn(factory, user, "draw a red circle", pid)
+    assert any(a["tool"] == "manage_layers" for a in out["actions"])
+    assert "Drew 1 shape" in out["actions"][0]["summary"]
+
+
+def test_agent_turn_scopes_to_current_frame(factory, user):
+    """No frame mentioned: the open (current) frame wins on multi-frame
+    projects; an explicitly named frame keeps priority; a forged id from
+    another project degrades to disambiguation without leaking."""
+    pid = seed_draw(factory, user)
+    a = draw_frame_id(factory, user, pid, "Alpha")
+    b = draw_frame_id(factory, user, pid, "Beta")
+    out = turn(factory, user, "draw a red dot", pid, current_frame_id=a)
+    assert f"[frame {a}]" in out["actions"][0]["summary"]
+    out = turn(factory, user, "draw a red dot on Beta", pid, current_frame_id=a)
+    assert f"[frame {b}]" in out["actions"][0]["summary"]
+    other = seed_draw(factory, user, name="Other")
+    foreign = draw_frame_id(factory, user, other, "Foreign")
+    out = turn(factory, user, "draw a red dot", pid, current_frame_id=foreign)
+    assert "Unknown frame" in out["reply"]
+    assert foreign not in out["reply"]
 
 
 def test_agent_draw_frames_and_clips(factory, user):
@@ -955,3 +898,517 @@ def test_agent_demo_draw_turns(factory, user):
     out = turn(factory, user, "duplicate the demo frame", pid)
     assert any(a["tool"] == "manage_frames" for a in out["actions"])
     assert "Duplicated" in out["reply"]
+
+
+def test_fx_parse_helpers():
+    from komaverse.agent import _composition_hint, _parse_fade, _parse_ratio, _parse_transition
+
+    assert _parse_transition("add it with a crossfade") == "crossfade"
+    assert _parse_transition("fade to black between clips") == "fade-black"
+    assert _parse_transition("wipe into the next shot") == "wipe-left"
+    assert _parse_transition("hit it with an impact flash") == "impact"
+    assert _parse_transition("just add it plainly") == "none"
+    assert _parse_ratio("generate a wide shot of a robot") == (1280, 720)
+    assert _parse_ratio("a vertical video of rain") == (720, 1280)
+    assert _parse_ratio("a square format portrait") == (1024, 1024)
+    assert _parse_ratio("a robot") is None
+    assert _parse_fade("add a fade in 2s", "in") == 2.0
+    assert _parse_fade("with fade out", "out") == 0.5
+    assert _parse_fade("no fades here", "in") is None
+    assert _composition_hint("a wide shot chase").startswith("Wide 16:9")
+    assert _composition_hint("a robot") == ""
+
+
+def test_tool_add_clip_fx(factory, user):
+    from komaverse.agent import tool_add_clip
+    from komaverse.api.animate import list_scenes
+    from komaverse.api.scans import DetectRequest, detect_panels, get_project
+
+    pid = seed_project(factory, user)
+    with factory() as s:
+        page = get_project(pid, s, user).pages[0]
+        panel_id = detect_panels(page.id, DetectRequest(detector="heuristic", confirm=True), s, user).panels[0].id
+    with factory() as s:
+        reply = tool_add_clip(s, user, pid, "panel", panel_id, None, 2.0, "pan-up", "crossfade", None, 0.5, None)
+    assert "crossfade" in reply and "fade in 0.5s" in reply
+    with factory() as s:
+        clip = list_scenes(pid, s, user)[0].clips[0]
+    assert (clip.motion, clip.transition, clip.fade_in) == ("pan-up", "crossfade", 0.5)
+
+
+def test_agent_demo_crossfade_turn(factory, user):
+    from komaverse.api.scans import DetectRequest, detect_panels, get_project
+
+    pid = seed_project(factory, user)
+    with factory() as s:
+        page = get_project(pid, s, user).pages[0]
+        panel_id = detect_panels(page.id, DetectRequest(detector="heuristic", confirm=True), s, user).panels[0].id
+    out = turn(factory, user, f"add @panel:{panel_id} to the timeline with a crossfade", pid)
+    assert any(a["tool"] == "add_clip" for a in out["actions"])
+    assert "crossfade" in out["reply"]
+
+
+def test_agent_chat_remembers_thread(factory, user):
+    """Both sides of every turn persist per project; history reads back
+    oldest-first and other projects stay out of scope."""
+    pid = seed_project(factory, user)
+    other = seed_project(factory, user, name="Other")
+    with factory() as s:
+        first = chat(AgentChatBody(project_id=pid, message="hello"), s, user)
+        assert first.brain == "demo"
+    with factory() as s:
+        chat(AgentChatBody(project_id=pid, message="status"), s, user)
+        chat(AgentChatBody(project_id=other, message="hello"), s, user)
+    with factory() as s:
+        turns = agent_history(project_id=pid, session=s, user=user)
+    assert [t.role for t in turns] == ["user", "agent", "user", "agent"]
+    assert turns[0].text == "hello"
+    assert turns[2].text == "status"
+
+
+def test_agent_history_clear_scopes_to_project(factory, user):
+    pid = seed_project(factory, user)
+    other = seed_project(factory, user, name="Other")
+    with factory() as s:
+        chat(AgentChatBody(project_id=pid, message="hello"), s, user)
+        chat(AgentChatBody(project_id=other, message="hello"), s, user)
+    with factory() as s:
+        assert clear_agent_history(project_id=pid, session=s, user=user) is None
+    with factory() as s:
+        assert agent_history(project_id=pid, session=s, user=user) == []
+        assert len(agent_history(project_id=other, session=s, user=user)) == 2
+
+
+def test_agent_status_reports_models_without_keys(factory, user):
+    """Widget parameters: provider + model names, never secret material."""
+    import json
+
+    with factory() as s:
+        status = agent_status(s, user)
+    assert status.provider
+    assert status.cloud is False
+    blob = json.dumps(status.model_dump())
+    assert "sk-" not in blob and "key" not in blob.lower()
+
+
+def test_demo_greeting_with_current_frame_takes_no_action(factory, user):
+    """A bare 'hi' carrying the injected @frame context must not act."""
+    from komaverse import agent as agent_mod
+    from komaverse.api.animate import list_frames
+
+    pid = seed_project(factory, user)
+    with factory() as s:
+        agent_mod.tool_create_frame(s, user, pid, "F1")
+    with factory() as s:
+        frames = list_frames(pid, s, user)
+        before = len(frames)
+        fid = frames[0].id
+    out = turn(factory, user, "hi", pid, current_frame_id=fid)
+    assert out["actions"] == []
+    out = turn(factory, user, f"hi @frame:{fid}", pid)
+    assert out["actions"] == []
+    with factory() as s:
+        assert len(list_frames(pid, s, user)) == before
+
+
+def test_demo_frame_mention_with_verb_still_works(factory, user):
+    """The verb guard only stops bare mentions, not real requests."""
+    from komaverse import agent as agent_mod
+    from komaverse.api.animate import list_frames
+
+    pid = seed_project(factory, user)
+    with factory() as s:
+        agent_mod.tool_create_frame(s, user, pid, "F1")
+    with factory() as s:
+        fid = list_frames(pid, s, user)[0].id
+    out = turn(factory, user, f"duplicate @frame:{fid}", pid)
+    assert any(a["tool"] in ("manage_frames", "frame_from_media") for a in out["actions"])
+
+
+def test_cloud_smalltalk_rule_reaches_model(factory, user, monkeypatch):
+    """Greetings ride words-only: the rule is in the system prompt."""
+    from komaverse import agent as agent_mod
+
+    monkeypatch.setattr(settings, "ai_provider", "openrouter")
+    monkeypatch.setattr(settings, "openrouter_api_key", "test-key")
+    seen = {}
+
+    def fake_complete(**kw):
+        seen["messages"] = kw["messages"]
+        return {"content": "Hey there!"}, {"total": 5}
+
+    monkeypatch.setattr(agent_mod, "chat_complete_with_usage", fake_complete)
+    pid = seed_project(factory, user)
+    with factory() as s:
+        out = agent_mod.run_agent_turn("hi", pid, s, user)
+    assert out["actions"] == []
+    assert "Hey there!" in out["reply"]
+    assert out["brain"].startswith("cloud:")
+    system = seen["messages"][0]
+    assert system["role"] == "system"
+    assert "smalltalk" in system["content"]
+
+
+def test_cloud_bare_message_attaches_no_reference(factory, user, monkeypatch):
+    """Scope token + open-frame label ride along; no phantom Referenced block."""
+    from komaverse import agent as agent_mod
+
+    monkeypatch.setattr(settings, "ai_provider", "openrouter")
+    monkeypatch.setattr(settings, "openrouter_api_key", "test-key")
+    seen = {}
+
+    def fake_complete(**kw):
+        seen["messages"] = kw["messages"]
+        return {"content": "Hey there!"}, {"total": 5}
+
+    monkeypatch.setattr(agent_mod, "chat_complete_with_usage", fake_complete)
+    pid = seed_draw(factory, user)
+    fid = draw_frame_id(factory, user, pid, "Canvas")
+    with factory() as s:
+        out = agent_mod.run_agent_turn("hi", pid, s, user, current_frame_id=fid)
+    assert out["actions"] == []
+    user_msg = seen["messages"][-1]["content"]
+    assert f"@frame:{fid}" in user_msg
+    assert "Open draw frame:" in user_msg
+    assert "Referenced:" not in user_msg
+
+
+def test_cloud_loop_streams_tokens_and_tools(factory, user, monkeypatch):
+    """The shared loop yields live events around each tool call."""
+    from komaverse import agent as agent_mod
+
+    monkeypatch.setattr(settings, "ai_provider", "openrouter")
+    monkeypatch.setattr(settings, "openrouter_api_key", "test-key")
+    pid = seed_project(factory, user)
+
+    calls = []
+
+    def fake_stream(**kw):
+        calls.append(kw["messages"])
+        if len(calls) == 1:
+            yield ("token", "Hi")
+            yield ("message", (
+                {"role": "assistant", "content": None, "tool_calls": [
+                    {"id": "c1", "type": "function",
+                     "function": {"name": "project_status", "arguments": "{}"}},
+                ]},
+                {"total": 1},
+            ))
+        else:
+            yield ("token", "done")
+            yield ("message", ({"role": "assistant", "content": "done"}, {"total": 1}))
+
+    monkeypatch.setattr(agent_mod, "chat_complete_stream", fake_stream)
+    with factory() as s:
+        events = list(agent_mod._cloud_loop(
+            agent_mod._complete_stream, "status", pid, s, user, None,
+        ))
+    assert [e["type"] for e in events] == [
+        "token", "tool_start", "tool_result", "token", "result",
+    ]
+    assert events[0]["text"] == "Hi"
+    assert events[1]["tool"] == "project_status"
+    assert events[2]["tool"] == "project_status"
+    assert events[2]["job_ids"] == []
+    assert events[-1]["reply"] == "done"
+    assert events[-1]["actions"][0]["tool"] == "project_status"
+
+
+def test_run_agent_turn_stream_matches_sync_demo(factory, user):
+    """Stream and sync turns finish with the identical turn dict."""
+    from komaverse import agent as agent_mod
+
+    pid = seed_project(factory, user)
+    with factory() as s:
+        events = list(agent_mod.run_agent_turn_stream("status", pid, s, user))
+    assert events and events[-1]["type"] == "result"
+    result = {k: v for k, v in events[-1].items() if k != "type"}
+    assert result == turn(factory, user, "status", pid)
+
+
+def test_run_agent_turn_stream_early_no_projects(factory, user):
+    """Preamble short-circuits stream as a single result event."""
+    from komaverse import agent as agent_mod
+
+    with factory() as s:
+        events = list(agent_mod.run_agent_turn_stream("status", None, s, user))
+    assert len(events) == 1 and events[0]["type"] == "result"
+    assert "no projects" in events[0]["reply"].lower()
+
+
+def test_run_agent_turn_stream_error_event(factory, user):
+    """Ownership failures surface as an error event, not a crash."""
+    from komaverse import agent as agent_mod
+
+    with factory() as s:
+        events = list(
+            agent_mod.run_agent_turn_stream("hi", "missing-project", s, user)
+        )
+    assert events and events[0]["type"] == "error"
+    assert events[0]["status"] == 404
+
+
+def job_entities(factory, job_id):
+    import json
+
+    from komaverse.db_models import JobRow
+
+    with factory() as s:
+        return json.loads(s.get(JobRow, job_id).entities_json or "[]")
+
+
+def job_id_of(summary):
+    import re
+
+    m = re.search(r"\[job ([A-Za-z0-9_-]+)\]", summary)
+    assert m, "expected a job id in the summary"
+    return m.group(1)
+
+
+def test_agent_generate_fake(factory, user):
+    pid = seed_project(factory, user)
+    out = turn(factory, user, "generate a moonlit robot", pid, job_factory=factory)
+    assert out["actions"] and out["actions"][0]["tool"] == "create_image"
+    assert ".png" in out["reply"]
+    from komaverse.api.animate import list_frames
+
+    with factory() as s:
+        assert len(list_frames(pid, s, user)) == 0  # gallery-only unless asked for a frame
+
+
+def test_agent_generate_and_add_to_timeline(factory, user):
+    from komaverse.api.animate import list_scenes
+
+    pid = seed_project(factory, user)
+    out = turn(
+        factory, user,
+        "generate a moonlit robot and add it to the timeline",
+        pid, job_factory=factory,
+    )
+    tools = [a["tool"] for a in out["actions"]]
+    assert "create_image" in tools and "add_clip" in tools
+    with factory() as s:
+        clips = list_scenes(pid, s, user)[0].clips
+    assert any(c.kind == "frame" for c in clips)
+
+
+def test_agent_generate_with_panel_reference(factory, user):
+    from komaverse.api.scans import DetectRequest, detect_panels, get_project
+
+    pid = seed_project(factory, user)
+    with factory() as s:
+        page = get_project(pid, s, user).pages[0]
+    with factory() as s:
+        detected = detect_panels(
+            page.id, DetectRequest(detector="heuristic", confirm=True), s, user
+        )
+    panel_id = detected.panels[0].id
+    out = turn(
+        factory, user,
+        f"generate a warrior in the style of @panel:{panel_id}",
+        pid, job_factory=factory,
+    )
+    assert out["actions"] and out["actions"][0]["tool"] == "create_image"
+    snaps = job_entities(factory, job_id_of(out["actions"][0]["summary"]))
+    assert any(s.get("panel_id") == panel_id for s in snaps)
+
+
+def test_agent_generate_with_media_reference(factory, user):
+    from komaverse.api.scans import get_project
+
+    pid = seed_project(factory, user)
+    with factory() as s:
+        page_id = get_project(pid, s, user).pages[0].id
+    out = turn(
+        factory, user, f"redraw @media:{page_id} as night",
+        pid, job_factory=factory,
+    )
+    snaps = job_entities(factory, job_id_of(out["actions"][0]["summary"]))
+    assert any(s.get("page_id") == page_id for s in snaps)
+
+
+def test_agent_generate_names_entity(factory, user):
+    from komaverse.api.ai import EntityCreate, create_entity
+
+    pid = seed_project(factory, user)
+    with factory() as s:
+        ent = create_entity(
+            pid, EntityCreate(kind="character", name="Mika"), s, user
+        )
+    out = turn(
+        factory, user, "generate Mika in the rain",
+        pid, job_factory=factory,
+    )
+    snaps = job_entities(factory, job_id_of(out["actions"][0]["summary"]))
+    assert any(s.get("id") == ent.id for s in snaps)
+
+
+def test_agent_generate_from_finished_generation(factory, user):
+    pid = seed_project(factory, user)
+    first = turn(factory, user, "generate a moonlit robot", pid, job_factory=factory)
+    gid = job_id_of(first["actions"][0]["summary"])
+    out = turn(
+        factory, user, f"generate a darker variant of @gen:{gid}",
+        pid, job_factory=factory,
+    )
+    snaps = job_entities(factory, job_id_of(out["actions"][0]["summary"]))
+    assert any(s.get("job_id") == gid for s in snaps)
+
+
+def test_agent_video_routes_to_async_job(factory, user):
+    pid = seed_project(factory, user)
+    out = turn(factory, user, "generate a video of a robot", pid, job_factory=factory)
+    assert out["actions"] and out["actions"][0]["tool"] == "create_video"
+
+
+def test_agent_generate_and_add_it(factory, user):
+    from komaverse.api.animate import list_scenes
+
+    pid = seed_project(factory, user)
+    out = turn(
+        factory, user, "generate a moonlit robot and add it", pid,
+        job_factory=factory,
+    )
+    tools = [a["tool"] for a in out["actions"]]
+    assert "create_image" in tools and "add_clip" in tools
+    with factory() as s:
+        clips = list_scenes(pid, s, user)[0].clips
+    assert any(c.kind == "frame" for c in clips)
+
+
+def test_tool_generate_ratio(factory, user):
+    from komaverse.agent import tool_generate
+    from komaverse.db_models import JobRow
+
+    pid = seed_project(factory, user)
+    with factory() as s:
+        summary = tool_generate(s, user, pid, "a wide shot of a robot", factory)
+        jid = job_id_of(summary)
+    with factory() as s:
+        job = s.get(JobRow, jid)
+        assert (job.width, job.height) == (1280, 720)
+    with factory() as s:
+        summary = tool_generate(s, user, pid, "a robot", factory, width=768, height=1024)
+        jid = job_id_of(summary)
+    with factory() as s:
+        job = s.get(JobRow, jid)
+        assert (job.width, job.height) == (768, 1024)
+
+
+def test_wants_reference_intent_gate():
+    """Bare mentions carry no intent; phrasal reuse asks do."""
+    from komaverse.agent import wants_reference
+
+    assert not wants_reference("hi")
+    assert not wants_reference("generate a beautiful anime landscape")
+    assert not wants_reference("draw a red dot @frame:abc123")
+    assert not wants_reference(None)
+    assert wants_reference("generate a warrior using @frame:abc as reference")
+    assert wants_reference("redraw @media:xyz as night")
+    assert wants_reference("in the style of @panel:xyz")
+    assert wants_reference("generate a landscape using this frame as reference")
+    assert wants_reference("keep it on-model like this")
+
+
+def test_agent_generate_ignores_echoed_frame_token(factory, user):
+    """The scope-injected open-frame token must not become a reference."""
+    pid = seed_draw(factory, user)
+    fid = draw_frame_id(factory, user, pid, "Canvas")
+    out = turn(
+        factory, user, "generate a moonlit landscape", pid,
+        job_factory=factory, current_frame_id=fid,
+    )
+    assert out["actions"] and out["actions"][0]["tool"] == "create_image"
+    summary = out["actions"][0]["summary"]
+    assert ".png" in summary
+    assert "reference" not in summary.lower()
+    assert job_entities(factory, job_id_of(summary)) == []
+
+
+def test_agent_generate_uses_frame_on_intent(factory, user):
+    """A typed @frame: token with reuse phrasing still attaches."""
+    pid = seed_draw(factory, user)
+    fid = draw_frame_id(factory, user, pid, "Canvas")
+    out = turn(
+        factory, user,
+        f"generate a warrior using @frame:{fid} as reference",
+        pid, job_factory=factory, current_frame_id=fid,
+    )
+    assert out["actions"] and out["actions"][0]["tool"] == "create_image"
+    snaps = job_entities(factory, job_id_of(out["actions"][0]["summary"]))
+    assert any(s.get("frame_id") == fid for s in snaps)
+
+
+def test_cloud_intent_message_references_open_frame(factory, user, monkeypatch):
+    """Reuse phrasing promotes the open frame to an explicit reference."""
+    from komaverse import agent as agent_mod
+
+    monkeypatch.setattr(settings, "ai_provider", "openrouter")
+    monkeypatch.setattr(settings, "openrouter_api_key", "test-key")
+    seen = {}
+
+    def fake_complete(**kw):
+        seen["messages"] = kw["messages"]
+        return {"content": "On it."}, {"total": 5}
+
+    monkeypatch.setattr(agent_mod, "chat_complete_with_usage", fake_complete)
+    pid = seed_draw(factory, user)
+    fid = draw_frame_id(factory, user, pid, "Canvas")
+    with factory() as s:
+        agent_mod.run_agent_turn(
+            "generate a landscape using this frame as reference",
+            pid, s, user, current_frame_id=fid,
+        )
+    user_msg = seen["messages"][-1]["content"]
+    assert "Open draw frame:" in user_msg
+    assert "Referenced:" in user_msg
+    assert f"@frame:{fid}" in user_msg
+
+
+def test_cloud_generation_ignores_echoed_token(factory, user, monkeypatch):
+    """End to end: a model-echoed scope token with no intent attaches nothing."""
+    import json
+
+    from komaverse import agent as agent_mod
+
+    monkeypatch.setattr(settings, "ai_provider", "openrouter")
+    monkeypatch.setattr(settings, "openrouter_api_key", "test-key")
+    monkeypatch.setattr(settings, "image_provider", "fake")
+    pid = seed_draw(factory, user)
+    fid = draw_frame_id(factory, user, pid, "Canvas")
+    calls = []
+
+    def fake_complete(**kw):
+        calls.append(kw["messages"])
+        if len(calls) == 1:
+            return (
+                {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [
+                        {
+                            "id": "call-1",
+                            "function": {
+                                "name": "create_image",
+                                "arguments": json.dumps(
+                                    {"prompt": f"beautiful anime landscape @frame:{fid}"}
+                                ),
+                            },
+                        }
+                    ],
+                },
+                {"total": 5},
+            )
+        return {"role": "assistant", "content": "Here it is."}, {"total": 5}
+
+    monkeypatch.setattr(agent_mod, "chat_complete_with_usage", fake_complete)
+    with factory() as s:
+        out = agent_mod.run_agent_turn(
+            "generate a beautiful anime landscape", pid, s, user,
+            job_factory=factory, current_frame_id=fid,
+        )
+    assert out["actions"] and out["actions"][0]["tool"] == "create_image"
+    summary = out["actions"][0]["summary"]
+    assert ".png" in summary
+    assert "reference" not in summary.lower()
+    assert job_entities(factory, job_id_of(summary)) == []

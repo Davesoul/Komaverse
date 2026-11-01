@@ -30,7 +30,7 @@ items, and open gaps found during verification. Shipped items move to
 9. **Alembic migrations (M3)** — replace the `create_all` + ALTER backfill.
 10. **Orphan GC scanner** — reclaim media with no referencing row.
 11. **CLIP search** — embedding search over media/generations.
-12. **Agent streaming / history / approval-gated loops** — chat UX + safety.
+12. **Agent history / approval-gated loops** — chat safety (streaming + live tool cards shipped).
 
 ## P4 — Reach + polish (MusArt lessons, cheap goodwill)
 

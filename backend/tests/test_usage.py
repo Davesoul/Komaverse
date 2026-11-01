@@ -119,6 +119,8 @@ def test_detect_records_detector(factory, user):
     with factory() as s:
         rows = s.query(UsageEventRow).filter_by(kind="detect").all()
     assert rows and rows[-1].label == "heuristic"
+    # 600x800 page -> 2x2 tiles of 512px: 85 + 170 * 4 vision-token estimate.
+    assert rows[-1].tokens == 85 + 170 * 4
 
 
 def test_generate_records_model_and_cost(factory, user):

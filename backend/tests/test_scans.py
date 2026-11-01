@@ -18,6 +18,7 @@ from starlette.datastructures import Headers
 
 from komaverse.api.scans import (
     DetectRequest,
+    PagePatch,
     PanelCreate,
     PanelOrder,
     PanelPatch,
@@ -31,13 +32,36 @@ from komaverse.api.scans import (
     get_project,
     order_panels,
     panel_preview,
+    patch_page,
     patch_panel,
     project_storage,
     router,
     upload_page,
 )
+
+
+def test_rename_page_and_panel(factory, user):
+    """Media cards and panels carry proper names, blank by default."""
+    with factory() as s:
+        project = create_project(ProjectCreate(name="N"), s, user)
+    with factory() as s:
+        page = upload(s, user, project.id, fake_page())
+    assert page.name == ""
+    with factory() as s:
+        panel = add_panel(page.id, PanelCreate(x=10, y=10, w=50, h=50), s, user)
+    assert panel.name == ""
+    with factory() as s:
+        renamed = patch_page(page.id, PagePatch(name="Splash"), s, user)
+    assert renamed.name == "Splash"
+    with factory() as s:
+        renamed_panel = patch_panel(panel.id, PanelPatch(name="Koma close-up"), s, user)
+    assert renamed_panel.name == "Koma close-up"
+    with factory() as s:
+        full = get_project(project.id, s, user)
+    assert full.pages[0].name == "Splash"
+    assert full.pages[0].panels[0].name == "Koma close-up"
 from komaverse.config import settings
-from komaverse.db_models import Base, PanelRow, UserRow
+from komaverse.db_models import Base, ClipRow, PanelRow, UserRow
 
 
 @pytest.fixture
@@ -580,3 +604,28 @@ def test_preview_clamps_oob_legacy_box(factory, user):
     assert res.media_type == "image/png"
     img = Image.open(io.BytesIO(res.body))
     assert max(img.size) <= 320 and min(img.size) > 0
+
+
+def test_legacy_clip_without_effects_serializes():
+    """Pre-transition rows hold NULL (ALTER-added columns on old DBs are
+    nullable while fresh schemas enforce NOT NULL): to_schema must emit
+    the schema defaults instead of 500ing the projects list."""
+    row = ClipRow(
+        id="c1",
+        scene_id="s1",
+        kind="panel",
+        source_id="p1",
+        start=0.0,
+        duration=1.5,
+        motion="none",
+        order=0,
+        transition=None,
+        transition_duration=None,
+        fade_in=None,
+        fade_out=None,
+    )
+    clip = row.to_schema()
+    assert clip.transition == "none"
+    assert clip.transition_duration == 0.5
+    assert clip.fade_in == 0.0
+    assert clip.fade_out == 0.0

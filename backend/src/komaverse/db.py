@@ -12,10 +12,22 @@ from __future__ import annotations
 
 from collections.abc import Generator
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, event
 from sqlalchemy.orm import Session, sessionmaker
 
 from komaverse.config import settings
+
+
+def _sqlite_pragmas(dbapi_conn, _record) -> None:
+    """WAL + a real busy timeout: concurrent chat turns, job polls, and
+    background workers share one dev SQLite file without 500s."""
+    cur = dbapi_conn.cursor()
+    try:
+        cur.execute("PRAGMA journal_mode=WAL;")
+        cur.execute("PRAGMA busy_timeout=10000;")
+        cur.execute("PRAGMA synchronous=NORMAL;")
+    finally:
+        cur.close()
 
 
 def get_engine():
@@ -25,7 +37,10 @@ def get_engine():
         if url.startswith("sqlite")
         else {}
     )
-    return create_engine(url, **kwargs)
+    engine = create_engine(url, **kwargs)
+    if url.startswith("sqlite"):
+        event.listen(engine, "connect", _sqlite_pragmas)
+    return engine
 
 
 def session_factory_for(engine) -> sessionmaker[Session]:
@@ -71,9 +86,24 @@ def init_db() -> None:
         "ALTER TABLE jobs ADD COLUMN enhance BOOLEAN",
         "ALTER TABLE jobs ADD COLUMN reference_frame_id VARCHAR(12)",
         "ALTER TABLE frames ADD COLUMN sequence_id VARCHAR(12)",
+        "ALTER TABLE clips ADD COLUMN transition VARCHAR(32)",
+        "ALTER TABLE clips ADD COLUMN transition_duration FLOAT",
+        "ALTER TABLE clips ADD COLUMN fade_in FLOAT",
+        "ALTER TABLE clips ADD COLUMN fade_out FLOAT",
+        "ALTER TABLE pages ADD COLUMN name VARCHAR(200)",
+        "ALTER TABLE panels ADD COLUMN name VARCHAR(200)",
     ):
         try:
             with engine.begin() as conn:
                 conn.exec_driver_sql(ddl)
         except Exception:
             pass
+    # Studio AI overrides (provider/models picked in the widget) overlay
+    # the environment so the saved brain survives restarts.
+    try:
+        from komaverse.studio_settings import apply_ai_overrides
+
+        with session_factory()() as session:
+            apply_ai_overrides(session)
+    except Exception:
+        pass

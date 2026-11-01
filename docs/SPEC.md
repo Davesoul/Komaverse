@@ -14,7 +14,7 @@ Web (PWA) first, desktop (Tauri) second, mobile out of scope for v1.
 2. **Draw:** canvas with layers + brushes → frames (strip under canvas,
    canvas-native fps playback with loop) → timeline → export.
 3. **AI generate:** text/image prompt → image or clip, billed in credits,
-   cached, attached to frame/panel.
+   cached, gallery-first (frames only on explicit `attach_frame`).
 4. **Edit:** timeline reorder, per-clip timing, audio track, export 1080p MP4.
 
 ## 3. Unified data model (fixes legacy's two disconnected systems)
@@ -42,8 +42,11 @@ Invariants:
 - Panels: `POST /scans/{id}/detect` (detector select + params), `PATCH /panels/{id}`.
 - AI: `POST /ai/generate` → job id, `GET /ai/jobs/{id}` poll, `POST /ai/webhook`.
   Generate takes seed / negative / enhance / style / camera_move /
-  entity_ids / reference_frame_id; jobs store seed + final prompt +
-  entity snapshot. Entities: `GET|POST /projects/{id}/entities`,
+  entity_ids / reference_frame_id / attach_frame (default false:
+  results live in Media, frames only when asked); jobs store seed +
+  final prompt + entity snapshot. Voice: `POST /ai/transcribe` (mic
+  audio normalized to 16kHz mono WAV, Meta transcribe model).
+  Entities: `GET|POST /projects/{id}/entities`,
   `DELETE /entities/{id}` (character | field | prop + optional frame).
 - Billing: `GET /billing/me`, `POST /billing/checkout`, `POST /billing/webhook`.
 - Media: `POST /media/upload`, `GET /media/{id}` (local file dev, presigned S3 prod).

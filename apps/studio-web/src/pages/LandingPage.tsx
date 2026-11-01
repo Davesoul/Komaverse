@@ -1,5 +1,5 @@
 import { lazy, Suspense, useEffect, useRef, useState } from "react";
-import { Btn, Chip, ImpactBurst, Kanji, PrimaryBtn, SfxBtn } from "../components/ui";
+import { Btn, Chip, ImpactBurst, ImpactFlash, Kanji, PrimaryBtn, SfxBtn } from "../components/ui";
 import { Magnet } from "../components/Magnet";
 import { prefersReducedMotion, useRevealScope } from "../components/Reveal";
 import { useKineticScope } from "../components/Kinetic";
@@ -48,18 +48,26 @@ const CAPABILITIES = [
   { title: "Export", desc: "H.264 video, ready to share anywhere.", icon: "export" },
 ];
 
-const FEATURES = [
+const FEATURES: {
+  title: string;
+  desc: string;
+  icon: string;
+  large: boolean;
+  sfx?: string;
+}[] = [
   {
     title: "From scan to timeline",
     desc: "Import a scanned manga page and get back detected panels in reading order — placed straight onto the timeline as clips, ready to animate. Nothing is flattened or lost along the way.",
     icon: "scan",
     large: true,
+    sfx: "ドン!",
   },
   {
     title: "AI fills the gaps",
     desc: "Generate new shots from a prompt and attach them as frames. Pick cloud or your local ComfyUI box.",
     icon: "spark",
     large: false,
+    sfx: "キラ!",
   },
   {
     title: "Draw where it belongs",
@@ -109,6 +117,12 @@ export default function LandingPage({
     window.matchMedia("(prefers-reduced-motion: reduce)").matches;
   const [splashDone, setSplashDone] = useState(reducedMotion);
   const [scrolled, setScrolled] = useState(false);
+  // White-hot frame on Create: the loudest action answers with impact.
+  const [flash, setFlash] = useState(0);
+  const hitCreate = () => {
+    setFlash((n) => n + 1);
+    onRegister();
+  };
   const [muted, setMuted] = useState(true);
   const splashRef = useRef<HTMLVideoElement>(null);
   const restRef = useRef<HTMLDivElement>(null);
@@ -203,6 +217,7 @@ export default function LandingPage({
   return (
     <>
       <Backdrop />
+      <ImpactFlash burstKey={flash} />
 
       <div className={`lv-splash${splashDone ? " done" : ""}`} aria-hidden={splashDone}>
         {!reducedMotion && (
@@ -269,12 +284,11 @@ export default function LandingPage({
           </h1>
           <p className="lv-sub" data-hero>
             Scan a page. Clean up the frames. Generate the ones in between.
-            Animate and export — all in one studio, in the browser or on the
-            desktop, with no GPU on your machine.
+            Animate and export — with no GPU on your machine.
           </p>
           <div className="lv-cta-row" data-hero>
             <Magnet>
-              <SfxBtn onClick={onRegister}>Create</SfxBtn>
+              <SfxBtn onClick={hitCreate}>Create</SfxBtn>
             </Magnet>
             <Btn onClick={onSignIn} style={{ fontSize: 15, padding: "10px 24px" }}>
               Sign in
@@ -380,6 +394,11 @@ export default function LandingPage({
                 data-reveal
                 data-delay={i * 80}
               >
+                {f.sfx && (
+                  <span className="lv-sfx" aria-hidden="true">
+                    {f.sfx}
+                  </span>
+                )}
                 <h3 className="lv-bento-title">
                   <span className="lv-bento-icon" aria-hidden>
                     <Icon paths={ICONS[f.icon as keyof typeof ICONS]} />
@@ -449,7 +468,7 @@ export default function LandingPage({
               >
                 {p.featured && (
                   <div className="lv-burst">
-                    <ImpactBurst text="MOST READ" size={84} />
+                    <ImpactBurst text="MOST POPULAR" size={84} tone="gold" shape="impact" />
                   </div>
                 )}
                 <p className="lv-price-tier">{p.tier}</p>
@@ -463,7 +482,7 @@ export default function LandingPage({
                 </ul>
                 <span style={{ marginTop: "auto" }}>
                   {p.featured ? (
-                    <SfxBtn small onClick={onRegister}>Create</SfxBtn>
+                    <SfxBtn small onClick={hitCreate}>Create</SfxBtn>
                   ) : (
                     <Btn small onClick={onRegister}>Create</Btn>
                   )}
@@ -485,11 +504,16 @@ export default function LandingPage({
           </p>
           <div className="lv-final-cta">
             <div style={{ transform: "rotate(-8deg)" }}>
-              <ImpactBurst text="GO!" size={104} />
+              <Magnet>
+                <ImpactBurst
+                  text="GO!"
+                  size={128}
+                  shape="impact"
+                  onClick={hitCreate}
+                  label="Create — start building"
+                />
+              </Magnet>
             </div>
-            <Magnet>
-              <SfxBtn onClick={onRegister}>Create</SfxBtn>
-            </Magnet>
           </div>
         </section>
 

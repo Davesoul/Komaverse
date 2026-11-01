@@ -4,7 +4,9 @@ Clip sources: panel crops (page image + box), frame composites (layer PNGs),
 page stills (kind=media, source_id=page id), video files (kind=video,
 source_id=finished generation job id; looped to the clip length, Ken Burns
 moves apply over the moving picture). Motion: none, zoom-in, zoom-out,
-pan-left, pan-right. Timeline audio cues are mixed in a second ffmpeg pass
+pan-left, pan-right, pan-up, pan-down. Per-clip fade in/out plus
+transitions into a clip (crossfade, fade-black, wipe-left, impact)
+overlap the boundary frames. Timeline audio cues are mixed in a second ffmpeg pass
 (adelay/volume/afade per cue, amix, AAC). Encoding via the imageio-ffmpeg
 bundled binary (libx264/yuv420p/faststart) so output plays everywhere.
 """
@@ -15,6 +17,7 @@ import base64
 import io
 import logging
 import subprocess
+import tempfile
 from pathlib import Path
 
 import cv2
@@ -124,12 +127,95 @@ def motion_frame(base: np.ndarray, w: int, h: int, t: float, motion: str) -> np.
     elif motion == "pan-right":
         ww, hh = w, h
         x, y = int((bw - ww) * t), (bh - hh) // 2
+    elif motion == "pan-up":
+        ww, hh = w, h
+        x, y = (bw - ww) // 2, int((bh - hh) * (1 - t))
+    elif motion == "pan-down":
+        ww, hh = w, h
+        x, y = (bw - ww) // 2, int((bh - hh) * t)
     else:  # none
         ww, hh = w, h
         x, y = (bw - ww) // 2, (bh - hh) // 2
     x = min(max(x, 0), bw - ww)
     y = min(max(y, 0), bh - hh)
     return cv2.resize(base[y : y + hh, x : x + ww], (w, h))
+
+
+def fade_frame(frame: np.ndarray, alpha: float) -> np.ndarray:
+    """Scale toward black by alpha (1 = untouched)."""
+    if alpha >= 1.0:
+        return frame
+    if alpha <= 0.0:
+        return np.zeros_like(frame)
+    return (frame.astype(np.float32) * alpha).astype(np.uint8)
+
+
+def fade_alpha(i: int, n: int, fps: int, fade_in: float, fade_out: float) -> float:
+    """Fade envelope for frame i of n (clip-local): 0..1..0 ramps."""
+    dur = n / fps
+    pos = i / fps
+    a = 1.0
+    if fade_in > 0:
+        a = min(a, pos / fade_in)
+    if fade_out > 0:
+        a = min(a, max(dur - pos, 0.0) / fade_out)
+    return min(max(a, 0.0), 1.0)
+
+
+def blend_frames(a: np.ndarray, b: np.ndarray, j: int, k: int, kind: str) -> np.ndarray:
+    """Transition frame j of k blending tail frame a into head frame b."""
+    t = (j + 1) / (k + 1)  # endpoints never duplicate their neighbours
+    if kind == "fade-black":
+        if t < 0.5:
+            return fade_frame(a, 1.0 - 2.0 * t)
+        return fade_frame(b, 2.0 * t - 1.0)
+    if kind == "impact":
+        # Impact frame: a hard white flash right on the cut, manga-style.
+        white = np.full_like(a, 255).astype(np.float32)
+        u = t * 2.0
+        if u < 1.0:
+            return (a.astype(np.float32) * (1.0 - u) + white * u).astype(np.uint8)
+        u -= 1.0
+        return (white * (1.0 - u) + b.astype(np.float32) * u).astype(np.uint8)
+    if kind == "wipe-left":
+        cut = int(a.shape[1] * t)
+        out = a.copy()
+        out[:, :cut] = b[:, :cut]
+        return out
+    # crossfade
+    return (a.astype(np.float32) * (1.0 - t) + b.astype(np.float32) * t).astype(np.uint8)
+
+
+def read_video_frame(vpath, vdur, t_sec: float, w: int, h: int) -> np.ndarray:
+    """One video frame by timestamp (own capture: used for the handful of
+    transition-boundary frames, which are not sequential)."""
+    frame = None
+    cap = cv2.VideoCapture(str(vpath))
+    try:
+        t = t_sec
+        if t >= (vdur or 0) > 0:
+            t %= vdur
+        for attempt in (t, 0.0):
+            cap.set(cv2.CAP_PROP_POS_MSEC, attempt * 1000)
+            ok, got = cap.read()
+            if ok and got is not None:
+                frame = got
+                break
+    finally:
+        cap.release()
+    if frame is None:
+        frame = np.full((h, w, 3), PAPER_RGB[::-1], dtype=np.uint8)
+    return frame
+
+
+def finish_frame(
+    frame: np.ndarray, motion: str, i: int, n: int, w: int, h: int,
+    fps: int, fade_in: float, fade_out: float,
+) -> np.ndarray:
+    """Cover-crop, Ken Burns motion, and fade envelope for one frame."""
+    base = cover_resize(frame, w * 2, h * 2)
+    out = motion_frame(base, w, h, i / max(n - 1, 1), motion or "none")
+    return fade_frame(out, fade_alpha(i, n, fps, fade_in or 0.0, fade_out or 0.0))
 
 
 def resolve_clip_image(clip: ClipRow, session: Session) -> np.ndarray | None:
@@ -201,6 +287,51 @@ def audio_has_stream(path: Path) -> bool:
     except (OSError, subprocess.SubprocessError):
         return False
     return "Audio:" in (proc.stderr or "")
+
+def transcode_to_wav(data: bytes, suffix: str) -> bytes:
+    """Normalize arbitrary audio bytes to 16 kHz mono 16-bit WAV.
+
+    Meta's transcription endpoint labels everything WAV and rejects
+    containers it cannot parse (notably raw MediaRecorder webm/opus),
+    so voice input and takes are transcoded before upload. Raises
+    RuntimeError with ffmpeg's stderr tail on failure.
+    """
+    exe = imageio_ffmpeg.get_ffmpeg_exe()
+    in_path = None
+    out_path = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            suffix=suffix or ".bin", delete=False
+        ) as fh:
+            fh.write(data)
+            in_path = fh.name
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as fh:
+            out_path = fh.name
+        proc = subprocess.run(
+            [exe, "-y", "-v", "error", "-i", in_path,
+             "-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le",
+             "-f", "wav", out_path],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        if proc.returncode != 0:
+            tail = (proc.stderr or "").strip().splitlines()[-1:]
+            raise RuntimeError("; ".join(tail) or "ffmpeg failed")
+        wav = Path(out_path).read_bytes()
+        if len(wav) < 44 or not wav.startswith(b"RIFF"):
+            raise RuntimeError("ffmpeg produced no WAV output")
+        return wav
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise RuntimeError(f"ffmpeg unavailable: {exc}") from exc
+    finally:
+        for path in (in_path, out_path):
+            if path:
+                try:
+                    Path(path).unlink()
+                except OSError:
+                    pass
+
 
 
 def mix_audio_tracks(
@@ -324,7 +455,18 @@ def render_project(
         (clip, src, max(int(round(clip.duration * fps)), 1))
         for clip, src in resolved
     ]
-    total_frames = sum(n for _, _, n in planned)
+    # Transition overlap: clip i lends its first k frames and the previous
+    # clip its last k; the k blended frames replace both. k leaves at least
+    # one untouched frame on each side, else the transition is skipped.
+    overlap = [0] * len(planned)
+    for idx in range(1, len(planned)):
+        clip = planned[idx][0]
+        if (clip.transition or "none") == "none":
+            continue
+        tdur = min(max(clip.transition_duration or 0.5, 0.1), 2.0)
+        k = min(int(round(tdur * fps)), planned[idx - 1][2] - 1, planned[idx][2] - 1)
+        overlap[idx] = k if k >= 1 else 0
+    total_frames = sum(n for _, _, n in planned) - sum(overlap)
     video_dur = total_frames / fps
 
     # Timeline audio, verified before the mux stage runs.
@@ -414,14 +556,59 @@ def render_project(
         )
         writer.send(None)
         done = 0
+
+        def emit(frame: np.ndarray) -> None:
+            nonlocal done
+            writer.send(frame)
+            done += 1
+            if on_progress is not None:
+                on_progress(done, total_frames)
+
+        def still_frame(clip, src, i: int, n: int) -> np.ndarray:
+            return finish_frame(
+                src, clip.motion, i, n, w, h, fps,
+                clip.fade_in or 0.0, clip.fade_out or 0.0,
+            )
+
+        def tail_frame(idx: int, j: int) -> np.ndarray:
+            """Transition contributor: tail frame j of the overlap into
+            clip idx (j < overlap[idx]), fade envelopes included."""
+            clip, src, n = planned[idx]
+            k = overlap[idx]
+            pclip, psrc, pn = planned[idx - 1]
+            if isinstance(psrc, tuple):
+                _, pvpath, pvdur = psrc
+                a_raw = read_video_frame(pvpath, pvdur, (pn - k + j) / fps, w, h)
+            else:
+                a_raw = psrc
+            a = finish_frame(
+                a_raw, pclip.motion, pn - k + j, pn, w, h, fps,
+                pclip.fade_in or 0.0, pclip.fade_out or 0.0,
+            )
+            if isinstance(src, tuple):
+                _, vpath, vdur = src
+                b_raw = read_video_frame(vpath, vdur, j / fps, w, h)
+            else:
+                b_raw = src
+            b = finish_frame(
+                b_raw, clip.motion, j, n, w, h, fps,
+                clip.fade_in or 0.0, clip.fade_out or 0.0,
+            )
+            return blend_frames(a, b, j, k, clip.transition or "crossfade")
+
         try:
-            for clip, src, n in planned:
+            for idx, (clip, src, n) in enumerate(planned):
+                k_in = overlap[idx]
+                k_out = overlap[idx + 1] if idx + 1 < len(overlap) else 0
+                if k_in:
+                    for j in range(k_in):
+                        emit(tail_frame(idx, j))
                 if isinstance(src, tuple):
                     _, vpath, vdur = src
                     cap = cv2.VideoCapture(str(vpath))
                     try:
                         last = None
-                        for i in range(n):
+                        for i in range(k_in, n - k_out):
                             t_out = i / fps
                             t_src = t_out if t_out < vdur else t_out % vdur
                             cap.set(cv2.CAP_PROP_POS_MSEC, t_src * 1000)
@@ -431,22 +618,15 @@ def render_project(
                             frame = last
                             if frame is None:
                                 frame = np.full((h, w, 3), PAPER_RGB[::-1], dtype=np.uint8)
-                            base = cover_resize(frame, w * 2, h * 2)
-                            t = i / max(n - 1, 1)
-                            writer.send(motion_frame(base, w, h, t, clip.motion))
-                            done += 1
-                            if on_progress is not None:
-                                on_progress(done, total_frames)
+                            emit(finish_frame(
+                                frame, clip.motion, i, n, w, h, fps,
+                                clip.fade_in or 0.0, clip.fade_out or 0.0,
+                            ))
                     finally:
                         cap.release()
                     continue
-                base = cover_resize(src, w * 2, h * 2)
-                for i in range(n):
-                    t = i / max(n - 1, 1)
-                    writer.send(motion_frame(base, w, h, t, clip.motion))
-                    done += 1
-                    if on_progress is not None:
-                        on_progress(done, total_frames)
+                for i in range(k_in, n - k_out):
+                    emit(still_frame(clip, src, i, n))
         finally:
             writer.close()
 

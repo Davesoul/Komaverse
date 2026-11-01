@@ -10,6 +10,8 @@ export interface TimelineClipInfo {
   video?: string;
   duration: number;
   motion: string;
+  /** Blend into this clip from the previous one ("none" hides the badge). */
+  transition: string;
 }
 
 export interface TimelineCueInfo {
@@ -414,8 +416,8 @@ export function Timeline({
                     key={clip.id}
                     role="button"
                     tabIndex={0}
-                    aria-label={`${clip.label}, ${dur.toFixed(1)} seconds, ${clip.motion}`}
-                    title={`${clip.label} (${dur.toFixed(1)}s · ${clip.motion}) — click to edit, drag edges to trim, drag body to reorder`}
+                    aria-label={`${clip.label}, ${dur.toFixed(1)} seconds, ${clip.motion}${clip.transition !== "none" ? `, blends in with ${clip.transition}` : ""}`}
+                    title={`${clip.label} (${dur.toFixed(1)}s · ${clip.motion}${clip.transition !== "none" ? ` · ${clip.transition}` : ""}) — click to edit, drag edges to trim, drag body to reorder`}
                     draggable
                     onDragStart={(e) => {
                       if (gestureRef.current) {
@@ -489,6 +491,14 @@ export function Timeline({
                       </div>
                       <div className="kv-nums" style={{ fontSize: 11, color: "var(--kv-muted)", whiteSpace: "nowrap" }}>
                         {dur.toFixed(1)}s · {clip.motion}
+                        {clip.transition !== "none" && (
+                          <>
+                            {" · "}
+                            <span className="kv-sfx kv-sfx-sm" title={`Blends in with ${clip.transition}`}>
+                              {clip.transition}
+                            </span>
+                          </>
+                        )}
                       </div>
                     </div>
                     {edgeHandle("l", handlesVisible, (e) =>

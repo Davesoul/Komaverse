@@ -183,6 +183,165 @@ export function createStage(
       object.updateMatrixWorld(true);
       return;
     }
+    if (kind === "holder") {
+      // Manga dip-pen holder: only the G pen itself — the set's second
+      // mesh is a glass vessel that is not part of the lineup. Wood is
+      // dielectric, so the authored metalness map (white across the wood,
+      // which chromed the shaft) is skipped: color + roughness carry the
+      // lacquered look. The FBX references source-tree texture names that
+      // don't exist on disk, so the maps bind unconditionally — a
+      // conditional bind would keep the loader's broken slots. Then treat
+      // the pen as one rigid piece: stand its longest axis upright and move
+      // its center onto the local origin, so the turntable spins it in
+      // place instead of orbiting it. (The caller still measures after.)
+      const parts: any[] = [];
+      object.traverse((child: any) => {
+        if (child.isMesh) parts.push(child);
+      });
+      if (parts.length === 0) return;
+      const isGlass = (mesh: any) => {
+        const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+        return mats.some((m: any) => /glass/i.test(String(m?.name ?? "")));
+      };
+      if (parts.some((mesh) => !isGlass(mesh))) {
+        parts.filter(isGlass).forEach((mesh) => mesh.parent?.remove(mesh));
+      }
+      // The pen mesh also carries the set's ink vessel (container +
+      // closure) as separate components, floating disconnected beside the
+      // shaft — material filtering can't reach them. Keep the shaft and
+      // whatever touches it (nib assembly); cut the disjoint vessel out
+      // of the geometry.
+      const cutVessel = (mesh: any) => {
+        const g = mesh.geometry;
+        const p = g?.attributes?.position;
+        if (!p) return;
+        const idx = g.index;
+        const triCount = idx ? idx.count / 3 : p.count / 3;
+        const findRoot = (parent: Map<number, number>, x: number) => {
+          let r = x;
+          while (parent.get(r) !== r) r = parent.get(r) ?? x;
+          return r;
+        };
+        const keyOf = (vi: number) =>
+          `${p.getX(vi).toFixed(2)},${p.getY(vi).toFixed(2)},${p.getZ(vi).toFixed(2)}`;
+        const idOf = new Map<string, number>();
+        const parent = new Map<number, number>();
+        let next = 0;
+        const compOfTri: number[] = [];
+        for (let t = 0; t < triCount; t++) {
+          const vs: number[] = [];
+          for (let k = 0; k < 3; k++) {
+            const vi = idx ? idx.getX(t * 3 + k) : t * 3 + k;
+            const key = keyOf(vi);
+            if (!idOf.has(key)) {
+              idOf.set(key, next);
+              parent.set(next, next);
+              next++;
+            }
+            vs.push(idOf.get(key)!);
+          }
+          const r = findRoot(parent, vs[0]);
+          for (const v of vs.slice(1)) parent.set(findRoot(parent, v), r);
+          compOfTri.push(r);
+        }
+        for (let i = 0; i < compOfTri.length; i++) compOfTri[i] = findRoot(parent, compOfTri[i]);
+        const boxes = new Map<number, any>();
+        const v = new THREE.Vector3();
+        compOfTri.forEach((r, t) => {
+          if (!boxes.has(r)) boxes.set(r, new THREE.Box3());
+          const bb = boxes.get(r);
+          for (let k = 0; k < 3; k++) {
+            const vi = idx ? idx.getX(t * 3 + k) : t * 3 + k;
+            bb.expandByPoint(v.set(p.getX(vi), p.getY(vi), p.getZ(vi)));
+          }
+        });
+        if (boxes.size < 2) return;
+        let shaft = -1;
+        let shaftLen = -1;
+        boxes.forEach((bb, r) => {
+          const len = bb.getSize(new THREE.Vector3()).length();
+          if (len > shaftLen) {
+            shaftLen = len;
+            shaft = r;
+          }
+        });
+        const shaftBox = boxes.get(shaft).clone();
+        shaftBox.expandByScalar(Math.max(shaftLen * 0.01, 0.001));
+        const keep = new Set<number>();
+        boxes.forEach((bb, r) => {
+          if (r === shaft || shaftBox.intersectsBox(bb)) keep.add(r);
+        });
+        if (keep.size === boxes.size) return;
+        const keptTris: number[] = [];
+        compOfTri.forEach((r, t) => {
+          if (keep.has(r)) keptTris.push(t);
+        });
+        if (keptTris.length === 0) return;
+        const src = g.index ? g.toNonIndexed() : g;
+        const take = (name: string) => {
+          const attr = src.attributes[name];
+          if (!attr) return null;
+          const itemSize = attr.itemSize;
+          const out = new Float32Array(keptTris.length * 3 * itemSize);
+          keptTris.forEach((t, i) => {
+            for (let k = 0; k < 3; k++) {
+              const s = (t * 3 + k) * itemSize;
+              for (let j = 0; j < itemSize; j++) out[(i * 3 + k) * itemSize + j] = attr.array[s + j];
+            }
+          });
+          return new THREE.BufferAttribute(out, itemSize);
+        };
+        const rebuilt = new THREE.BufferGeometry();
+        const positions = take("position");
+        if (!positions) return;
+        rebuilt.setAttribute("position", positions);
+        const normals = take("normal");
+        if (normals) rebuilt.setAttribute("normal", normals);
+        const uvs = take("uv");
+        if (uvs) rebuilt.setAttribute("uv", uvs);
+        if (src !== g) src.dispose();
+        g.dispose();
+        mesh.geometry = rebuilt;
+      };
+      parts.forEach((mesh) => {
+        // Geometry surgery must never take the section down: on any
+        // surprise, keep the mesh whole.
+        if (!mesh.parent) return;
+        try {
+          cutVessel(mesh);
+        } catch {
+          /* keep uncut */
+        }
+      });
+      const pen = parts.filter((mesh) => mesh.parent);
+      const [map, roughnessMap] = await Promise.all([
+        loadTex("/models/holder_color.png", true),
+        loadTex("/models/holder_roughness.png", false),
+      ]);
+      for (const mesh of pen.length > 0 ? pen : parts) {
+        const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+        const next = mats.map((m: any) => {
+          if (map) m.map = map;
+          if (roughnessMap) m.roughnessMap = roughnessMap;
+          return toStandard(m);
+        });
+        mesh.material = Array.isArray(mesh.material) ? next : next[0];
+      }
+      object.updateMatrixWorld(true);
+      const box = new THREE.Box3().setFromObject(object);
+      const size = box.getSize(new THREE.Vector3());
+      const longest = Math.max(size.x, size.y, size.z);
+      if (size.x >= longest * 0.9 && size.x > size.y * 1.2) {
+        object.rotation.z -= Math.PI / 2;
+      } else if (size.z >= longest * 0.9 && size.z > size.y * 1.2) {
+        object.rotation.x += Math.PI / 2;
+      }
+      object.updateMatrixWorld(true);
+      const center = new THREE.Box3().setFromObject(object).getCenter(new THREE.Vector3());
+      object.position.sub(center);
+      object.updateMatrixWorld(true);
+      return;
+    }
     // "wacom": the FBX ships untextured plus a PBR set per part, matched
     // by the FBX material names (PenTop, PenUpperBody, …).
     for (const mesh of meshes) {

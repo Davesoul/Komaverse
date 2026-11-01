@@ -75,6 +75,7 @@ class PanelPatch(BaseModel):
     w: float | None = None
     h: float | None = None
     reading_order: int | None = None
+    name: str | None = None
 
 
 def _get_page(session: Session, user: UserRow, page_id: str) -> PageRow:
@@ -338,7 +339,10 @@ def detect_panels(
             )
         )
     session.commit()
-    record_usage(session, user.id, "detect", used)
+    # Vision-token estimate (standard 512px-tile convention): local YOLO
+    # burns no API tokens, but the dashboard scales on this column.
+    tiles = math.ceil((page.width or 0) / 512) * math.ceil((page.height or 0) / 512)
+    record_usage(session, user.id, "detect", used, 85 + 170 * max(tiles, 1))
     return DetectResponse(panels=panels, detector_used=used, fell_back=fell_back)
 
 
@@ -392,6 +396,29 @@ def patch_panel(
         if body.reading_order < 0:
             raise HTTPException(400, "reading_order must be >= 0")
         row.reading_order = body.reading_order
+    if body.name is not None:
+        row.name = body.name
+    session.commit()
+    return row.to_schema()
+
+
+
+
+class PagePatch(BaseModel):
+    name: str | None = None
+
+
+@router.patch("/pages/{page_id}", response_model=Page)
+def patch_page(
+    page_id: str,
+    body: PagePatch,
+    session: Session = Depends(get_session),
+    user: UserRow = Depends(get_current_user),
+):
+    """Rename a scan page (media card)."""
+    row = _get_page(session, user, page_id)
+    if body.name is not None:
+        row.name = body.name
     session.commit()
     return row.to_schema()
 

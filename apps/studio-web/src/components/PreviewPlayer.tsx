@@ -79,6 +79,10 @@ function motionStyle(motion: string, p: number, reduceMotion: boolean): React.CS
       return { transform: `scale(1.15) translateX(${4 - 8 * p}%)` };
     case "pan-right":
       return { transform: `scale(1.15) translateX(${-4 + 8 * p}%)` };
+    case "pan-up":
+      return { transform: `scale(1.15) translateY(${4 - 8 * p}%)` };
+    case "pan-down":
+      return { transform: `scale(1.15) translateY(${-4 + 8 * p}%)` };
     default:
       return {};
   }

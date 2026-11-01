@@ -154,6 +154,7 @@ class PageRow(Base):
     image_url: Mapped[str] = mapped_column(String(500))
     width: Mapped[int] = mapped_column(default=0)
     height: Mapped[int] = mapped_column(default=0)
+    name: Mapped[str] = mapped_column(String(200), default="")
 
     project: Mapped[ProjectRow] = relationship(back_populates="pages")
     panels: Mapped[list[PanelRow]] = relationship(
@@ -171,6 +172,7 @@ class PageRow(Base):
             image_url=self.image_url,
             width=self.width,
             height=self.height,
+            name=self.name or "",
             panels=[p.to_schema() for p in self.panels],
         )
 
@@ -185,6 +187,7 @@ class PanelRow(Base):
     w: Mapped[float] = mapped_column(default=0)
     h: Mapped[float] = mapped_column(default=0)
     reading_order: Mapped[int] = mapped_column(default=0)
+    name: Mapped[str] = mapped_column(String(200), default="")
 
     page: Mapped[PageRow] = relationship(back_populates="panels")
 
@@ -197,6 +200,7 @@ class PanelRow(Base):
             w=self.w,
             h=self.h,
             reading_order=self.reading_order,
+            name=self.name or "",
             crop_url=f"/api/v1/panels/{self.id}/preview",
         )
 
@@ -250,6 +254,10 @@ class ClipRow(Base):
     start: Mapped[float] = mapped_column(default=0)
     duration: Mapped[float] = mapped_column(default=2.0)
     motion: Mapped[str] = mapped_column(String(32), default="none")
+    transition: Mapped[str] = mapped_column(String(32), default="none")
+    transition_duration: Mapped[float] = mapped_column(default=0.5)
+    fade_in: Mapped[float] = mapped_column(default=0.0)
+    fade_out: Mapped[float] = mapped_column(default=0.0)
     order: Mapped[int] = mapped_column(default=0)
 
     scene: Mapped[SceneRow] = relationship(back_populates="clips")
@@ -263,6 +271,14 @@ class ClipRow(Base):
             start=self.start,
             duration=self.duration,
             motion=self.motion,
+            # Pre-transition rows hold NULL (ALTER backfill): serialize
+            # them as the schema defaults instead of 500ing the list.
+            transition=self.transition or "none",
+            transition_duration=self.transition_duration
+            if self.transition_duration is not None
+            else 0.5,
+            fade_in=self.fade_in if self.fade_in is not None else 0.0,
+            fade_out=self.fade_out if self.fade_out is not None else 0.0,
             order=self.order,
         )
 
@@ -321,8 +337,9 @@ class AudioCueRow(Base):
             end_sec=self.end_sec,
             lane=self.lane or 0,
             volume=self.volume,
-            fade_in=self.fade_in,
-            fade_out=self.fade_out,
+            # Pre-fade rows hold NULL (ALTER backfill): same guard as clips.
+            fade_in=self.fade_in if self.fade_in is not None else 0.0,
+            fade_out=self.fade_out if self.fade_out is not None else 0.0,
         )
 
 
@@ -424,7 +441,7 @@ class JobRow(Base):
     width: Mapped[int] = mapped_column(default=1024)
     height: Mapped[int] = mapped_column(default=1024)
     seconds: Mapped[float] = mapped_column(default=2.0)
-    attach_frame: Mapped[bool] = mapped_column(default=True)
+    attach_frame: Mapped[bool] = mapped_column(default=False)
     seed: Mapped[int | None] = mapped_column(default=None)
     negative_prompt: Mapped[str] = mapped_column(Text, default="")
     style: Mapped[str] = mapped_column(String(32), default="none")
@@ -450,7 +467,8 @@ class JobRow(Base):
             negative_prompt=self.negative_prompt or "",
             style=self.style or "none",
             camera_move=self.camera_move or "none",
-            enhance=self.enhance,
+            # Pre-enhance rows hold NULL (ALTER backfill): same guard as clips.
+            enhance=self.enhance if self.enhance is not None else False,
             reference_frame_id=self.reference_frame_id,
             final_prompt=self.final_prompt or "",
             entities_json=self.entities_json or "[]",
@@ -561,3 +579,37 @@ class UsageEventRow(Base):
     tokens: Mapped[int] = mapped_column(default=0)
     cost: Mapped[float] = mapped_column(default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, index=True)
+
+
+class ChatTurnRow(Base):
+    """One agent-chat turn (user or agent) in a project scope.
+
+    The agent's memory: chat() stores both sides of every turn and feeds
+    the recent thread back into the brains, so follow-ups have context
+    across reloads and devices. New table (create_all covers old DBs).
+    Pruned to the newest 100 turns per user+project on write.
+    """
+
+    __tablename__ = "chat_turns"
+
+    id: Mapped[str] = mapped_column(String(12), primary_key=True, default=uuid_short)
+    user_id: Mapped[str] = mapped_column(String(64), index=True, default="local")
+    project_id: Mapped[str | None] = mapped_column(String(12), index=True, default=None)
+    role: Mapped[str] = mapped_column(String(8), default="user")
+    text: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, index=True)
+
+
+class StudioSettingRow(Base):
+    """Studio-wide key/value overrides (AI brain provider + models).
+
+    Values overlay the process environment at startup and whenever the
+    widget saves them, so switching brains needs no restart. Deleting a
+    row falls back to the env default. New table (create_all covers
+    old DBs). Never store secrets here — keys stay in the environment.
+    """
+
+    __tablename__ = "studio_settings"
+
+    key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    value: Mapped[str] = mapped_column(Text, default="")

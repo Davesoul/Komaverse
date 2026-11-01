@@ -205,6 +205,11 @@ def test_transcribe_endpoint_returns_turns(factory, user, monkeypatch):
     assert res.transcript == "hello world"
     assert len(res.turns) == 2
     assert res.turns[0].start_sec == 0.0
+    from komaverse.db_models import UsageEventRow
+
+    with factory() as s:
+        rows = s.query(UsageEventRow).filter_by(kind="transcribe").all()
+    assert rows and rows[-1].tokens == len("hello world") // 4
 
 
 # ------------------------------------------------------------------- sam ---
@@ -298,7 +303,7 @@ def test_meta_image_job_records_provider_tokens(factory, user, monkeypatch):
     with factory() as s:
         grant(GrantRequest(amount=100), s, user)
     with factory() as s:
-        reply = agent_mod.tool_generate(s, user, project.id, "a fox", factory)
+        reply = agent_mod.tool_generate(s, user, project.id, "a fox", factory, attach_frame=True)
     assert "generated and attached" in reply.lower()
     with factory() as s:
         rows = s.execute(

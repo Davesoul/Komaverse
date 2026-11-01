@@ -40,6 +40,7 @@ const TOOLS: { id: ToolId; label: string; key: string }[] = [
   { id: "eyedropper", label: "Pick", key: "I" },
   { id: "text", label: "Text", key: "T" },
   { id: "pan", label: "Pan", key: "H" },
+  { id: "select", label: "Select", key: "V" },
 ];
 
 const INKS = ["#111111", "#3a3a3a", "#6b6b6b", "#a3a098", "#f4efe4", "#c1121f", "#4a6fa5", "#6fa373"];
@@ -70,6 +71,7 @@ interface LiveSettings {
   dabAngle: number;
   grain: number;
   toneDensity: number; // 0..100 UI; screentone dot coverage
+  selectMode: "all" | "ink";
 }
 
 const PEN = BRUSH_PRESETS[0];
@@ -96,10 +98,12 @@ const DEFAULT_LIVE: LiveSettings = {
   dabAngle: 45,
   grain: 0,
   toneDensity: 20,
+  selectMode: "ink",
 };
 
 function applyLive(engine: DrawEngine, s: LiveSettings) {
-  engine.tool = s.tool;
+  engine.setTool(s.tool);
+  engine.selectMode = s.selectMode;
   engine.color = s.color;
   engine.brush = {
     size: s.size,
@@ -360,6 +364,16 @@ export default function DrawPage() {
       saveStateRef.current.queued = true;
       return null;
     }
+    // Explicit saves bake arranged content; autosaves wait until the float
+    // lands so a timer never commits a drag in progress.
+    if (!silent) engine.commitFloat();
+    else if (engine.hasFloat()) {
+      if (saveTimerRef.current) window.clearTimeout(saveTimerRef.current);
+      saveTimerRef.current = window.setTimeout(() => {
+        if (saveStateRef.current.dirty && !document.hidden) void save(true);
+      }, AUTOSAVE_MS);
+      return null;
+    }
     saveStateRef.current.saving = true;
     setBusy(true);
     try {
@@ -439,6 +453,44 @@ export default function DrawPage() {
       .catch((e) => setNotice(`API offline: ${(e as Error).message}`));
   }, []);
 
+  const loadDrawing = async () => {
+    if (!projectId) return;
+    try {
+      const [seqs, fs] = await Promise.all([
+        api.listSequences(projectId),
+        api.listFrames(projectId),
+      ]);
+      setSequences(seqs);
+      // Restore the last-open sequence when it still exists.
+      const storedSeq = getCurrentSequence(projectId);
+      const sid =
+        (storedSeq && seqs.some((s) => s.id === storedSeq) ? storedSeq : seqs[0]?.id) ?? "";
+      sequenceIdRef.current = sid;
+      setSequenceIdState(sid);
+      if (sid) setCurrentSequence(projectId, sid);
+      setFrames(fs);
+      setFramesReady(true);
+      // Open the tab with a frame ready: restore the last-open frame when
+      // it still exists in this sequence, otherwise open the first frame.
+      if (!frameIdRef.current) {
+        const first = seqs[0]?.id;
+        const inSeq = fs.filter(
+          (f) => f.sequence_id === sid || (f.sequence_id == null && sid === first),
+        );
+        const stored = getDrawFrame(projectId);
+        const pick =
+          stored && inSeq.some((f) => f.id === stored) ? stored : inSeq[0]?.id;
+        if (pick) {
+          setDrawFrame(projectId, pick);
+          setFrameId(pick);
+        }
+      }
+    } catch (e) {
+      setNotice((e as Error).message);
+      setFramesReady(true);
+    }
+  };
+
   useEffect(() => {
     // Publish only real selections: publishing "" on mount would wipe the
     // persisted id before the restore above resolves. Clearing publishes
@@ -446,42 +498,24 @@ export default function DrawPage() {
     if (!projectId) return;
     setCurrentProject(projectId);
     setFramesReady(false);
-    void (async () => {
-      try {
-        const [seqs, fs] = await Promise.all([
-          api.listSequences(projectId),
-          api.listFrames(projectId),
-        ]);
-        setSequences(seqs);
-        // Restore the last-open sequence when it still exists.
-        const storedSeq = getCurrentSequence(projectId);
-        const sid =
-          (storedSeq && seqs.some((s) => s.id === storedSeq) ? storedSeq : seqs[0]?.id) ?? "";
-        sequenceIdRef.current = sid;
-        setSequenceIdState(sid);
-        if (sid) setCurrentSequence(projectId, sid);
-        setFrames(fs);
-        setFramesReady(true);
-        // Open the tab with a frame ready: restore the last-open frame when
-        // it still exists in this sequence, otherwise open the first frame.
-        if (!frameIdRef.current) {
-          const first = seqs[0]?.id;
-          const inSeq = fs.filter(
-            (f) => f.sequence_id === sid || (f.sequence_id == null && sid === first),
-          );
-          const stored = getDrawFrame(projectId);
-          const pick =
-            stored && inSeq.some((f) => f.id === stored) ? stored : inSeq[0]?.id;
-          if (pick) {
-            setDrawFrame(projectId, pick);
-            setFrameId(pick);
-          }
-        }
-      } catch (e) {
-        setNotice((e as Error).message);
-        setFramesReady(true);
-      }
-    })();
+    void loadDrawing();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [projectId]);
+
+  // Agent edits land live: reload the list, and reopen the canvas from the
+  // server when the open frame has no unsaved local work (a stash always
+  // wins over remote pixels).
+  useEffect(() => {
+    if (!projectId) return;
+    const onAgent = (e: Event) => {
+      const pid = (e as CustomEvent).detail?.projectId as string | null | undefined;
+      if (pid && pid !== projectId) return;
+      const fid = frameIdRef.current;
+      if (fid && !stashRef.current.has(fid)) openedRef.current = "";
+      void loadDrawing();
+    };
+    window.addEventListener("komaverse:agent-timeline-changed", onAgent);
+    return () => window.removeEventListener("komaverse:agent-timeline-changed", onAgent);
   }, [projectId]);
 
   // Engine init per frame; prefers the unsaved stash over server layers.
@@ -571,6 +605,21 @@ export default function DrawPage() {
         return;
       }
       if (typing) return;
+      if (e.key === "Escape" && engineRef.current) {
+        const done = engineRef.current.selectEscape();
+        if (done) {
+          e.preventDefault();
+          setNotice(
+            done === "canceled"
+              ? "Transform canceled."
+              : done === "applied"
+                ? "Selection applied."
+                : "Selection cleared.",
+          );
+          return;
+        }
+      }
+      const eng = engineRef.current;
       const k = e.key.toLowerCase();
       if ((e.ctrlKey || e.metaKey) && k === "z") {
         e.preventDefault();
@@ -582,6 +631,35 @@ export default function DrawPage() {
       } else if ((e.ctrlKey || e.metaKey) && k === "s") {
         e.preventDefault();
         void save(false);
+      } else if ((e.ctrlKey || e.metaKey) && (k === "c" || k === "x")) {
+        // Copy / cut the pixel selection (never the DOM).
+        e.preventDefault();
+        const ok = k === "c" ? eng?.copySelection() : eng?.cutSelection();
+        if (!ok) setNotice("Nothing selected — drag with Select (V) first.");
+      } else if ((e.ctrlKey || e.metaKey) && k === "v") {
+        e.preventDefault();
+        if (eng && !eng.pasteClipboard()) {
+          void eng.pasteSystemClipboard().then((pasted) => {
+            if (!pasted) setNotice("Nothing to paste — copy first (Ctrl+C), or unlock the layer.");
+          });
+        }
+      } else if (k === "delete" || k === "backspace") {
+        e.preventDefault();
+        if (!eng?.deleteSelection()) setNotice("Nothing selected — drag with Select (V) first.");
+      } else if (k === "enter") {
+        e.preventDefault();
+        if (eng?.commitFloat()) {
+          setNotice("Selection applied.");
+          refreshLayers();
+        }
+      } else if (k.startsWith("arrow")) {
+        const step = e.shiftKey ? 10 : 1;
+        const dx = k === "arrowleft" ? -step : k === "arrowright" ? step : 0;
+        const dy = k === "arrowup" ? -step : k === "arrowdown" ? step : 0;
+        if (dx || dy) {
+          e.preventDefault();
+          eng?.nudgeSelection(dx, dy);
+        }
       } else if (!e.ctrlKey && !e.metaKey && !e.altKey) {
         const t = TOOLS.find((t) => t.key.toLowerCase() === k);
         if (t) {
@@ -622,6 +700,8 @@ export default function DrawPage() {
       setNotice("Add a layer first.");
     } else if (res.reason === "unchanged") {
       setNotice("Fill changed nothing — same color or raise tolerance.");
+    } else if (res.reason === "no-ink") {
+      setNotice("No ink strokes there — marquee the strokes, or switch Select to All.");
     }
   };
 
@@ -826,6 +906,22 @@ export default function DrawPage() {
     setFrames((prev) => [...prev, frame]);
     setDrawFrame(projectId, frame.id);
     setFrameId(frame.id);
+  };
+
+  const [renamingFrame, setRenamingFrame] = useState<string | null>(null);
+  const [renameFrameValue, setRenameFrameValue] = useState("");
+  const commitFrameRename = async () => {
+    if (!renamingFrame) return;
+    const id = renamingFrame;
+    const name = renameFrameValue.trim();
+    setRenamingFrame(null);
+    if (!name) return;
+    try {
+      const updated = await api.updateFrame(id, { name: name.slice(0, 200) });
+      setFrames((prev) => prev.map((f) => (f.id === id ? { ...f, name: updated.name } : f)));
+    } catch (e) {
+      setNotice(`Rename failed: ${(e as Error).message}`);
+    }
   };
 
   const removeFrame = async () => {
@@ -1641,6 +1737,31 @@ export default function DrawPage() {
                   </Btn>
                 ))}
               </div>
+              {live.tool === "select" && (
+                <div
+                  className="kv-floatbar"
+                  role="toolbar"
+                  aria-label="Selection content"
+                  style={{ marginTop: 6 }}
+                >
+                  <Btn
+                    small
+                    active={live.selectMode === "all"}
+                    onClick={() => updateLive({ selectMode: "all" })}
+                    title="Move the whole marquee rectangle, background included"
+                  >
+                    All
+                  </Btn>
+                  <Btn
+                    small
+                    active={live.selectMode === "ink"}
+                    onClick={() => updateLive({ selectMode: "ink" })}
+                    title="Move only dark ink strokes; the background stays intact"
+                  >
+                    Ink
+                  </Btn>
+                </div>
+              )}
               <div
                 ref={viewportRef}
                 style={{
@@ -1931,16 +2052,39 @@ export default function DrawPage() {
                       >
                         FR {String(i + 1).padStart(2, "0")}
                       </div>
-                      <div
-                        style={{
-                          fontSize: 12,
-                          overflow: "hidden",
-                          textOverflow: "ellipsis",
-                          whiteSpace: "nowrap",
-                        }}
-                      >
-                        {f.name || "Untitled"}
-                      </div>
+                      {renamingFrame === f.id ? (
+                        <TextInput
+                          autoFocus
+                          value={renameFrameValue}
+                          onChange={(e) => setRenameFrameValue(e.target.value)}
+                          onBlur={() => void commitFrameRename()}
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter") void commitFrameRename();
+                            if (e.key === "Escape") setRenamingFrame(null);
+                          }}
+                          onClick={(e) => e.stopPropagation()}
+                          onDoubleClick={(e) => e.stopPropagation()}
+                          aria-label="Frame name"
+                          style={{ fontSize: 12, width: "100%" }}
+                        />
+                      ) : (
+                        <div
+                          style={{
+                            fontSize: 12,
+                            overflow: "hidden",
+                            textOverflow: "ellipsis",
+                            whiteSpace: "nowrap",
+                          }}
+                          title={`${f.name || "Untitled"} — double-click to rename`}
+                          onDoubleClick={(e) => {
+                            e.stopPropagation();
+                            setRenamingFrame(f.id);
+                            setRenameFrameValue(f.name || `Frame ${i + 1}`);
+                          }}
+                        >
+                          {f.name || "Untitled"}
+                        </div>
+                      )}
                     </button>
                   );
                 })}

@@ -22,6 +22,7 @@ import httpx
 from PIL import Image
 
 from komaverse.config import settings
+from komaverse.studio_settings import provider_for
 
 
 class ProviderError(Exception):
@@ -561,7 +562,7 @@ def get_chat_config(*, vision: bool = False) -> tuple[str, str, str]:
     "openrouter", or legacy "cloud" (AI_* settings). Raises ProviderError
     naming the missing key when unconfigured.
     """
-    name = settings.ai_provider
+    name = provider_for("vision" if vision else "chat")
     if name == "meta":
         model = settings.meta_vision_model or settings.meta_chat_model
         if not vision:
@@ -950,23 +951,58 @@ OPENROUTER_IMAGE_MODELS = (
         "id": "black-forest-labs/flux-3-image-klein",
         "label": "Flux 3 Klein",
         "badge": "cheap",
+        "maker": "Black Forest Labs",
     },
     {
         "id": "qwen/qwen-image-2.1-turbo",
         "label": "Qwen Image 2.1 Turbo",
         "badge": "cheap",
+        "maker": "Qwen",
     },
     {
         "id": "google/gemini-nano-banana-2.1",
         "label": "Nano Banana 2.1",
         "badge": "popular",
+        "maker": "Google",
     },
-    {"id": "meta/muse-image", "label": "Meta Muse Image", "badge": "popular"},
+    {"id": "meta/muse-image", "label": "Meta Muse Image", "badge": "popular", "maker": "Meta"},
 )
 OPENROUTER_VIDEO_MODELS = (
-    {"id": "bytedance/seedance-2.0", "label": "Seedance 2.0", "badge": "popular"},
-    {"id": "google/veo-3.1", "label": "Veo 3.1", "badge": "popular"},
-    {"id": "alibaba/wan-2.6", "label": "Wan 2.6", "badge": "cheap"},
+    {"id": "bytedance/seedance-2.0", "label": "Seedance 2.0", "badge": "popular", "maker": "ByteDance"},
+    {"id": "google/veo-3.1", "label": "Veo 3.1", "badge": "popular", "maker": "Google"},
+    {"id": "alibaba/wan-2.6", "label": "Wan 2.6", "badge": "cheap", "maker": "Alibaba"},
+)
+
+# Verified chat/vision options per provider: ids confirmed against the live
+# OpenRouter catalog (existence, tool support, input modalities, pricing)
+# or already used in code/env. Never guess new ones — free text still
+# accepts anything and unknown ids fail loudly at the provider.
+# `maker` names who built the model; `via` is resolved per row in the UI
+# from the selected provider (direct vs aggregator).
+META_CHAT_MODELS = (
+    {"id": "muse-spark-1.3", "label": "Muse Spark 1.3", "badge": "spark", "maker": "Meta"},
+    {
+        "id": "muse-spark-1.3-contributor",
+        "label": "Muse Spark 1.3 Contributor",
+        "badge": "spark",
+        "maker": "Meta",
+    },
+)
+OPENROUTER_CHAT_MODELS = (
+    {"id": "openai/gpt-4o-mini", "label": "GPT-4o-mini", "badge": "cheap", "maker": "OpenAI"},
+    {"id": "google/gemini-2.5-flash", "label": "Gemini 2.5 Flash", "badge": "popular", "maker": "Google"},
+    {"id": "google/gemini-2.5-flash-lite", "label": "Gemini 2.5 Flash-Lite", "badge": "cheap", "maker": "Google"},
+    {"id": "anthropic/claude-haiku-4.5", "label": "Claude Haiku 4.5", "badge": "popular", "maker": "Anthropic"},
+    {"id": "meta-llama/llama-4-maverick", "label": "Llama 4 Maverick", "badge": "cheap", "maker": "Meta"},
+    {"id": "deepseek/deepseek-chat-v3.1", "label": "DeepSeek V3.1", "badge": "cheap", "maker": "DeepSeek"},
+)
+OPENROUTER_VISION_MODELS = (
+    {"id": "google/gemini-2.5-flash", "label": "Gemini 2.5 Flash", "badge": "popular", "maker": "Google"},
+    {"id": "google/gemini-2.5-flash-lite", "label": "Gemini 2.5 Flash-Lite", "badge": "cheap", "maker": "Google"},
+    {"id": "anthropic/claude-haiku-4.5", "label": "Claude Haiku 4.5", "badge": "popular", "maker": "Anthropic"},
+)
+META_IMAGE_MODELS = (
+    {"id": "muse-image-1.0", "label": "Muse Image 1.0", "badge": "spark", "maker": "Meta"},
 )
 
 
@@ -979,6 +1015,17 @@ def list_openrouter_models() -> dict:
             "image": settings.openrouter_image_model,
             "video": settings.openrouter_video_model,
         },
+        "chat": {
+            "meta": [dict(m) for m in META_CHAT_MODELS],
+            "openrouter": [dict(m) for m in OPENROUTER_CHAT_MODELS],
+        },
+        "vision": {
+            # Meta vision falls back to the chat model when unset, so the
+            # Spark pair is the honest vision list too.
+            "meta": [dict(m) for m in META_CHAT_MODELS],
+            "openrouter": [dict(m) for m in OPENROUTER_VISION_MODELS],
+        },
+        "meta_image": [dict(m) for m in META_IMAGE_MODELS],
     }
 
 
@@ -1225,3 +1272,103 @@ class OpenRouterProvider:
             prompt=CloudProvider._detect_prompt,
             extra_headers=_openrouter_headers(),
         )
+
+
+def chat_complete_stream(
+    *,
+    base_url: str,
+    api_key: str,
+    model: str,
+    messages: list[dict],
+    tools: list[dict] | None = None,
+    extra_headers: dict[str, str] | None = None,
+):
+    """Stream one chat-completions call as (kind, payload) events.
+
+    Yields ("token", text) deltas as they arrive, then a final
+    ("message", (message dict, usage dict)) shaped exactly like
+    chat_complete_with_usage returns. Works against any OpenAI-compatible
+    endpoint (generic cloud, Meta Model API, OpenRouter).
+
+    Answered HTTP errors raise ProviderError like the non-streaming call;
+    transport errors propagate as httpx.HTTPError so the agent can fall
+    back to its demo brain.
+    """
+    headers = {"Authorization": f"Bearer {api_key}", "Accept": "text/event-stream"}
+    if extra_headers:
+        headers.update(extra_headers)
+    body: dict = {
+        "model": model,
+        "messages": messages,
+        "temperature": 0.2,
+        "stream": True,
+        "stream_options": {"include_usage": True},
+    }
+    if tools:
+        body["tools"] = tools
+        body["tool_choice"] = "auto"
+    timeout = httpx.Timeout(10.0, read=300.0, write=60.0, pool=60.0)
+    with httpx.stream(
+        "POST",
+        f"{base_url.rstrip('/')}/chat/completions",
+        json=body,
+        headers=headers,
+        timeout=timeout,
+    ) as res:
+        if res.status_code == 401:
+            raise ProviderError("chat rejected the API key (401) — check the key")
+        if res.status_code == 429:
+            raise ProviderError("chat rate limit exceeded (429) — retry later")
+        if res.status_code >= 400:
+            raise ProviderError(f"chat failed ({res.status_code})")
+        content = ""
+        tool_calls: dict[int, dict] = {}
+        usage = {"input": 0, "output": 0, "total": 0}
+        for line in res.iter_lines():
+            if not line or not line.startswith("data:"):
+                continue
+            data = line[5:].strip()
+            if data == "[DONE]":
+                break
+            try:
+                chunk = json.loads(data)
+            except ValueError:
+                continue
+            if not isinstance(chunk, dict):
+                continue
+            for choice in chunk.get("choices") or []:
+                delta = choice.get("delta") or {}
+                piece = delta.get("content")
+                if isinstance(piece, list):
+                    piece = "".join(
+                        p.get("text", "") for p in piece if isinstance(p, dict)
+                    )
+                if piece:
+                    content += piece
+                    yield ("token", piece)
+                for tc in delta.get("tool_calls") or []:
+                    slot = tool_calls.setdefault(
+                        int(tc.get("index", 0)),
+                        {"id": "", "function": {"name": "", "arguments": ""}},
+                    )
+                    if tc.get("id"):
+                        slot["id"] = tc["id"]
+                    fn = tc.get("function") or {}
+                    if fn.get("name"):
+                        slot["function"]["name"] += fn["name"]
+                    if fn.get("arguments"):
+                        slot["function"]["arguments"] += fn["arguments"]
+            if isinstance(chunk.get("usage"), dict):
+                usage = _normalize_usage(chunk["usage"])
+        calls = [
+            {
+                "id": slot["id"] or f"stream-call-{idx}",
+                "type": "function",
+                "function": slot["function"],
+            }
+            for idx, slot in sorted(tool_calls.items())
+        ]
+        message = {"role": "assistant", "content": content or None}
+        if calls:
+            message["tool_calls"] = calls
+        yield ("message", (message, usage))

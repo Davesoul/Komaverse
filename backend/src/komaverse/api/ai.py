@@ -8,9 +8,17 @@ import io
 import json
 import logging
 import random
+import tempfile
 from pathlib import Path
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
+from fastapi import (
+    APIRouter,
+    BackgroundTasks,
+    Depends,
+    File,
+    HTTPException,
+    UploadFile,
+)
 from PIL import Image
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
@@ -21,6 +29,7 @@ from komaverse.ai.direction import (
     build_final_prompt,
 )
 from komaverse.ai.providers import (
+    MetaProvider,
     ProviderError,
     chat_complete,
     check_openrouter_model,
@@ -41,11 +50,16 @@ from komaverse.db_models import (
     LedgerRow,
     PageRow,
     PanelRow,
+    SequenceRow,
     UserRow,
 )
 from komaverse.models import CreditEntry, Entity, Job
 from komaverse.observability import metrics
-from komaverse.renderer import composite_frame_image
+from komaverse.renderer import (
+    audio_has_stream,
+    composite_frame_image,
+    transcode_to_wav,
+)
 
 router = APIRouter(prefix="/api/v1")
 billing_router = APIRouter(prefix="/api/v1")
@@ -64,7 +78,7 @@ class GenerateRequest(BaseModel):
     width: int = 1024
     height: int = 1024
     seconds: float = 2.0
-    attach_frame: bool = True
+    attach_frame: bool = False  # gallery-first: frames only on explicit request
     seed: int | None = None  # None = random per job (stored on the job)
     negative_prompt: str = ""
     enhance: bool = False  # LLM rewrite before sending (fail-soft)
@@ -84,6 +98,30 @@ class EntityCreate(BaseModel):
 _REF_PX = 768  # reference snapshots are guidance, not artwork
 _MAX_REFS = 3
 _MAX_SEED = 2**31 - 1
+_AI_SEQUENCE_NAME = "AI generations"
+
+
+def _ai_sequence(session: Session, project_id: str) -> SequenceRow:
+    """Dedicated sequence for generated frames, so they never land in the
+    user's hand-drawn sequences (orphans get adopted into Sequence 1)."""
+    seqs = (
+        session.execute(
+            select(SequenceRow)
+            .where(SequenceRow.project_id == project_id)
+            .order_by(SequenceRow.index)
+        )
+        .scalars()
+        .all()
+    )
+    for seq in seqs:
+        if seq.name == _AI_SEQUENCE_NAME:
+            return seq
+    seq = SequenceRow(
+        project_id=project_id, name=_AI_SEQUENCE_NAME, index=len(seqs)
+    )
+    session.add(seq)
+    session.flush()
+    return seq
 
 
 def _frame_png(session: Session, project_id: str, frame_id: str) -> bytes | None:
@@ -231,6 +269,11 @@ def run_ai_job(job_id: str, factory=None) -> None:
         job = session.get(JobRow, job_id)
         if job is None:
             return
+        # Expire only the cancel flag: a full refresh would discard the
+        # seed/final prompt staged on this session below.
+        session.expire(job, ["status"])
+        if job.status == "cancelled":
+            return
         job.status = "running"
         job.progress = 0.1
         session.commit()
@@ -308,6 +351,9 @@ def run_ai_job(job_id: str, factory=None) -> None:
             else:
                 raise ProviderError(f"unknown job kind: {job.kind}")
         except ProviderError as exc:
+            session.expire(job, ["status"])
+            if job.status == "cancelled":
+                return
             job.status = "failed"
             job.error = str(exc)
             # Refund only what generate() debited: with the paywall off no
@@ -327,6 +373,9 @@ def run_ai_job(job_id: str, factory=None) -> None:
             )
             return
         except Exception as exc:  # noqa: BLE001 — job must never hang
+            session.expire(job, ["status"])
+            if job.status == "cancelled":
+                return
             job.status = "failed"
             job.error = f"unexpected: {exc}"
             if settings.paywall_enabled:
@@ -344,6 +393,11 @@ def run_ai_job(job_id: str, factory=None) -> None:
             )
             return
 
+        # A cancel that landed mid-provider-call discards the result: the
+        # job stays cancelled and nothing attaches to the library or frames.
+        session.expire(job, ["status"])
+        if job.status == "cancelled":
+            return
         # The PNG below is the immutable job artifact (result_url); the
         # base64 layer is the editable copy. Two lifecycles, not waste:
         # deleting the frame must not break the job gallery and vice versa.
@@ -353,8 +407,18 @@ def run_ai_job(job_id: str, factory=None) -> None:
         dest.write_bytes(data)
         job.result_url = f"/media/{rel.as_posix()}"
         if job.attach_frame and job.project_id and suffix == "png":
+            seq = _ai_sequence(session, job.project_id)
+            top = session.execute(
+                select(FrameRow.index)
+                .where(FrameRow.sequence_id == seq.id)
+                .order_by(FrameRow.index.desc())
+                .limit(1)
+            ).scalars().first()
             frame = FrameRow(
-                project_id=job.project_id, name=f"AI: {job.prompt[:40]}"
+                project_id=job.project_id,
+                sequence_id=seq.id,
+                index=(top + 1) if top is not None else 0,
+                name=f"AI: {job.prompt[:40]}",
             )
             session.add(frame)
             session.flush()
@@ -497,6 +561,29 @@ def get_job(
     return row.to_schema()
 
 
+@router.post("/ai/jobs/{job_id}/cancel", response_model=Job)
+def cancel_job(
+    job_id: str,
+    session: Session = Depends(get_session),
+    user: UserRow = Depends(get_current_user),
+):
+    """Cancel an image/video/export job.
+
+    Queued jobs never run (the worker checks on pickup). A job that is
+    already executing can't be preempted, but its result is discarded on
+    completion and pollers treat "cancelled" as terminal. Terminal jobs
+    answer 409 so callers can tell "already landed" apart from "stopped".
+    """
+    row = session.get(JobRow, job_id)
+    if row is None or row.user_id != user.id:
+        raise HTTPException(404, "job not found")
+    if row.status not in ("queued", "running"):
+        raise HTTPException(409, f"job already {row.status}")
+    row.status = "cancelled"
+    session.commit()
+    return row.to_schema()
+
+
 @router.get("/ai/models")
 def ai_models(user: UserRow = Depends(get_current_user)):
     """Curated OpenRouter model catalog + server defaults for the picker."""
@@ -598,3 +685,69 @@ def grant(
     add_entry(session, user.id, body.amount, body.reason or "grant")
     session.commit()
     return my_balance(session, user)
+
+
+class VoiceTranscript(BaseModel):
+    text: str
+    duration_sec: float = 0.0
+
+
+VOICE_EXTS = {
+    ".webm", ".wav", ".mp3", ".m4a", ".ogg", ".oga", ".opus",
+    ".mp4", ".aac", ".flac",
+}
+
+
+@router.post("/ai/transcribe", response_model=VoiceTranscript)
+def transcribe_voice(
+    file: UploadFile = File(...),
+    session: Session = Depends(get_session),
+    user: UserRow = Depends(get_current_user),
+):
+    """Speech-to-text for composer voice input via Meta's transcription model.
+
+    Takes raw recorded audio (no project needed, nothing is stored):
+    checks it decodes, forwards the bytes to Muse Voice Transcribe, and
+    returns the transcript text. Needs META_API_KEY; without it the call
+    fails naming the missing key.
+    """
+    if not (file.content_type or "").startswith("audio/"):
+        raise HTTPException(400, "file must be audio")
+    ext = Path(file.filename or "").suffix.lower()
+    if ext not in VOICE_EXTS:
+        raise HTTPException(400, f"unsupported audio type: {ext or '(none)'}")
+    try:
+        data = storage.read_upload_capped(
+            file.file, min(settings.upload_max_mb, 32) * 1024 * 1024
+        )
+    except storage.UploadTooLargeError:
+        raise HTTPException(413, "file too large") from None
+    if not data:
+        raise HTTPException(400, "empty file")
+    tmp = tempfile.NamedTemporaryFile(suffix=ext, delete=False)
+    try:
+        tmp.write(data)
+        tmp.close()
+        if not audio_has_stream(Path(tmp.name)):
+            raise HTTPException(400, "cannot decode audio")
+    finally:
+        try:
+            Path(tmp.name).unlink()
+        except OSError:
+            pass
+    try:
+        wav = transcode_to_wav(data, ext)
+    except RuntimeError as exc:
+        raise HTTPException(400, f"cannot prepare audio: {exc}") from None
+    try:
+        res = MetaProvider().transcribe_audio(wav, "voice.wav")
+    except ProviderError as exc:
+        raise HTTPException(400, f"transcription failed: {exc}") from None
+    record_usage(
+        session, user.id, "transcribe",
+        settings.meta_transcribe_model, len(res.get("transcript") or "") // 4,
+    )
+    return VoiceTranscript(
+        text=res.get("transcript") or "",
+        duration_sec=(res.get("audioDurationMs") or 0) / 1000,
+    )

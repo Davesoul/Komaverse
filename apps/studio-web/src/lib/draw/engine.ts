@@ -7,6 +7,19 @@
  */
 import { paintStroke, type BrushSettings, type StrokeInput } from "./brushes";
 import { floodFill } from "./fill";
+import {
+  frameCorners,
+  hitTestFrame,
+  rotateHandlePos,
+  transformedBox,
+  type FrameHit,
+  type SelectFrame,
+} from "./transform";
+import {
+  INK_LUMA_THRESHOLD,
+  clearInk,
+  extractInk,
+} from "./ink";
 
 export type ToolId =
   | "brush"
@@ -18,7 +31,17 @@ export type ToolId =
   | "fill"
   | "eyedropper"
   | "text"
-  | "pan";
+  | "pan"
+  | "select";
+
+/** Rectangular pixel selection in logical frame coords. */
+export interface PixelSelection {
+  layerId: string;
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
 
 export const PAPER = "#f6f1e8";
 
@@ -76,7 +99,7 @@ export type DownStatus = "stroke" | "shape" | "done" | "pan" | "ignored";
 export interface DownResult {
   status: DownStatus;
   picked?: string;
-  reason?: "no-layer" | "locked" | "transparent" | "unchanged";
+  reason?: "no-layer" | "locked" | "transparent" | "unchanged" | "no-ink";
 }
 
 const UNDO_BUDGET = 128 * 1024 * 1024; // bytes of ImageData across the stack
@@ -100,6 +123,41 @@ export class DrawEngine {
   } | null = null;
   private snapshot: { layerId: string; data: ImageData } | null = null;
   private drawing = false;
+  /** Committed marquee selection (marching ants) or null. */
+  selection: PixelSelection | null = null;
+  private marquee: { x0: number; y0: number; x1: number; y1: number } | null = null;
+  /** In-flight transform: cut pixels following the cursor until drop
+   * (move/scale/rotate) or Esc (restored untransformed). */
+  private float: {
+    canvas: HTMLCanvasElement;
+    srcId: string;
+    w: number;
+    h: number;
+    cx: number;
+    cy: number;
+    sx: number;
+    sy: number;
+    rot: number;
+    ox: number;
+    oy: number;
+    undoMark: number;
+  } | null = null;
+  /** Active select gesture driving the float (null outside drags). */
+  private gesture:
+    | { kind: "move"; grabDX: number; grabDY: number }
+    | {
+        kind: "scale";
+        corner: number;
+        ax: number;
+        ay: number;
+        d0: number;
+        sx0: number;
+        sy0: number;
+      }
+    | { kind: "rotate"; a0: number; rot0: number }
+    | null = null;
+  /** Internal image clipboard (logical-size canvas + size). */
+  private clipboard: { canvas: HTMLCanvasElement; w: number; h: number } | null = null;
 
   activeId: string | null = null;
   // Onion skin: neighbor-frame bitmaps drawn under the live layers while
@@ -110,6 +168,9 @@ export class DrawEngine {
   private onionEnabled = false;
   private onionScratch: HTMLCanvasElement | null = null;
   tool: ToolId = "brush";
+  /** Select behavior: "all" lifts the whole marquee rect, "ink" lifts only
+   * dark ink pixels so a same-layer background stays intact. */
+  selectMode: "all" | "ink" = "ink";
   color = "#111111";
   brush: BrushSettings = {
     size: 8,
@@ -184,6 +245,8 @@ export class DrawEngine {
 
   removeLayer(id: string) {
     if (!this.layers.has(id)) return;
+    this.settleFloat();
+    if (this.selection?.layerId === id) this.selection = null;
     this.layers.delete(id);
     this.order = this.order.filter((x) => x !== id);
     if (this.activeId === id) this.activeId = this.order[this.order.length - 1] ?? null;
@@ -274,6 +337,8 @@ export class DrawEngine {
   mergeDown(id: string): boolean {
     const i = this.order.indexOf(id);
     if (i <= 0) return false;
+    this.settleFloat();
+    if (this.selection?.layerId === id) this.selection = null;
     const src = this.layers.get(id)!;
     const dstId = this.order[i - 1];
     const dst = this.layers.get(dstId)!;
@@ -392,6 +457,73 @@ export class DrawEngine {
         ? { status: "done", picked }
         : { status: "done", reason: "transparent" };
     }
+    if (this.tool === "select") {
+      if (this.drawing) return { status: "stroke" };
+      const p = this.toLogical(e);
+      const layer = this.activeLayer();
+      if (!layer) return { status: "ignored", reason: "no-layer" };
+      // Handles first, then inside (move): the content is lifted exactly
+      // once per selection, so re-grabs reuse the float as-is and never
+      // re-read the canvas. Anywhere else starts a fresh marquee.
+      const frame = this.selectFrame();
+      if (frame) {
+        const hit = this.hitTestFrame(frame, p);
+        if (hit !== null) {
+          if (!this.float) {
+            const lifted = this.liftFromSelection();
+            if (lifted === "locked") {
+              return { status: "ignored", reason: "locked" };
+            }
+            if (lifted === "empty") {
+              return { status: "ignored", reason: "no-ink" };
+            }
+            if (lifted !== "ok") {
+              this.composite();
+            }
+          }
+          const fl = this.float;
+          if (fl) {
+            this.capture(e);
+            this.drawing = true;
+            if (hit === "move") {
+              this.gesture = {
+                kind: "move",
+                grabDX: p.x - fl.cx,
+                grabDY: p.y - fl.cy,
+              };
+            } else if (hit === "rotate") {
+              this.gesture = {
+                kind: "rotate",
+                a0: Math.atan2(p.y - fl.cy, p.x - fl.cx),
+                rot0: fl.rot,
+              };
+            } else {
+              const corners = frameCorners(this.selectFrame()!);
+              const opp = corners[(hit + 2) % 4];
+              this.gesture = {
+                kind: "scale",
+                corner: hit,
+                ax: opp.x,
+                ay: opp.y,
+                d0: Math.hypot(p.x - fl.cx, p.y - fl.cy),
+                sx0: fl.sx,
+                sy0: fl.sy,
+              };
+            }
+            this.composite();
+            return { status: "stroke" };
+          }
+        }
+      }
+      // Fresh marquee: bake any idle float first so content is never lost.
+      this.settleFloat();
+      this.capture(e);
+      this.drawing = true;
+      this.gesture = null;
+      this.marquee = { x0: p.x, y0: p.y, x1: p.x, y1: p.y };
+      this.composite();
+      return { status: "stroke" };
+    }
     const layer = this.activeLayer();
     if (!layer) return { status: "ignored", reason: "no-layer" };
     if (layer.locked) return { status: "ignored", reason: "locked" };
@@ -447,7 +579,53 @@ export class DrawEngine {
   }
 
   pointerMove(e: PointerEvent) {
+    if (this.tool === "select" && !this.drawing) {
+      this.updateSelectCursor(e);
+      return;
+    }
     if (!this.drawing) return;
+    if (this.tool === "select") {
+      const p = this.toLogical(e);
+      const g = this.gesture;
+      const fl = this.float;
+      if (g && fl) {
+        if (g.kind === "move") {
+          fl.cx = p.x - g.grabDX;
+          fl.cy = p.y - g.grabDY;
+        } else if (g.kind === "rotate") {
+          const a = Math.atan2(p.y - fl.cy, p.x - fl.cx);
+          let r = g.rot0 + (a - g.a0);
+          if (e.shiftKey) r = Math.round(r / (Math.PI / 12)) * (Math.PI / 12);
+          fl.rot = r;
+        } else if (Math.abs(fl.rot) < 0.001) {
+          // Unrotated: free scale anchored at the opposite corner.
+          const east = g.corner === 1 || g.corner === 2;
+          const south = g.corner >= 2;
+          const qx = east ? Math.max(p.x, g.ax + 2) : Math.min(p.x, g.ax - 2);
+          const qy = south ? Math.max(p.y, g.ay + 2) : Math.min(p.y, g.ay - 2);
+          fl.sx = Math.abs(qx - g.ax) / fl.w;
+          fl.sy = Math.abs(qy - g.ay) / fl.h;
+          fl.cx = (g.ax + qx) / 2;
+          fl.cy = (g.ay + qy) / 2;
+        } else {
+          // Rotated: uniform scale about the center.
+          const d = Math.hypot(p.x - fl.cx, p.y - fl.cy);
+          const k = g.d0 > 1 ? d / g.d0 : 1;
+          const minK = 2 / Math.max(2, Math.max(fl.w * g.sx0, fl.h * g.sy0));
+          const kk = Math.max(k, minK);
+          fl.sx = g.sx0 * kk;
+          fl.sy = g.sy0 * kk;
+        }
+        this.composite();
+        return;
+      }
+      if (this.marquee) {
+        this.marquee = { ...this.marquee, x1: p.x, y1: p.y };
+        this.composite();
+        return;
+      }
+      return;
+    }
     const layer = this.activeLayer();
     if (!layer) return;
     if (this.preview && this.shapeStart) {
@@ -472,6 +650,40 @@ export class DrawEngine {
   pointerUp(e?: PointerEvent) {
     if (e) this.release(e);
     if (!this.drawing) return;
+    if (this.tool === "select") {
+      if (this.marquee) {
+        const m = this.marquee;
+        this.marquee = null;
+        const w = Math.abs(m.x1 - m.x0);
+        const h = Math.abs(m.y1 - m.y0);
+        let next: PixelSelection | null = null;
+        if (w >= 3 && h >= 3 && this.activeId) {
+          const box = this.clampRect(
+            Math.min(m.x0, m.x1),
+            Math.min(m.y0, m.y1),
+            w,
+            h,
+          );
+          if (box.w >= 1 && box.h >= 1) {
+            next = { layerId: this.activeId, ...box };
+          }
+        }
+        this.selection = next;
+        this.drawing = false;
+        this.composite();
+        return;
+      }
+      // Release only: the float stays live so the next grab reuses the
+      // once-lifted content instead of re-reading the canvas.
+      if (this.gesture || this.float) {
+        this.gesture = null;
+        this.drawing = false;
+        this.composite();
+        return;
+      }
+      this.drawing = false;
+      return;
+    }
     const layer = this.activeLayer();
     if (this.preview && this.shapeStart && layer && this.snapshot) {
       this.drawShape(this.lctx(layer), this.preview);
@@ -497,6 +709,9 @@ export class DrawEngine {
         this.composite();
       }
     }
+    // Aborted transform: put the lifted pixels back where they came from.
+    this.cancelFloat();
+    this.marquee = null;
     this.resetStroke();
   }
 
@@ -507,6 +722,553 @@ export class DrawEngine {
     this.shapeStart = null;
     this.preview = null;
     this.snapshot = null;
+  }
+
+  // ---- selection -----------------------------------------------------
+
+  hasSelection(): boolean {
+    return this.selection !== null;
+  }
+
+  clearSelection() {
+    // Baking first keeps arranged content where the user left it.
+    this.settleFloat();
+    if (!this.selection && !this.marquee) return;
+    this.selection = null;
+    this.marquee = null;
+    this.composite();
+  }
+
+  private clampRect(x: number, y: number, w: number, h: number) {
+    const nx = Math.min(Math.max(x, 0), this.width);
+    const ny = Math.min(Math.max(y, 0), this.height);
+    return {
+      x: nx,
+      y: ny,
+      w: Math.max(0, Math.min(w, this.width - nx)),
+      h: Math.max(0, Math.min(h, this.height - ny)),
+    };
+  }
+
+  private regionImage(
+    layer: Layer,
+    r: { x: number; y: number; w: number; h: number },
+  ): HTMLCanvasElement | null {
+    const d = this.dpr;
+    const sx = Math.round(r.x * d);
+    const sy = Math.round(r.y * d);
+    const sw = Math.round(r.w * d);
+    const sh = Math.round(r.h * d);
+    if (sw < 1 || sh < 1) return null;
+    const c = document.createElement("canvas");
+    c.width = sw;
+    c.height = sh;
+    c.getContext("2d")!.drawImage(layer.canvas, sx, sy, sw, sh, 0, 0, sw, sh);
+    return c;
+  }
+
+  private clearRegion(
+    layer: Layer,
+    r: { x: number; y: number; w: number; h: number },
+  ) {
+    const d = this.dpr;
+    const c = layer.canvas.getContext("2d")!;
+    c.save();
+    c.setTransform(1, 0, 0, 1, 0, 0);
+    c.globalCompositeOperation = "destination-out";
+    c.fillRect(Math.round(r.x * d), Math.round(r.y * d), Math.round(r.w * d), Math.round(r.h * d));
+    c.restore();
+  }
+
+  /** Current transform frame: the in-flight float, else the committed box. */
+  private selectFrame(): SelectFrame | null {
+    const fl = this.float;
+    if (fl) {
+      return {
+        cx: fl.cx,
+        cy: fl.cy,
+        hw: (fl.w * fl.sx) / 2,
+        hh: (fl.h * fl.sy) / 2,
+        rot: fl.rot,
+      };
+    }
+    const s = this.selection;
+    if (!s) return null;
+    return { cx: s.x + s.w / 2, cy: s.y + s.h / 2, hw: s.w / 2, hh: s.h / 2, rot: 0 };
+  }
+
+  private hitTestFrame(f: SelectFrame, p: { x: number; y: number }): FrameHit {
+    return hitTestFrame(f, p);
+  }
+
+  private updateSelectCursor(e: PointerEvent) {
+    const el = this.display;
+    if (this.tool !== "select") {
+      if (el.style.cursor) el.style.cursor = "";
+      return;
+    }
+    const p = this.toLogical(e);
+    const frame = this.selectFrame();
+    let cur = "crosshair";
+    if (frame) {
+      const hit = this.hitTestFrame(frame, p);
+      cur =
+        hit === "rotate"
+          ? "grab"
+          : hit === "move"
+            ? "move"
+            : typeof hit === "number"
+              ? hit % 2 === 0
+                ? "nwse-resize"
+                : "nesw-resize"
+              : "crosshair";
+    }
+    if (el.style.cursor !== cur) el.style.cursor = cur;
+  }
+
+  /** Raw device-pixel readback of a rect (null when degenerate). */
+  private regionData(
+    layer: Layer,
+    r: { x: number; y: number; w: number; h: number },
+  ): ImageData | null {
+    const d = this.dpr;
+    const sw = Math.round(r.w * d);
+    const sh = Math.round(r.h * d);
+    if (sw < 1 || sh < 1) return null;
+    const c = layer.canvas.getContext("2d")!;
+    c.save();
+    c.setTransform(1, 0, 0, 1, 0, 0);
+    const out = c.getImageData(Math.round(r.x * d), Math.round(r.y * d), sw, sh);
+    c.restore();
+    return out;
+  }
+
+  private static pixelsToCanvas(
+    data: Uint8ClampedArray,
+    w: number,
+    h: number,
+  ): HTMLCanvasElement {
+    const c = document.createElement("canvas");
+    c.width = Math.max(1, w);
+    c.height = Math.max(1, h);
+    const ctx = c.getContext("2d")!;
+    const img = ctx.createImageData(w, h);
+    img.data.set(data.subarray(0, img.data.length));
+    ctx.putImageData(img, 0, 0);
+    return c;
+  }
+
+  /** Ink-only image of a rect (null when unreadable). Never mutates. */
+  private inkImage(
+    layer: Layer,
+    sel: PixelSelection,
+  ): { canvas: HTMLCanvasElement; count: number } | null {
+    const data = this.regionData(layer, sel);
+    if (!data) return null;
+    const { data: out, count } = extractInk(
+      { data: data.data, width: data.width, height: data.height },
+      INK_LUMA_THRESHOLD,
+    );
+    return {
+      canvas: DrawEngine.pixelsToCanvas(out, data.width, data.height),
+      count,
+    };
+  }
+
+  /** Erase the ink pixels of a rect. Returns the ink pixel count. */
+  private eraseInk(layer: Layer, sel: PixelSelection): number {
+    const data = this.regionData(layer, sel);
+    if (!data) return 0;
+    const count = clearInk(
+      { data: data.data, width: data.width, height: data.height },
+      INK_LUMA_THRESHOLD,
+    );
+    if (count > 0) {
+      const c = layer.canvas.getContext("2d")!;
+      c.save();
+      c.setTransform(1, 0, 0, 1, 0, 0);
+      c.putImageData(
+        data,
+        Math.round(sel.x * this.dpr),
+        Math.round(sel.y * this.dpr),
+      );
+      c.restore();
+    }
+    return count;
+  }
+
+  private startFloat(
+    sel: PixelSelection,
+    img: HTMLCanvasElement,
+  ) {
+    this.float = {
+      canvas: img,
+      srcId: sel.layerId,
+      w: sel.w,
+      h: sel.h,
+      cx: sel.x + sel.w / 2,
+      cy: sel.y + sel.h / 2,
+      sx: 1,
+      sy: 1,
+      rot: 0,
+      ox: sel.x,
+      oy: sel.y,
+      undoMark: this.undoStack.length,
+    };
+  }
+
+  /** Cut the committed selection into an in-flight float (move/scale/rotate
+   * follows). In ink mode only dark pixels travel; the background stays.
+   * Returns "ok", "locked", "empty" (ink mode, no ink), or null. */
+  private liftFromSelection(): "ok" | "locked" | "empty" | null {
+    const sel = this.selection;
+    if (!sel) return null;
+    const src = this.layers.get(sel.layerId);
+    if (!src) {
+      this.selection = null;
+      return null;
+    }
+    if (src.locked) return "locked";
+    if (this.selectMode === "ink") {
+      const ink = this.inkImage(src, sel);
+      if (!ink) return null;
+      if (ink.count === 0) return "empty";
+      this.pushUndo(sel.layerId, this.grab(src));
+      this.eraseInk(src, sel);
+      this.startFloat(sel, ink.canvas);
+      this.bump();
+      return "ok";
+    }
+    const img = this.regionImage(src, sel);
+    if (!img) return null;
+    this.pushUndo(sel.layerId, this.grab(src));
+    this.clearRegion(src, sel);
+    this.startFloat(sel, img);
+    this.bump();
+    return "ok";
+  }
+
+  /** Content is floating (lifted, not yet baked). */
+  hasFloat(): boolean {
+    return this.float !== null;
+  }
+
+  /** Bake the floating content into the active layer (Enter, tool switch,
+   * save, export). Keeps the selection box. */
+  commitFloat(): boolean {
+    if (!this.float) return false;
+    this.dropFloat();
+    return true;
+  }
+
+  /** Paint the float onto a layer ctx honoring its transform. */
+  private stampFloat(
+    c: CanvasRenderingContext2D,
+    fl: NonNullable<DrawEngine["float"]>,
+  ) {
+    const d = this.dpr;
+    c.save();
+    c.setTransform(d, 0, 0, d, 0, 0);
+    c.globalCompositeOperation = "source-over";
+    c.translate(fl.cx, fl.cy);
+    c.rotate(fl.rot);
+    c.scale(fl.sx, fl.sy);
+    c.imageSmoothingEnabled = true;
+    c.imageSmoothingQuality = "high";
+    // Dest rect is logical units (the ctx carries the dpr transform);
+    // fl.canvas holds w*dpr device pixels, so this lands 1:1.
+    c.drawImage(fl.canvas, -fl.w / 2, -fl.h / 2, fl.w, fl.h);
+    c.restore();
+  }
+
+  /** Commit the float (drop): stamp it, reselect its bounds. */
+  private dropFloat() {
+    const fl = this.float;
+    const sel = this.selection;
+    if (!fl || !sel) {
+      this.float = null;
+      this.gesture = null;
+      return;
+    }
+    const target = this.activeLayer() ?? this.layers.get(fl.srcId);
+    const targetId = this.activeId ?? fl.srcId;
+    if (!target || !targetId || target.locked) {
+      // Locked or vanished target: put the pixels back where they came from.
+      const src = this.layers.get(fl.srcId);
+      if (src) {
+        const c = src.canvas.getContext("2d")!;
+        c.save();
+        c.setTransform(1, 0, 0, 1, 0, 0);
+        c.globalCompositeOperation = "source-over";
+        c.drawImage(
+          fl.canvas,
+          Math.round(fl.ox * this.dpr),
+          Math.round(fl.oy * this.dpr),
+        );
+        c.restore();
+      }
+    } else {
+      if (targetId !== fl.srcId) this.pushUndo(targetId, this.grab(target));
+      this.stampFloat(target.canvas.getContext("2d")!, fl);
+      const box = transformedBox({
+        cx: fl.cx,
+        cy: fl.cy,
+        hw: (fl.w * fl.sx) / 2,
+        hh: (fl.h * fl.sy) / 2,
+        rot: fl.rot,
+      });
+      this.selection = { layerId: targetId, ...this.clampRect(box.x, box.y, box.w, box.h) };
+    }
+    this.float = null;
+    this.gesture = null;
+    this.composite();
+    this.bump();
+  }
+
+  /** Cancel the float (Esc, pointer cancel): restore the source pixels and
+   * rewind the lift's undo entry so cancel leaves no trace. */
+  private cancelFloat() {
+    const fl = this.float;
+    if (!fl) return;
+    const src = this.layers.get(fl.srcId);
+    if (src) {
+      const c = src.canvas.getContext("2d")!;
+      c.save();
+      c.setTransform(1, 0, 0, 1, 0, 0);
+      c.globalCompositeOperation = "source-over";
+      c.drawImage(
+        fl.canvas,
+        Math.round(fl.ox * this.dpr),
+        Math.round(fl.oy * this.dpr),
+      );
+      c.restore();
+    }
+    while (this.undoStack.length > fl.undoMark) {
+      const u = this.undoStack.pop()!;
+      this.undoBytes = Math.max(0, this.undoBytes - u.data.data.byteLength);
+    }
+    this.float = null;
+    this.gesture = null;
+    this.composite();
+  }
+
+  /** Commit any in-flight transform before an operation that reads pixels. */
+  private settleFloat() {
+    if (this.float) this.dropFloat();
+  }
+
+  /** Esc behavior: cancel a live drag, bake an idle float and put the
+   * tool away, else clear the selection. */
+  selectEscape(): "canceled" | "applied" | "cleared" | null {
+    if (this.float) {
+      if (this.drawing) {
+        this.cancelFloat();
+        this.marquee = null;
+        this.drawing = false;
+        return "canceled";
+      }
+      this.dropFloat();
+      this.selection = null;
+      this.marquee = null;
+      this.composite();
+      return "applied";
+    }
+    if (this.selection || this.marquee) {
+      this.selection = null;
+      this.marquee = null;
+      this.composite();
+      return "cleared";
+    }
+    return null;
+  }
+
+  /** Switch tools, committing any in-flight transform first so no lifted
+   * pixels are ever stranded. */
+  setTool(t: ToolId) {
+    if (this.tool !== t) this.settleFloat();
+    this.tool = t;
+    if (this.display.style.cursor) this.display.style.cursor = "";
+  }
+
+  /** Erase the selected pixels, keeping the ants. Undoable. */
+  deleteSelection(): boolean {
+    this.settleFloat();
+    const sel = this.selection;
+    if (!sel) return false;
+    const layer = this.layers.get(sel.layerId);
+    if (!layer || layer.locked) return false;
+    this.pushUndo(sel.layerId, this.grab(layer));
+    if (this.selectMode === "ink") {
+      if (this.eraseInk(layer, sel) === 0) return true;
+    } else {
+      this.clearRegion(layer, sel);
+    }
+    this.composite();
+    this.bump();
+    return true;
+  }
+
+  /** Shift the selected pixels by whole logical pixels. Undoable. */
+  nudgeSelection(dx: number, dy: number): boolean {
+    // A live float shifts in place without baking.
+    const fl = this.float;
+    if (fl) {
+      if (!dx && !dy) return false;
+      fl.cx += dx;
+      fl.cy += dy;
+      this.composite();
+      this.bump();
+      return true;
+    }
+    const sel = this.selection;
+    if (!sel || (!dx && !dy)) return false;
+    const layer = this.layers.get(sel.layerId);
+    if (!layer || layer.locked) return false;
+    let img: HTMLCanvasElement | null;
+    if (this.selectMode === "ink") {
+      const ink = this.inkImage(layer, sel);
+      if (!ink || ink.count === 0) return false;
+      img = ink.canvas;
+    } else {
+      img = this.regionImage(layer, sel);
+      if (!img) return false;
+    }
+    this.pushUndo(sel.layerId, this.grab(layer));
+    if (this.selectMode === "ink") this.eraseInk(layer, sel);
+    else this.clearRegion(layer, sel);
+    const nx = sel.x + dx;
+    const ny = sel.y + dy;
+    const c = layer.canvas.getContext("2d")!;
+    c.save();
+    c.setTransform(1, 0, 0, 1, 0, 0);
+    c.globalCompositeOperation = "source-over";
+    c.drawImage(img, Math.round(nx * this.dpr), Math.round(ny * this.dpr));
+    c.restore();
+    this.selection = { layerId: sel.layerId, ...this.clampRect(nx, ny, sel.w, sel.h) };
+    this.composite();
+    this.bump();
+    return true;
+  }
+
+  /** Copy the selected pixels to the internal clipboard (plus the system
+   * clipboard on a best-effort basis). */
+  private offerSystemClipboard(img: HTMLCanvasElement) {
+    try {
+      img.toBlob((blob) => {
+        if (!blob || !navigator.clipboard?.write) return;
+        navigator.clipboard
+          .write([new ClipboardItem({ "image/png": blob })])
+          .catch(() => {});
+      });
+    } catch {
+      // Internal clipboard is enough.
+    }
+  }
+
+  copySelection(): boolean {
+    // A live float copies itself without baking (no mutation, no commit).
+    const fl = this.float;
+    if (fl) {
+      this.clipboard = { canvas: fl.canvas, w: fl.w, h: fl.h };
+      this.offerSystemClipboard(fl.canvas);
+      return true;
+    }
+    const sel = this.selection;
+    if (!sel) return false;
+    const layer = this.layers.get(sel.layerId);
+    if (!layer) return false;
+    let img: HTMLCanvasElement | null;
+    if (this.selectMode === "ink") {
+      const ink = this.inkImage(layer, sel);
+      if (!ink || ink.count === 0) return false;
+      img = ink.canvas;
+    } else {
+      img = this.regionImage(layer, sel);
+      if (!img) return false;
+    }
+    this.clipboard = { canvas: img, w: sel.w, h: sel.h };
+    this.offerSystemClipboard(img);
+    return true;
+  }
+
+  /** Cut the selected pixels to the internal clipboard. Undoable. */
+  cutSelection(): boolean {
+    // Cutting a live float takes it off the canvas into the clipboard.
+    const fl = this.float;
+    if (fl) {
+      this.clipboard = { canvas: fl.canvas, w: fl.w, h: fl.h };
+      this.offerSystemClipboard(fl.canvas);
+      this.float = null;
+      this.gesture = null;
+      this.drawing = false;
+      this.selection = null;
+      this.marquee = null;
+      this.composite();
+      this.bump();
+      return true;
+    }
+    if (!this.copySelection()) return false;
+    const sel = this.selection!;
+    const layer = this.layers.get(sel.layerId);
+    if (!layer || layer.locked) return false;
+    this.pushUndo(sel.layerId, this.grab(layer));
+    if (this.selectMode === "ink") this.eraseInk(layer, sel);
+    else this.clearRegion(layer, sel);
+    this.composite();
+    this.bump();
+    return true;
+  }
+
+  /** Stamp the internal clipboard at the canvas center. Undoable. */
+  pasteClipboard(): boolean {
+    this.settleFloat();
+    const clip = this.clipboard;
+    const target = this.activeLayer();
+    const targetId = this.activeId;
+    if (!clip || !target || !targetId || target.locked) return false;
+    const nx = (this.width - clip.w) / 2;
+    const ny = (this.height - clip.h) / 2;
+    this.pushUndo(targetId, this.grab(target));
+    const c = target.canvas.getContext("2d")!;
+    c.save();
+    c.setTransform(1, 0, 0, 1, 0, 0);
+    c.globalCompositeOperation = "source-over";
+    c.drawImage(clip.canvas, Math.round(nx * this.dpr), Math.round(ny * this.dpr));
+    c.restore();
+    this.selection = { layerId: targetId, ...this.clampRect(nx, ny, clip.w, clip.h) };
+    this.composite();
+    this.bump();
+    return true;
+  }
+
+  /** Stamp an image from the system clipboard when the internal one is
+   * empty (permissions may refuse: then false, no noise). */
+  async pasteSystemClipboard(): Promise<boolean> {
+    try {
+      if (!navigator.clipboard?.read) return false;
+      const items = await navigator.clipboard.read();
+      for (const item of items) {
+        const type = item.types.find((t) => t.startsWith("image/"));
+        if (!type) continue;
+        const target = this.activeLayer();
+        if (!target || target.locked) return false;
+        const blob = await item.getType(type);
+        const bmp = await createImageBitmap(blob);
+        const scale = Math.min(1, this.width / bmp.width, this.height / bmp.height);
+        const w = Math.max(1, bmp.width * scale);
+        const h = Math.max(1, bmp.height * scale);
+        const c = document.createElement("canvas");
+        c.width = Math.max(1, Math.round(w * this.dpr));
+        c.height = Math.max(1, Math.round(h * this.dpr));
+        c.getContext("2d")!.drawImage(bmp, 0, 0, c.width, c.height);
+        bmp.close();
+        this.clipboard = { canvas: c, w, h };
+        return this.pasteClipboard();
+      }
+    } catch {
+      // Denied or empty clipboard.
+    }
+    return false;
   }
 
   /** Restore the stroke-start snapshot, then paint the full live stroke. */
@@ -756,6 +1518,8 @@ export class DrawEngine {
   }
 
   undo() {
+    // Bake first so history applies to arranged content, not the hole.
+    this.settleFloat();
     const entry = this.undoStack.pop();
     if (!entry) return;
     const layer = this.layers.get(entry.layerId);
@@ -770,6 +1534,7 @@ export class DrawEngine {
   }
 
   redo() {
+    this.settleFloat();
     const entry = this.redoStack.pop();
     if (!entry) return;
     const layer = this.layers.get(entry.layerId);
@@ -876,10 +1641,79 @@ export class DrawEngine {
     ctx.globalAlpha = 1;
     ctx.globalCompositeOperation = "source-over";
     if (this.preview) this.drawShape(ctx, this.preview);
+    const strokeAnts = (path: () => void) => {
+      ctx.save();
+      ctx.beginPath();
+      ctx.lineWidth = 2;
+      ctx.strokeStyle = "rgba(255,255,255,0.9)";
+      ctx.setLineDash([7, 5]);
+      path();
+      ctx.stroke();
+      ctx.lineWidth = 1;
+      ctx.strokeStyle = "rgba(0,0,0,0.9)";
+      path();
+      ctx.stroke();
+      ctx.restore();
+    };
+    if (this.marquee) {
+      const m = this.marquee;
+      const x = Math.min(m.x0, m.x1);
+      const y = Math.min(m.y0, m.y1);
+      const w = Math.abs(m.x1 - m.x0);
+      const h = Math.abs(m.y1 - m.y0);
+      if (w >= 1 && h >= 1) {
+        strokeAnts(() => ctx.rect(x, y, w, h));
+      }
+    }
+    const fl = this.float;
+    if (fl) {
+      // Transformed pixels follow the gesture.
+      this.stampFloat(ctx, fl);
+      const frame: SelectFrame = {
+        cx: fl.cx,
+        cy: fl.cy,
+        hw: (fl.w * fl.sx) / 2,
+        hh: (fl.h * fl.sy) / 2,
+        rot: fl.rot,
+      };
+      const corners = frameCorners(frame);
+      strokeAnts(() => {
+        ctx.beginPath();
+        ctx.moveTo(corners[0].x, corners[0].y);
+        for (let i = 1; i < 4; i++) ctx.lineTo(corners[i].x, corners[i].y);
+        ctx.closePath();
+      });
+      // Transform box: corner scale handles + rotate handle on a stem.
+      const rh = rotateHandlePos(frame);
+      ctx.save();
+      ctx.strokeStyle = "rgba(0,0,0,0.85)";
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.moveTo(rh.ax, rh.ay);
+      ctx.lineTo(rh.x, rh.y);
+      ctx.stroke();
+      ctx.fillStyle = "rgba(255,255,255,0.95)";
+      for (const c of corners) {
+        ctx.fillRect(c.x - 5, c.y - 5, 10, 10);
+        ctx.strokeRect(c.x - 5, c.y - 5, 10, 10);
+      }
+      ctx.beginPath();
+      ctx.arc(rh.x, rh.y, 7, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
+      ctx.restore();
+    } else if (!this.marquee && this.selection) {
+      const s = this.selection;
+      if (s.w >= 1 && s.h >= 1) {
+        strokeAnts(() => ctx.rect(s.x, s.y, s.w, s.h));
+      }
+    }
   }
 
   /** Full-page PNG of the composite (logical size — export scale pinned). */
   exportPNG(withPaper = true): string {
+    // Bake first: exports must include arranged content, not the hole.
+    this.settleFloat();
     const tmp = document.createElement("canvas");
     tmp.width = this.width;
     tmp.height = this.height;
@@ -888,6 +1722,8 @@ export class DrawEngine {
   }
 
   serialize(): SerializedLayer[] {
+    // Bake first: saved layers must include arranged content, not the hole.
+    this.settleFloat();
     return this.order.map((id, i) => {
       const layer = this.layers.get(id)!;
       const tmp = document.createElement("canvas");
@@ -924,6 +1760,11 @@ export class DrawEngine {
     this.undoStack = [];
     this.redoStack = [];
     this.undoBytes = 0;
+    this.selection = null;
+    this.marquee = null;
+    this.float = null;
+    this.gesture = null;
+    if (this.display.style.cursor) this.display.style.cursor = "";
     this.resetStroke();
     const failed: string[] = [];
     for (const saved of layers) {

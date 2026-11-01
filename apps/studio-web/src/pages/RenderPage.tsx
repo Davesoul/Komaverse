@@ -37,7 +37,8 @@ import { PreviewPlayer, type PreviewClip } from "../components/PreviewPlayer";
 import { Timeline, fmtTC, type TimelineCueInfo } from "../components/Timeline";
 import { getCurrentProject, getCurrentScene, setCurrentProject, setCurrentScene } from "../lib/studio";
 
-const MOTIONS = ["none", "zoom-in", "zoom-out", "pan-left", "pan-right"];
+const MOTIONS = ["none", "zoom-in", "zoom-out", "pan-left", "pan-right", "pan-up", "pan-down"];
+const TRANSITIONS = ["none", "crossfade", "fade-black", "wipe-left", "impact"];
 const POLL_MS = 1500;
 // Mirror backend ai/direction.py keys; the server validates unknown ids.
 const STYLES = [
@@ -142,6 +143,53 @@ function DurationInput({ value, onCommit }: { value: number; onCommit: (v: numbe
   );
 }
 
+function SecInput({
+  value,
+  onCommit,
+  label,
+  title,
+}: {
+  value: number;
+  onCommit: (v: number) => void;
+  label: string;
+  title?: string;
+}) {
+  const [text, setText] = useState(String(value));
+  const timer = useRef(0);
+  useEffect(() => setText(String(value)), [value]);
+  useEffect(() => () => window.clearTimeout(timer.current), []);
+  const commit = (raw: string) => {
+    const v = Number(raw);
+    if (isFinite(v) && v >= 0 && v !== value) onCommit(Math.round(v * 10) / 10);
+    else setText(String(value));
+  };
+  return (
+    <input
+      className="kv-nums"
+      value={text}
+      style={{ width: 48 }}
+      aria-label={label}
+      title={title}
+      onChange={(e) => {
+        setText(e.target.value);
+        window.clearTimeout(timer.current);
+        const raw = e.target.value;
+        timer.current = window.setTimeout(() => commit(raw), 600);
+      }}
+      onBlur={(e) => {
+        window.clearTimeout(timer.current);
+        commit(e.target.value);
+      }}
+      onKeyDown={(e) => {
+        if (e.key === "Enter") {
+          window.clearTimeout(timer.current);
+          commit((e.target as HTMLInputElement).value);
+        }
+      }}
+    />
+  );
+}
+
 export default function RenderPage() {
   const [projects, setProjects] = useState<Project[]>([]);
   const [project, setProject] = useState<Project | null>(null);
@@ -166,7 +214,26 @@ export default function RenderPage() {
   const [balance, setBalance] = useState<number | null>(null);
   const [prompt, setPrompt] = useState("");
   const [genProvider, setGenProvider] = useState("cloud");
-  const [genSize, setGenSize] = useState("1024");
+  const [genRatio, setGenRatio] = useState("1:1");
+  const [genLong, setGenLong] = useState("1024");
+
+  /** Image dimensions from the ratio preset + long edge (even numbers). */
+  const genDims = (() => {
+    const long = Math.max(256, Math.min(2048, Number(genLong) || 1024));
+    const even = (n: number) => Math.max(2, Math.round(n / 2) * 2);
+    switch (genRatio) {
+      case "16:9":
+        return { width: even(long), height: even((long * 9) / 16) };
+      case "9:16":
+        return { width: even((long * 9) / 16), height: even(long) };
+      case "4:3":
+        return { width: even(long), height: even((long * 3) / 4) };
+      case "3:4":
+        return { width: even((long * 3) / 4), height: even(long) };
+      default:
+        return { width: even(long), height: even(long) };
+    }
+  })();
   const [genKind, setGenKind] = useState("image");
   const [genSeconds, setGenSeconds] = useState("4");
   const [genModel, setGenModel] = useState("");
@@ -321,7 +388,14 @@ export default function RenderPage() {
 
   const commitClipPatch = async (
     id: string,
-    patch: { duration?: number; motion?: string },
+    patch: {
+      duration?: number;
+      motion?: string;
+      transition?: string;
+      transition_duration?: number;
+      fade_in?: number;
+      fade_out?: number;
+    },
     previewMotion = false,
   ) => {
     if (!project || !scene) return;
@@ -398,6 +472,7 @@ export default function RenderPage() {
         video: videoJobs[c.source_id]?.url,
         duration: c.duration,
         motion: c.motion,
+        transition: c.transition,
       })),
     [clips, project, frames, videoJobs],
   );
@@ -652,7 +727,6 @@ export default function RenderPage() {
     setBusy("generate");
     setNotice("");
     try {
-      const size = Number(genSize) || 1024;
       const isVideo = genKind === "video";
       const seedNum = genSeed.trim() === "" ? undefined : Number(genSeed);
       if (seedNum !== undefined && !Number.isInteger(seedNum)) {
@@ -669,8 +743,8 @@ export default function RenderPage() {
           (genProvider === "openrouter" || genProvider === "local") && genModel
             ? genModel
             : undefined,
-        width: size,
-        height: size,
+        width: isVideo ? undefined : genDims.width,
+        height: isVideo ? undefined : genDims.height,
         seconds: isVideo ? Number(genSeconds) || 4 : undefined,
         seed: seedNum,
         negative_prompt: genNegative.trim() || undefined,
@@ -679,6 +753,7 @@ export default function RenderPage() {
         camera_move: isVideo && genCamera !== "none" ? genCamera : undefined,
         entity_ids: entityIds.length ? entityIds : undefined,
         reference_frame_id: refFrame || undefined,
+        attach_frame: !isVideo,
       });
       setGenJob(job);
       setGenStartedAt(Date.now());
@@ -992,15 +1067,31 @@ export default function RenderPage() {
                     <option value="8">8s</option>
                   </SelectInput>
                 ) : (
-                  <SelectInput
-                    value={genSize}
-                    onChange={(e) => setGenSize(e.target.value)}
-                    aria-label="Image size"
-                    disabled={!!busy}
-                  >
-                    <option value="512">512</option>
-                    <option value="1024">1024</option>
-                  </SelectInput>
+                  <>
+                    <SelectInput
+                      value={genRatio}
+                      onChange={(e) => setGenRatio(e.target.value)}
+                      aria-label="Image aspect ratio"
+                      title={`Image ratio — ${genDims.width}×${genDims.height}`}
+                      disabled={!!busy}
+                    >
+                      <option value="1:1">1:1</option>
+                      <option value="16:9">16:9</option>
+                      <option value="9:16">9:16</option>
+                      <option value="4:3">4:3</option>
+                      <option value="3:4">3:4</option>
+                    </SelectInput>
+                    <SelectInput
+                      value={genLong}
+                      onChange={(e) => setGenLong(e.target.value)}
+                      aria-label="Image long edge"
+                      title={`Long edge — ${genDims.width}×${genDims.height}`}
+                      disabled={!!busy}
+                    >
+                      <option value="512">512</option>
+                      <option value="1024">1024</option>
+                    </SelectInput>
+                  </>
                 )}
               </div>
               {genProvider === "local" && (
@@ -1519,6 +1610,7 @@ export default function RenderPage() {
                       video: videoJobs[c.source_id]?.url,
                       duration: c.duration,
                       motion: c.motion,
+                      transition: c.transition,
                     }))}
                     cues={cueInfos}
                     total={total}
@@ -1590,6 +1682,10 @@ export default function RenderPage() {
                     <div className="kv-nums" style={{ fontSize: 12, color: "var(--kv-muted)" }}>
                       starts {fmtTC(clips.slice(0, clips.indexOf(selectedClip)).reduce((a, c) => a + c.duration, 0))} ·{" "}
                       {selectedClip.kind} · {selectedClip.motion}
+                      {selectedClip.transition !== "none" &&
+                        ` · ${selectedClip.transition} ${selectedClip.transition_duration}s`}
+                      {(selectedClip.fade_in > 0 || selectedClip.fade_out > 0) &&
+                        ` · fade ${selectedClip.fade_in}/${selectedClip.fade_out}s`}
                     </div>
                   </div>
                   <div style={{ display: "flex", gap: 6, alignItems: "center", marginLeft: "auto", flexWrap: "wrap" }}>
@@ -1645,6 +1741,45 @@ export default function RenderPage() {
                   <span style={{ fontSize: 11, color: "var(--kv-faint)" }}>
                     Picking a motion replays the preview from this clip;
                     it also burns into the MP4 export.
+                  </span>
+                </div>
+                <div style={{ display: "flex", gap: 6, alignItems: "center", marginTop: 10, flexWrap: "wrap" }}>
+                  <span style={{ fontSize: 12, color: "var(--kv-muted)" }}>Blend in</span>
+                  <SelectInput
+                    value={selectedClip.transition}
+                    onChange={(e) =>
+                      void commitClipPatch(selectedClip.id, { transition: e.target.value })
+                    }
+                    aria-label="Clip transition"
+                    title="How this clip blends in from the previous one (export only)"
+                  >
+                    {TRANSITIONS.map((t) => (
+                      <option key={t} value={t}>{t}</option>
+                    ))}
+                  </SelectInput>
+                  <SecInput
+                    value={selectedClip.transition_duration}
+                    label="Transition seconds"
+                    title="Blend length in seconds (0.1–2)"
+                    onCommit={(v) =>
+                      void commitClipPatch(selectedClip.id, { transition_duration: v })
+                    }
+                  />
+                  <span style={{ fontSize: 12, color: "var(--kv-muted)", marginLeft: 8 }}>Fade</span>
+                  <SecInput
+                    value={selectedClip.fade_in}
+                    label="Fade in seconds"
+                    title="Fade in from black, in seconds (0 = off)"
+                    onCommit={(v) => void commitClipPatch(selectedClip.id, { fade_in: v })}
+                  />
+                  <SecInput
+                    value={selectedClip.fade_out}
+                    label="Fade out seconds"
+                    title="Fade out to black, in seconds (0 = off)"
+                    onCommit={(v) => void commitClipPatch(selectedClip.id, { fade_out: v })}
+                  />
+                  <span style={{ fontSize: 11, color: "var(--kv-faint)" }}>
+                    Blends and fades render in the MP4 export.
                   </span>
                   <span style={{ marginLeft: "auto", display: "flex", gap: 6 }}>
                     <IconBtn label="Move clip earlier" onClick={() => moveClip(selectedClip.id, -1)}>↑</IconBtn>

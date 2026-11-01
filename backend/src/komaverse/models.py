@@ -28,6 +28,7 @@ class Panel(BaseModel):
     w: float = 0
     h: float = 0
     reading_order: int = 0
+    name: str = ""
     crop_url: str | None = None
 
 
@@ -38,6 +39,7 @@ class Page(BaseModel):
     image_url: str
     width: int = 0
     height: int = 0
+    name: str = ""
     panels: list[Panel] = Field(default_factory=list)
 
 
@@ -88,7 +90,11 @@ class Clip(BaseModel):
     source_id: str  # panel id, frame id, or media/asset id
     start: float = 0.0  # seconds on timeline
     duration: float = 2.0
-    motion: str = "none"  # none | kenburns-* | ai
+    motion: str = "none"  # none | zoom-* | pan-*
+    transition: str = "none"  # into this clip: none | crossfade | fade-black | wipe-left | impact
+    transition_duration: float = 0.5
+    fade_in: float = 0.0
+    fade_out: float = 0.0
     order: int = 0
 
 
@@ -192,7 +198,7 @@ class Job(BaseModel):
     reference_frame_id: str | None = None
     final_prompt: str = ""  # exact text sent after entities/style/camera/negative
     entities_json: str = "[]"  # snapshot [{name, kind}] for the UI
-    status: Literal["queued", "running", "done", "failed"] = "queued"
+    status: Literal["queued", "running", "done", "failed", "cancelled"] = "queued"
     progress: float = 0.0
     result_url: str | None = None
     error: str | None = None

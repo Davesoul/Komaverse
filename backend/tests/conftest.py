@@ -19,12 +19,22 @@ def _hermetic_ai_settings(monkeypatch):
 
     Every test starts with unconfigured cloud AI; tests that need a key
     set it explicitly with monkeypatch (reverted afterwards as usual).
+    Model ids are pinned too: a user .env may override them (e.g. a
+    cheaper chat variant), but the suite must assert code defaults.
     """
     monkeypatch.setattr(settings, "ai_provider", "cloud")
+    monkeypatch.setattr(settings, "chat_provider", None)
+    monkeypatch.setattr(settings, "vision_provider", None)
+    monkeypatch.setattr(settings, "image_provider", None)
     monkeypatch.setattr(settings, "ai_api_key", None)
     monkeypatch.setattr(settings, "ai_base_url", None)
     monkeypatch.setattr(settings, "meta_api_key", None)
     monkeypatch.setattr(settings, "openrouter_api_key", None)
+    monkeypatch.setattr(settings, "meta_chat_model", "muse-spark-1.3")
+    monkeypatch.setattr(settings, "meta_vision_model", None)
+    monkeypatch.setattr(settings, "meta_image_model", "muse-image-1.0")
+    monkeypatch.setattr(settings, "meta_transcribe_model", "muse-voice-transcribe-1.0")
+    monkeypatch.setattr(settings, "meta_sam_model", "sam-3.1")
 
 
 def create_user(session, email="u@test.local", password="password123", name="T"):

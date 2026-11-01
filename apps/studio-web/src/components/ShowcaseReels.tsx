@@ -10,7 +10,14 @@ export default function ShowcaseReels() {
   const reducedMotion =
     typeof window !== "undefined" && prefersReducedMotion();
   const reelRefs = useRef<(HTMLVideoElement | null)[]>([]);
-  const reelHover = useRef(false);
+  // Hovered panel index (null = nobody). The spotlight never pauses or
+  // plays over the hovered panel, so a timer tick landing between panels
+  // can't steal playback from the video under the cursor.
+  const hovered = useRef<number | null>(null);
+  // On-screen gate: videos hold still while the section is scrolled past,
+  // so decoding plus the filtered repaints never compete with scrolling.
+  const visible = useRef(true);
+  const sectionRef = useRef<HTMLElement | null>(null);
   const [spot, setSpot] = useState(0);
   const spotRef = useRef(spot);
   spotRef.current = spot;
@@ -21,15 +28,28 @@ export default function ShowcaseReels() {
   useEffect(() => {
     if (reducedMotion) return;
     const timer = setInterval(() => {
-      if (reelHover.current || document.hidden) return;
+      if (!visible.current || hovered.current !== null || document.hidden)
+        return;
       setSpot((s) => (s + 1) % REELS.length);
     }, 3000);
     return () => clearInterval(timer);
   }, [reducedMotion]);
 
   useEffect(() => {
+    const show = visible.current;
     reelRefs.current.forEach((v, i) => {
       if (!v) return;
+      // Off-screen: everything holds still, no exceptions.
+      if (!show) {
+        v.pause();
+        return;
+      }
+      // The hovered panel belongs to the visitor: keep it playing and
+      // never pause it from here.
+      if (i === hovered.current) {
+        v.play().catch(() => {});
+        return;
+      }
       if (i !== spot) v.pause();
       else v.play().catch(() => {});
     });
@@ -53,7 +73,7 @@ export default function ShowcaseReels() {
         if (cancelled || i >= REELS.length) return;
         const v = reelRefs.current[i];
         i += 1;
-        if (!v || !v.paused || reelHover.current || document.hidden) {
+        if (!v || !v.paused || hovered.current !== null || document.hidden) {
           window.setTimeout(step, 700);
           return;
         }
@@ -63,7 +83,11 @@ export default function ShowcaseReels() {
             window.setTimeout(() => {
               // Pause only what pre-roll started: a reel the visitor
               // took over (hover/click/spotlight) keeps playing.
-              if (!cancelled && !reelHover.current && i - 1 !== spotRef.current)
+              if (
+                !cancelled &&
+                hovered.current === null &&
+                i - 1 !== spotRef.current
+              )
                 v.pause();
               window.setTimeout(step, 700);
             }, 400);
@@ -78,8 +102,34 @@ export default function ShowcaseReels() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Visibility gate: pause everything scrolled past, resume on return.
+  useEffect(() => {
+    const el = sectionRef.current;
+    if (!el || typeof IntersectionObserver === "undefined") return;
+    const obs = new IntersectionObserver(
+      ([entry]) => {
+        visible.current = entry.isIntersecting;
+        if (!entry.isIntersecting) {
+          reelRefs.current.forEach((v) => v?.pause());
+        } else {
+          const i = hovered.current ?? spotRef.current;
+          reelRefs.current[i]?.play().catch(() => {});
+        }
+      },
+      { threshold: 0.05 },
+    );
+    obs.observe(el);
+    return () => obs.disconnect();
+  }, []);
+
   return (
-    <section id="showcase" className="lv-section lv-wide">
+    <section
+      id="showcase"
+      className="lv-section lv-wide"
+      ref={(el) => {
+        sectionRef.current = el;
+      }}
+    >
       <div data-reveal>
         <p className="lv-label">Showcase</p>
         <h2 className="lv-h2">Made in the studio</h2>
@@ -88,17 +138,26 @@ export default function ShowcaseReels() {
         {REELS.map((r, i) => (
           <figure
             key={`${r.v}-${i}`}
-            className={`lv-reel kv-reveal-media span-${r.span}`}
+            // Shaped panels skip the clip-wipe reveal: its is-visible
+            // inset(0) outranks the slash polygon and would erase every
+            // diagonal on scroll-in. They still fade/slide via data-reveal.
+            className={`lv-reel ${r.cut ? "" : "kv-reveal-media "}span-${r.span}${r.cut ? ` cut-${r.cut}` : ""}`}
             style={{ aspectRatio: r.ratio }}
             data-reveal
             data-delay={(i % 3) * 80}
             tabIndex={0}
             aria-label={`${r.title} — showcase reel. Activate to play or pause.`}
             onMouseEnter={() => {
-              reelHover.current = true;
+              // Hover takes over: this panel plays, everything else
+              // holds still until the cursor leaves.
+              hovered.current = i;
+              reelRefs.current.forEach((o, j) => {
+                if (o && j !== i) o.pause();
+              });
+              reelRefs.current[i]?.play().catch(() => {});
             }}
             onMouseLeave={() => {
-              reelHover.current = false;
+              hovered.current = null;
             }}
             onKeyDown={(e) => {
               if (e.key !== "Enter" && e.key !== " ") return;
