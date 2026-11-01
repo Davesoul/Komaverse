@@ -233,18 +233,31 @@ def test_meta_segment_parses_boxes(monkeypatch, tmp_path):
     monkeypatch.setattr(settings, "meta_api_key", "mk-test")
     seen = {}
 
+    grammar = (
+        "<0f>0<|box;x1=20;y1=10;x2=180;y2=90;w=200;h=100|>"
+        "<|mask;x=0;y=0;data=5,5,~AAA|>,"
+        "1<|box;x1=0;y1=0;x2=100;y2=50;w=400;h=200|>"
+        "<|mask;x=0;y=0;data=5,5,~BBB|>"
+    )
+
     def _post(url, **kwargs):
         seen["body"] = kwargs.get("json")
-        return _Resp(200, _segment_payload('[{"x":100,"y":50,"w":800,"h":500}]'))
+        return _Resp(200, _segment_payload(grammar))
 
     monkeypatch.setattr(httpx, "post", _post)
     img = tmp_path / "page.png"
     img.write_bytes(_png_bytes())
     boxes = MetaProvider().segment(img, "comic panel")
     assert seen["body"]["model"] == "sam-3.1"
-    assert len(boxes) == 1
-    assert (boxes[0]["x"], boxes[0]["y"]) == (20.0, 5.0)
-    assert (boxes[0]["w"], boxes[0]["h"]) == (160.0, 50.0)
+    # Cookbook contract: the prompt is one short noun phrase, no JSON orders.
+    prompt = seen["body"]["input"][0]["content"][0]["text"]
+    assert prompt == "comic panel"
+    assert len(boxes) == 2
+    assert (boxes[0]["x"], boxes[0]["y"]) == (20.0, 10.0)
+    assert (boxes[0]["w"], boxes[0]["h"]) == (160.0, 80.0)
+    # Second token declares its own 400x200 space: scaled to the 200x100 image.
+    assert (boxes[1]["x"], boxes[1]["y"]) == (0.0, 0.0)
+    assert (boxes[1]["w"], boxes[1]["h"]) == (50.0, 25.0)
 
 
 def test_normalize_usage_shapes():
@@ -325,6 +338,24 @@ def test_meta_segment_unparseable(monkeypatch, tmp_path):
     img.write_bytes(_png_bytes())
     with pytest.raises(ProviderUnavailable):
         MetaProvider().segment(img, "comic panel")
+
+
+def test_sam_grammar_skips_degenerate_tokens():
+    """Malformed box tokens are skipped, not fatal; masks never parse as boxes."""
+    from komaverse.ai.providers import _boxes_from_sam_grammar
+
+    text = (
+        "<0f>0<|box;x1=10;y1=10;x2=50;y2=60;w=200;h=100|>"
+        "<|mask;x=0;y=0;data=5,5,~AAA|>,"
+        "1<|box;x1=5;y1=5;x2=5;y2=60;w=200;h=100|>"  # degenerate: x2 == x1
+        "<|mask;x=0;y=0;data=5,5,~BBB|>,"
+        "2<|box;x1=1;y1=2;w=200;h=100|>"  # missing corners
+        "<|mask;x=0;y=0;data=5,5,~CCC|>"
+    )
+    boxes = _boxes_from_sam_grammar(text, 200, 100)
+    assert len(boxes) == 1
+    assert (boxes[0]["x"], boxes[0]["y"], boxes[0]["w"], boxes[0]["h"]) == (10.0, 10.0, 40.0, 50.0)
+    assert _boxes_from_sam_grammar("", 200, 100) == []
 
 
 def test_sam_detector_routes(tmp_path, monkeypatch):

@@ -5,7 +5,7 @@
  * (ImageData) and flood fill touch device pixels directly. Serialization and
  * export are pinned to logical size so DPR never changes saved art.
  */
-import { paintStroke, type BrushSettings, type StrokeInput } from "./brushes";
+import { DAB_SEED, mulberry32, paintDabs, paintStroke, type BrushSettings, type StrokeInput } from "./brushes";
 import { floodFill } from "./fill";
 import {
   frameCorners,
@@ -188,6 +188,16 @@ export class DrawEngine {
   symmetry = false; // mirror strokes across the vertical canvas axis
   version = 0; // bumped on every mutation; drives page dirty/autosave
   onChange: (() => void) | null = null;
+  // Incremental live-stroke paint: dabs painted so far + the persistent
+  // rand streams, so each move paints only new dabs (no snapshot restore,
+  // no full repaint). paintQueued + strokeSeq coalesce moves into one
+  // paint per animation frame.
+  private paintedSteps = 0;
+  private paintedMirrorSteps = 0;
+  private strokeRand: (() => number) | null = null;
+  private strokeRandMirror: (() => number) | null = null;
+  private paintQueued = false;
+  private strokeSeq = 0;
 
   constructor(
     private display: HTMLCanvasElement,
@@ -531,6 +541,12 @@ export class DrawEngine {
     this.snapshot = { layerId: this.activeId!, data: this.grab(layer) };
     this.drawing = true;
     this.smoothPt = null;
+    // Fresh incremental-paint cursor for this stroke.
+    this.paintedSteps = 0;
+    this.paintedMirrorSteps = 0;
+    this.strokeRand = mulberry32(DAB_SEED);
+    this.strokeRandMirror = mulberry32(DAB_SEED);
+    this.strokeSeq++;
 
     if (this.tool === "fill") {
       const p = this.toLogical(e);
@@ -643,8 +659,9 @@ export class DrawEngine {
         tilt: DrawEngine.tiltOf(ce),
       });
     }
-    this.paintCurrent(layer, false);
-    this.composite();
+    // Live paint is coalesced to one incremental paint per frame; the
+    // release pass below does the canonical full repaint.
+    this.queueLivePaint(this.activeId!);
   }
 
   pointerUp(e?: PointerEvent) {
@@ -722,6 +739,12 @@ export class DrawEngine {
     this.shapeStart = null;
     this.preview = null;
     this.snapshot = null;
+    // Invalidate any queued live paint; retire the incremental cursor.
+    this.strokeSeq++;
+    this.paintedSteps = 0;
+    this.paintedMirrorSteps = 0;
+    this.strokeRand = null;
+    this.strokeRandMirror = null;
   }
 
   // ---- selection -----------------------------------------------------
@@ -1272,8 +1295,49 @@ export class DrawEngine {
   }
 
   /** Restore the stroke-start snapshot, then paint the full live stroke. */
+  /** Paint only the not-yet-painted tail of a dab stroke onto the live
+   * layer (no snapshot restore). Suffix steps consume the stroke-persistent
+   * rand in order, so they land exactly where a full repaint would put
+   * them; the release pass below still does the canonical full repaint. */
+  private paintIncremental(layer: Layer): void {
+    if (!this.strokeRand || !this.strokeRandMirror) return;
+    const erase = this.tool === "eraser";
+    this.paintedSteps = paintDabs(
+      this.lctx(layer), this.brushPts, this.brush, this.color, erase,
+      false, this.paintedSteps, this.strokeRand,
+    );
+    if (this.symmetry && !erase) {
+      const mirrored = this.brushPts.map((p) => ({ ...p, x: this.width - p.x }));
+      this.paintedMirrorSteps = paintDabs(
+        this.lctx(layer), mirrored, this.brush, this.color, false,
+        false, this.paintedMirrorSteps, this.strokeRandMirror,
+      );
+    }
+  }
+
+  /** Coalesce a burst of moves into one paint per animation frame. */
+  private queueLivePaint(layerId: string): void {
+    if (this.paintQueued) return;
+    this.paintQueued = true;
+    const seq = this.strokeSeq;
+    requestAnimationFrame(() => {
+      this.paintQueued = false;
+      if (seq !== this.strokeSeq || !this.drawing) return;
+      const live = this.layers.get(layerId);
+      if (!live || this.snapshot?.layerId !== this.activeId) return;
+      this.paintCurrent(live, false);
+      this.composite();
+    });
+  }
+
   private paintCurrent(layer: Layer, last: boolean) {
     if (!this.snapshot || this.snapshot.layerId !== this.activeId) return;
+    // Live dab passes paint incrementally (no restore, suffix only); the
+    // release pass (last=true) always takes the canonical full repaint.
+    if (!last && this.brush.kind === "dab" && this.tool !== "smudge" && this.strokeRand && this.strokeRandMirror) {
+      this.paintIncremental(layer);
+      return;
+    }
     const c = layer.canvas.getContext("2d")!;
     c.setTransform(1, 0, 0, 1, 0, 0);
     c.putImageData(this.snapshot.data, 0, 0);

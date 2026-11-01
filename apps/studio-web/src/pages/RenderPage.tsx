@@ -12,6 +12,7 @@ import {
   type Page,
   type Project,
   type Scene,
+  type Sequence,
   type SubtitleTrack,
 } from "../api";
 import {
@@ -35,7 +36,7 @@ import { AudioDeck } from "../components/AudioDeck";
 import { Magnet } from "../components/Magnet";
 import { PreviewPlayer, type PreviewClip } from "../components/PreviewPlayer";
 import { Timeline, fmtTC, type TimelineCueInfo } from "../components/Timeline";
-import { getCurrentProject, getCurrentScene, setCurrentProject, setCurrentScene } from "../lib/studio";
+import { getCurrentProject, getCurrentScene, getCurrentSequence, gotoTab, setCurrentProject, setCurrentScene, setCurrentSequence, setDrawFrame } from "../lib/studio";
 
 const MOTIONS = ["none", "zoom-in", "zoom-out", "pan-left", "pan-right", "pan-up", "pan-down"];
 const TRANSITIONS = ["none", "crossfade", "fade-black", "wipe-left", "impact"];
@@ -196,6 +197,8 @@ export default function RenderPage() {
   const [scenes, setScenes] = useState<Scene[]>([]);
   const [sceneId, setSceneId] = useState("");
   const [frames, setFrames] = useState<DrawFrame[]>([]);
+  const [sequences, setSequences] = useState<Sequence[]>([]);
+  const [frameQuery, setFrameQuery] = useState("");
   const [takes, setTakes] = useState<AudioTake[]>([]);
   const [framePick, setFramePick] = useState("");
   const [pagePick, setPagePick] = useState("");
@@ -297,18 +300,20 @@ export default function RenderPage() {
   });
 
   const refresh = async (projectId: string, keepScene?: string) => {
-    const [full, sceneList, frameList, takeList, jobList, bal] = await Promise.all([
+    const [full, sceneList, frameList, takeList, jobList, seqList, bal] = await Promise.all([
       api.getProject(projectId),
       api.listScenes(projectId),
       api.listFrames(projectId),
       api.listTakes(projectId),
       api.listJobs().catch(() => [] as Job[]),
+      api.listSequences(projectId).catch(() => [] as Sequence[]),
       api.getBalance().catch(() => null),
     ]);
     setProject(full);
     setCurrentProject(full.id);
     setScenes(sceneList);
     setFrames(frameList);
+    setSequences(seqList);
     setTakes(takeList);
     setDoneVideos(
       jobList.filter(
@@ -354,6 +359,7 @@ export default function RenderPage() {
             takeDur: Math.max(take.duration_sec, 0),
             endSec: cue.end_sec ?? null,
             lane: cue.lane ?? 0,
+            audio: mediaUrl(take.url),
           },
         ];
       }),
@@ -498,6 +504,48 @@ export default function RenderPage() {
     },
     [],
   );
+
+  // Cohesion: a timeline clip opens back in Draw. Frames open directly;
+  // panels and page stills become a new draw frame each; videos explode
+  // into the current sequence frame by frame.
+  const openClipInDraw = async (clip: Clip) => {
+    if (!project) return;
+    setNotice("");
+    try {
+      if (clip.kind === "frame") {
+        setDrawFrame(project.id, clip.source_id);
+        gotoTab("draw");
+        return;
+      }
+      if (clip.kind === "panel" || clip.kind === "media") {
+        const token = clip.kind === "panel" ? `@panel:${clip.source_id}` : `@media:${clip.source_id}`;
+        const f = await api.frameFromMedia(project.id, token);
+        setDrawFrame(project.id, f.id);
+        gotoTab("draw");
+        return;
+      }
+      if (clip.kind === "video") {
+        const stored = getCurrentSequence(project.id);
+        const seqs = sequences.length > 0 ? sequences : await api.listSequences(project.id).catch(() => []);
+        const target = seqs.find((s) => s.id === stored) ?? seqs[0];
+        if (!target) {
+          setNotice("Create a sequence in Draw first, then explode the video into it.");
+          return;
+        }
+        setBusy("explode");
+        const made = await api.videoToFrames(clip.source_id, { sequence_id: target.id, max_frames: 12 });
+        setBusy("");
+        setCurrentSequence(project.id, target.id);
+        if (made.length > 0) setDrawFrame(project.id, made[0].id);
+        gotoTab("draw");
+        return;
+      }
+      setNotice("AI clips have no draw source.");
+    } catch (e) {
+      setBusy("");
+      setNotice(`Open in Draw failed: ${(e as Error).message}`);
+    }
+  };
 
   const dropTake = async (takeId: string, atTime: number, lane: number) => {
     if (!project || !scene) return;
@@ -893,46 +941,86 @@ export default function RenderPage() {
               <PrimaryBtn disabled={!!busy} onClick={addAllPanels}>
                 {busy === "add-all" ? "Adding…" : "Auto-direct timeline"}
               </PrimaryBtn>
-              <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-                {frames.map((f, i) => (
-                  <button
-                    key={f.id}
-                    type="button"
-                    onClick={() => setFramePick(f.id)}
-                    title={f.name || f.id}
-                    aria-label={`Pick ${f.name || `frame ${i + 1}`}`}
-                    aria-pressed={framePick === f.id}
-                    style={{
-                      border:
-                        framePick === f.id
-                          ? "2px solid var(--kv-accent)"
-                          : "1px solid var(--kv-border-strong)",
-                      borderRadius: 6,
-                      padding: 2,
-                      background: "var(--kv-inset)",
-                      cursor: "pointer",
-                    }}
-                  >
-                    <img
-                      crossOrigin="use-credentials"
-                      src={api.frameThumbnailUrl(f.id)}
-                      alt=""
-                      width={88}
-                      height={50}
-                      style={{ display: "block", borderRadius: 4, objectFit: "cover", background: "#f6f1e8" }}
-                      loading="lazy"
-                    />
-                    <span className="kv-nums" style={{ fontSize: 11, color: "var(--kv-muted)" }}>
-                      FR {String(i + 1).padStart(2, "0")}
-                    </span>
-                  </button>
-                ))}
-                {frames.length === 0 && (
-                  <span style={{ fontSize: 13, color: "var(--kv-muted)" }}>
-                    No frames yet — draw one on the Draw tab.
-                  </span>
-                )}
-              </div>
+              <TextInput
+                value={frameQuery}
+                onChange={(e) => setFrameQuery(e.target.value)}
+                placeholder="Search frames…"
+                aria-label="Search frames"
+                style={{ width: "100%" }}
+              />
+              {sequences.map((s) => {
+                const q = frameQuery.trim().toLowerCase();
+                const list = s.frames.filter(
+                  (f) => !q || (f.name || "").toLowerCase().includes(q),
+                );
+                if (q && list.length === 0) return null;
+                return (
+                  <div key={s.id} style={{ marginTop: 8 }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 4 }}>
+                      <span style={{ fontSize: 12, fontWeight: 700 }}>{s.name}</span>
+                      <span className="kv-nums" style={{ fontSize: 11, color: "var(--kv-muted)" }}>
+                        {s.frames.length}
+                      </span>
+                      <span style={{ flex: 1 }} />
+                      <Btn
+                        small
+                        disabled={list.length === 0}
+                        title={`Add every ${s.name} frame as a clip`}
+                        onClick={async () => {
+                          if (!project || !scene) return;
+                          await api.addClipsBatch(
+                            scene.id,
+                            list.map((f) => ({ kind: "frame", source_id: f.id, duration: 2 })),
+                          );
+                          await refresh(project.id, scene.id);
+                        }}
+                      >
+                        All ▸
+                      </Btn>
+                    </div>
+                    <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                      {list.map((f, i) => (
+                        <button
+                          key={f.id}
+                          type="button"
+                          onClick={() => setFramePick(f.id)}
+                          title={f.name || f.id}
+                          aria-label={`Pick ${f.name || `frame ${i + 1}`} from ${s.name}`}
+                          aria-pressed={framePick === f.id}
+                          style={{
+                            border:
+                              framePick === f.id
+                                ? "2px solid var(--kv-accent)"
+                                : "1px solid var(--kv-border-strong)",
+                            borderRadius: 6,
+                            padding: 2,
+                            background: "var(--kv-inset)",
+                            cursor: "pointer",
+                          }}
+                        >
+                          <img
+                            crossOrigin="use-credentials"
+                            src={api.frameThumbnailUrl(f.id)}
+                            alt=""
+                            width={88}
+                            height={50}
+                            style={{ display: "block", borderRadius: 4, objectFit: "cover", background: "#f6f1e8" }}
+                            loading="lazy"
+                          />
+                          <span className="kv-nums" style={{ fontSize: 11, color: "var(--kv-muted)" }}>
+                            {f.name || `FR ${String(i + 1).padStart(2, "0")}`}
+                          </span>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                );
+              })}
+              {sequences.length === 0 && (
+                <span style={{ fontSize: 13, color: "var(--kv-muted)" }}>
+                  No frames yet — draw one on the Draw tab.
+                </span>
+              )}
               <Btn
                 disabled={!framePick}
                 onClick={async () => {
@@ -1782,6 +1870,13 @@ export default function RenderPage() {
                     Blends and fades render in the MP4 export.
                   </span>
                   <span style={{ marginLeft: "auto", display: "flex", gap: 6 }}>
+                    <Btn
+                      small
+                      title="Open this clip's source in the Draw tab (frames open directly; panels and stills become new frames; videos explode frame by frame)"
+                      onClick={() => void openClipInDraw(selectedClip)}
+                    >
+                      Draw ▸
+                    </Btn>
                     <IconBtn label="Move clip earlier" onClick={() => moveClip(selectedClip.id, -1)}>↑</IconBtn>
                     <IconBtn label="Move clip later" onClick={() => moveClip(selectedClip.id, 1)}>↓</IconBtn>
                     <Btn

@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Btn, IconBtn } from "./ui";
 
 export interface TimelineClipInfo {
@@ -23,6 +23,8 @@ export interface TimelineCueInfo {
   /** Trimmed stop on the timeline; null plays to the take end. */
   endSec: number | null;
   lane: number;
+  /** Take audio URL for the waveform backdrop; absent hides it. */
+  audio?: string;
 }
 
 const LANE_H = 44;
@@ -58,6 +60,92 @@ const KIND_BAR: Record<string, string> = {
 
 const RULER_H = 26;
 const HEAD_W = 132;
+
+/** Decoded peak cache: one decode per take URL no matter how many cues use it. */
+const peaksCache = new Map<string, number[]>();
+const PEAK_BARS = 240;
+
+/** Waveform backdrop for an audio cue: decodes the take once (credentialed
+ * fetch + WebAudio), then draws the cue's [offset, offset+len] window as
+ * bars. Silent on failure — the name/timecode stay readable. */
+function Waveform({ url, offset, len, takeDur }: { url?: string; offset: number; len: number; takeDur: number }) {
+  const ref = useRef<HTMLCanvasElement>(null);
+  const [peaks, setPeaks] = useState<number[] | null>(() => (url ? (peaksCache.get(url) ?? null) : null));
+  useEffect(() => {
+    if (!url || peaksCache.has(url)) {
+      if (url) setPeaks(peaksCache.get(url) ?? null);
+      return;
+    }
+    let dead = false;
+    (async () => {
+      try {
+        const res = await fetch(url, { credentials: "include" });
+        if (!res.ok) return;
+        const buf = await res.arrayBuffer();
+        const AC = window.AudioContext ?? (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
+        if (!AC) return;
+        const ac = new AC();
+        try {
+          const audio = await ac.decodeAudioData(buf);
+          const ch = audio.getChannelData(0);
+          const out = new Array<number>(PEAK_BARS).fill(0);
+          const step = Math.max(1, Math.floor(ch.length / PEAK_BARS));
+          for (let i = 0; i < PEAK_BARS; i++) {
+            let m = 0;
+            const s = i * step;
+            for (let j = s; j < Math.min(s + step, ch.length); j += 4) {
+              const a = Math.abs(ch[j]);
+              if (a > m) m = a;
+            }
+            out[i] = m;
+          }
+          peaksCache.set(url, out);
+          if (!dead) setPeaks(out);
+        } finally {
+          void ac.close().catch(() => {});
+        }
+      } catch {
+        // No waveform: the cue label still shows.
+      }
+    })();
+    return () => {
+      dead = true;
+    };
+  }, [url]);
+  useEffect(() => {
+    const c = ref.current;
+    if (!c || !peaks || !takeDur || takeDur <= 0) return;
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    const W = c.clientWidth;
+    const H = c.clientHeight;
+    if (W <= 0 || H <= 0) return;
+    c.width = Math.max(1, Math.round(W * dpr));
+    c.height = Math.max(1, Math.round(H * dpr));
+    const ctx = c.getContext("2d");
+    if (!ctx) return;
+    ctx.clearRect(0, 0, c.width, c.height);
+    const a = Math.max(0, Math.min(offset / takeDur, 1));
+    const b = Math.max(a, Math.min((offset + len) / takeDur, 1));
+    const i0 = Math.floor(a * peaks.length);
+    const i1 = Math.max(i0 + 1, Math.ceil(b * peaks.length));
+    const n = i1 - i0;
+    const bw = c.width / n;
+    ctx.fillStyle = "rgba(147,197,253,0.8)";
+    for (let i = i0; i < i1; i++) {
+      const v = peaks[i] ?? 0;
+      const h = Math.max(1, v * c.height);
+      ctx.fillRect((i - i0) * bw, (c.height - h) / 2, Math.max(1, bw - 0.6), h);
+    }
+  }, [peaks, offset, len, takeDur]);
+  if (!url) return null;
+  return (
+    <canvas
+      ref={ref}
+      aria-hidden
+      style={{ position: "absolute", inset: 0, width: "100%", height: "100%", pointerEvents: "none" }}
+    />
+  );
+}
 
 /** CapCut-style two-track timeline: V1 video lane + A1 audio lane under a
  * precise second/sub-second ruler, with a playhead synced to the preview. */
@@ -102,6 +190,26 @@ export function Timeline({
   const [pps, setPps] = useState(96); // timeline zoom: pixels per second
   const ppsRef = useRef(pps);
   ppsRef.current = pps;
+  const scrollRef = useRef<HTMLDivElement>(null);
+
+  // Ctrl/Cmd+wheel zooms around the cursor (buttons stay for the rest).
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const onWheel = (e: WheelEvent) => {
+      if (!e.ctrlKey && !e.metaKey) return;
+      e.preventDefault();
+      const rect = el.getBoundingClientRect();
+      const atX = e.clientX - rect.left;
+      const t = (el.scrollLeft + atX) / ppsRef.current;
+      const next = Math.max(12, Math.min(320, Math.round(ppsRef.current * (e.deltaY > 0 ? 1 / 1.2 : 1.2))));
+      ppsRef.current = next;
+      setPps(next);
+      el.scrollLeft = t * next - atX;
+    };
+    el.addEventListener("wheel", onWheel, { passive: false });
+    return () => el.removeEventListener("wheel", onWheel);
+  }, []);
   const width = Math.max(total * pps, 200);
   const frames = Math.round(total * fps);
   const [hoverId, setHoverId] = useState<string | null>(null);
@@ -333,6 +441,16 @@ export function Timeline({
         >
           +
         </IconBtn>
+        <IconBtn
+          onClick={() => {
+            const el = scrollRef.current;
+            if (!el || total <= 0) return;
+            setPps(Math.max(12, Math.min(320, Math.round((el.clientWidth - 8) / total))));
+          }}
+          label="Fit the whole timeline to the available width"
+        >
+          ⤢
+        </IconBtn>
       </div>
 
       <div style={{ display: "flex", border: "1px solid var(--kv-border)", borderRadius: 8, overflow: "hidden" }}>
@@ -370,7 +488,7 @@ export function Timeline({
           </div>
         </div>
 
-        <div style={{ flex: 1, minWidth: 0, overflowX: "auto", position: "relative", background: "var(--kv-inset)" }}>
+        <div ref={scrollRef} style={{ flex: 1, minWidth: 0, overflowX: "auto", position: "relative", background: "var(--kv-inset)" }}>
           <div style={{ width, position: "relative" }}>
             <div
               role="slider"
@@ -613,10 +731,11 @@ export function Timeline({
                       zIndex: moving ? 4 : 1,
                     }}
                   >
-                    <div style={{ fontSize: 12, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                    <Waveform url={cue.audio} offset={off} len={len} takeDur={cue.takeDur} />
+                    <div style={{ fontSize: 12, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", position: "relative" }}>
                       ♪ {cue.name}
                     </div>
-                    <div className="kv-nums" style={{ fontSize: 10, opacity: 0.75, whiteSpace: "nowrap" }}>
+                    <div className="kv-nums" style={{ fontSize: 10, opacity: 0.75, whiteSpace: "nowrap", position: "relative" }}>
                       {fmtTC(start)} → {fmtTC(start + len)}
                     </div>
                     {edgeHandle("l", handlesVisible, (e) =>

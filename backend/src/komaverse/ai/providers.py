@@ -84,6 +84,46 @@ def _num_0_1000(value) -> float | None:
     return min(max(f, 0.0), 1000.0)
 
 
+_SAM_BOX_RE = re.compile(r"<\|box;([^|<>]*)\|>")
+
+
+def _boxes_from_sam_grammar(text: str, w: int, h: int) -> list[dict]:
+    """SAM 3.1 segmentation grammar (one `<0f>` line per image, records
+    `id<|box;x1=..;y1=..;x2=..;y2=..;w=..;h=..|><|mask;..|>,...`).
+
+    Box coords are pixels in the token-declared (w, h) space — the image
+    size the model saw — so scale them to the caller's (w, h). Masks are
+    ignored: panel detection needs boxes only.
+    """
+    boxes: list[dict] = []
+    for m in _SAM_BOX_RE.finditer(text or ""):
+        kv: dict[str, str] = {}
+        for part in m.group(1).split(";"):
+            key, sep, val = part.partition("=")
+            if sep:
+                kv[key.strip()] = val.strip()
+        try:
+            nums = [float(kv[k]) for k in ("x1", "y1", "x2", "y2")]
+            ref_w = float(kv.get("w") or w)
+            ref_h = float(kv.get("h") or h)
+        except (KeyError, TypeError, ValueError):
+            continue
+        if not all(math.isfinite(v) for v in (*nums, ref_w, ref_h)):
+            continue
+        x1, y1, x2, y2 = nums
+        if not (ref_w > 0 and ref_h > 0 and x2 > x1 and y2 > y1):
+            continue
+        boxes.append(
+            {
+                "x": x1 / ref_w * w,
+                "y": y1 / ref_h * h,
+                "w": (x2 - x1) / ref_w * w,
+                "h": (y2 - y1) / ref_h * h,
+            }
+        )
+    return boxes
+
+
 def _boxes_from_text(text: str, w: int, h: int) -> list[dict]:
     boxes: list[dict] = []
     for m in re.finditer(r"\{[^{}]*\}", text):
@@ -867,9 +907,11 @@ class MetaProvider:
     def segment(self, image: Path, concept: str) -> list[dict]:
         """Object boxes via SAM 3.1 (cookbook 07_sam): text prompt + image.
 
-        The model returns geometry as text; boxes are parsed 0-1000 like
-        vision detection and scaled to pixels. Unparseable output raises
-        ProviderUnavailable so detector callers fall back to heuristic.
+        The model answers in its segmentation grammar
+        (`<0f>id<|box;x1=..;y1=..;x2=..;y2=..;w=..;h=..|>...`); box
+        tokens are scaled from their declared size to image pixels.
+        Unparseable output raises ProviderUnavailable so detector
+        callers fall back to heuristic.
         """
         if not settings.meta_api_key:
             raise ProviderError("meta segment needs META_API_KEY (dev.meta.ai)")
@@ -890,12 +932,10 @@ class MetaProvider:
                         "content": [
                             {
                                 "type": "input_text",
-                                "text": (
-                                    "Segment every instance of: "
-                                    f"{concept}. Reply ONLY with JSON "
-                                    'like [{"x":0-1000,"y":0-1000,'
-                                    '"w":0-1000,"h":0-1000}] in reading order.'
-                                ),
+                                # Cookbook contract: one short noun phrase, no
+                                # format instructions — SAM answers in its
+                                # segmentation grammar, not JSON.
+                                "text": concept.strip() or "object",
                             },
                             {
                                 "type": "input_image",
@@ -916,7 +956,7 @@ class MetaProvider:
                         part.get("text"), str
                     ):
                         texts.append(part["text"])
-        boxes = _boxes_from_text(" ".join(texts), orig_w, orig_h)
+        boxes = _boxes_from_sam_grammar(" ".join(texts), orig_w, orig_h)
         if not boxes:
             raise ProviderUnavailable("sam returned no parseable geometry")
         return boxes

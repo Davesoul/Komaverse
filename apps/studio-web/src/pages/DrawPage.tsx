@@ -20,7 +20,7 @@ import {
   type SerializedLayer,
   type ToolId,
 } from "../lib/draw/engine";
-import { getCurrentProject, getCurrentSequence, getDrawFrame, setCurrentProject, setCurrentSequence, setDrawFrame } from "../lib/studio";
+import { getCurrentProject, getCurrentScene, getCurrentSequence, getDrawFrame, setCurrentProject, setCurrentScene, setCurrentSequence, setDrawFrame } from "../lib/studio";
 import {
   BRUSH_PRESETS,
   paintStroke,
@@ -44,9 +44,28 @@ const TOOLS: { id: ToolId; label: string; key: string }[] = [
 ];
 
 const INKS = ["#111111", "#3a3a3a", "#6b6b6b", "#a3a098", "#f4efe4", "#c1121f", "#4a6fa5", "#6fa373"];
+
+/** Compact labels for the fullscreen tool rail (full names stay in tooltips). */
+const SHORT_LABEL: Record<ToolId, string> = {
+  brush: "Brush",
+  eraser: "Erase",
+  smudge: "Blend",
+  line: "Line",
+  rect: "Rect",
+  ellipse: "Elps",
+  fill: "Fill",
+  eyedropper: "Pick",
+  text: "Text",
+  pan: "Pan",
+  select: "Sel",
+};
 const GRAYS = ["#000000", "#2b2b2b", "#555555", "#808080", "#ababab", "#d4d4d4", "#ffffff"];
 const RECENT_KEY = "komaverse.recentColors";
-const AUTOSAVE_MS = 1500;
+/* Idle delay before an autosave fires, and the minimum gap between two
+ * autosaves: serializing + uploading a frame is the heaviest thing Draw
+ * does, so back-to-back saves visibly stutter the canvas. Explicit
+ * Ctrl+S saves stay instant; the dirty dot + unload guard cover the wait. */
+const AUTOSAVE_MS = 4000;
 
 interface LiveSettings {
   tool: ToolId;
@@ -251,6 +270,8 @@ export default function DrawPage() {
   const [busy, setBusy] = useState(false);
   const [dirty, setDirty] = useState(false);
   const [zoom, setZoom] = useState(1);
+  const [full, setFull] = useState(false);
+  const [brushOpen, setBrushOpen] = useState(false);
   const [undoDepth, setUndoDepth] = useState(0);
   const [redoDepth, setRedoDepth] = useState(0);
   const [renaming, setRenaming] = useState("");
@@ -259,7 +280,7 @@ export default function DrawPage() {
   const [textSize, setTextSize] = useState(48);
   const [textFont, setTextFont] = useState("sans-serif");
   const [recents, setRecents] = useState<string[]>(loadRecents);
-  const [thumbBust, setThumbBust] = useState(0);
+  const [thumbBust, setThumbBust] = useState<Record<string, number>>({});
   const [spaceDown, setSpaceDown] = useState(false);
   const [panning, setPanning] = useState(false);
   const [placePages, setPlacePages] = useState<Page[]>([]);
@@ -329,6 +350,8 @@ export default function DrawPage() {
   const pinchStartRef = useRef<{ dist: number; zoom: number } | null>(null);
   const spaceRef = useRef(false);
   const ringRef = useRef<HTMLDivElement>(null);
+  const fullRef = useRef(false);
+  const brushRef = useRef(false);
 
   const updateLive = useCallback((patch: Partial<LiveSettings>) => {
     const next = { ...liveRef.current, ...patch };
@@ -382,7 +405,9 @@ export default function DrawPage() {
       setFrames((prev) => prev.map((f) => (f.id === res.id ? res : f)));
       saveStateRef.current.dirty = false;
       setDirty(false);
-      setThumbBust((n) => n + 1);
+      // Bust only the saved frame's thumbnail: a global counter refetches
+      // every strip thumb on every save.
+      setThumbBust((m) => ({ ...m, [res.id]: (m[res.id] ?? 0) + 1 }));
       if (!silent) setNotice("Saved.");
       return res;
     } catch (e) {
@@ -393,7 +418,12 @@ export default function DrawPage() {
       setBusy(false);
       if (saveStateRef.current.queued) {
         saveStateRef.current.queued = false;
-        void save(true);
+        // Re-arm instead of firing at once: strokes that landed mid-save
+        // wait out a full idle delay like any other edit.
+        if (saveTimerRef.current) window.clearTimeout(saveTimerRef.current);
+        saveTimerRef.current = window.setTimeout(() => {
+          if (saveStateRef.current.dirty && !document.hidden) void save(true);
+        }, AUTOSAVE_MS);
       }
     }
   }, []);
@@ -419,7 +449,16 @@ export default function DrawPage() {
     });
   }, []);
 
-  const fitZoom = useCallback(() => {
+  // Centers the paper in its padded scroll area (called after fit/frame
+  // switches settle, so the paper starts centered yet stays draggable).
+  const centerPaper = useCallback(() => {
+    const el = viewportRef.current;
+    if (!el) return;
+    el.scrollLeft = Math.max(0, (el.scrollWidth - el.clientWidth) / 2);
+    el.scrollTop = Math.max(0, (el.scrollHeight - el.clientHeight) / 2);
+  }, []);
+
+  const fitZoom = useCallback((tall = false) => {
     const el = viewportRef.current;
     const engine = engineRef.current;
     if (!el || !engine) return;
@@ -429,7 +468,7 @@ export default function DrawPage() {
     // ratchet zoom down a little further on each frame switch.
     const heightBudget = Math.max(
       200,
-      document.documentElement.clientHeight * 0.7 - pad,
+      document.documentElement.clientHeight * (tall ? 0.94 : 0.7) - pad,
     );
     const z = Math.min(
       (el.clientWidth - pad) / engine.width,
@@ -438,7 +477,32 @@ export default function DrawPage() {
     const nz = clamp(z > 0 && isFinite(z) ? z : 1, 0.1, 4);
     zoomRef.current = nz;
     setZoom(nz);
-  }, []);
+    window.setTimeout(centerPaper, 50);
+  }, [centerPaper]);
+
+  // Fullscreen canvas mode: the same panel restyles into a fixed overlay
+  // (same canvas element + engine, so no state is lost), with a compact
+  // floating toolbar instead of the side panels.
+  const setFullMode = useCallback((v: boolean) => {
+    fullRef.current = v;
+    setFull(v);
+    if (!v) {
+      brushRef.current = false;
+      setBrushOpen(false);
+    } else {
+      window.setTimeout(() => fitZoom(true), 60);
+    }
+  }, [fitZoom]);
+
+  // Lock page scroll behind the fullscreen overlay.
+  useEffect(() => {
+    if (!full) return;
+    const prev = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => {
+      document.body.style.overflow = prev;
+    };
+  }, [full]);
 
   // Reload restores the persisted project (validated against the server
   // list); the projectId effect below publishes and loads frames.
@@ -619,6 +683,20 @@ export default function DrawPage() {
           return;
         }
       }
+      if (e.key === "Escape") {
+        // Selection already cleared above: close popup, then fullscreen.
+        if (brushRef.current) {
+          e.preventDefault();
+          brushRef.current = false;
+          setBrushOpen(false);
+          return;
+        }
+        if (fullRef.current) {
+          e.preventDefault();
+          setFullMode(false);
+          return;
+        }
+      }
       const eng = engineRef.current;
       const k = e.key.toLowerCase();
       if ((e.ctrlKey || e.metaKey) && k === "z") {
@@ -664,6 +742,8 @@ export default function DrawPage() {
         const t = TOOLS.find((t) => t.key.toLowerCase() === k);
         if (t) {
           updateLive({ tool: t.id });
+        } else if (k === "f" && frameIdRef.current) {
+          setFullMode(!fullRef.current);
         } else if (e.key === "[") {
           const s = liveRef.current.size;
           updateLive({ size: clamp(s - 1, 1, 128), presetId: "custom" });
@@ -767,10 +847,18 @@ export default function DrawPage() {
     }
     const d = Math.max(6, Math.round(st.size * zoomRef.current));
     ring.style.display = "block";
+    // The ring lives in the scrolling viewport (not the canvas): anchor it
+    // with client coords + scroll. offsetX breaks under canvas margins
+    // (fullscreen centering) and viewport scroll.
+    const vp = viewportRef.current;
+    if (!vp) return;
+    const vr = vp.getBoundingClientRect();
+    const rx = e.clientX - vr.left + vp.scrollLeft;
+    const ry = e.clientY - vr.top + vp.scrollTop;
     ring.style.width = `${d}px`;
     ring.style.height = `${d}px`;
-    ring.style.left = `${e.nativeEvent.offsetX - d / 2}px`;
-    ring.style.top = `${e.nativeEvent.offsetY - d / 2}px`;
+    ring.style.left = `${rx - d / 2}px`;
+    ring.style.top = `${ry - d / 2}px`;
   };
 
   const hideRing = () => {
@@ -906,6 +994,8 @@ export default function DrawPage() {
     setFrames((prev) => [...prev, frame]);
     setDrawFrame(projectId, frame.id);
     setFrameId(frame.id);
+    // New frames land after the cursor, not the strip end.
+    await placeAfter(frame.id, frameIdRef.current, frame);
   };
 
   const [renamingFrame, setRenamingFrame] = useState<string | null>(null);
@@ -1013,8 +1103,86 @@ export default function DrawPage() {
       setFrames((prev) => [...prev, copy]);
       setFrameId(copy.id);
       setNotice(`Duplicated as "${copy.name}".`);
+      // Land the copy right after its source instead of at the strip end.
+      await placeAfter(copy.id, f.id, copy);
     } catch (e) {
       setNotice(`Duplicate failed: ${(e as Error).message}`);
+    }
+  };
+
+  // Cohesion: send frames to the timeline without leaving Draw. Resolves
+  // the stored current timeline, else the first one.
+  const resolveScene = async () => {
+    if (!projectId) return null;
+    const scenes = await api.listScenes(projectId);
+    if (scenes.length === 0) return null;
+    const stored = getCurrentScene(projectId);
+    const pick = scenes.find((s) => s.id === stored) ?? scenes[0];
+    setCurrentScene(projectId, pick.id);
+    return pick;
+  };
+
+  // Insert a fresh frame id right after `afterId` in the current
+  // sequence (new/duplicate land after the cursor, not the strip end).
+  const placeAfter = async (id: string, afterId: string, row?: DrawFrame) => {
+    const sid = sequenceIdRef.current;
+    if (!projectId || !sid || !afterId) return;
+    const list = seqFrames;
+    if (!list.some((x) => x.id === afterId)) return;
+    const byId = new Map(list.map((x) => [x.id, x]));
+    if (row) byId.set(row.id, row);
+    const ids = list.map((x) => x.id).filter((x) => x !== id);
+    const pos = ids.indexOf(afterId) + 1;
+    const finalIds = [...ids.slice(0, pos), id, ...ids.slice(pos)];
+    const next = finalIds.map((x) => byId.get(x)!).filter(Boolean);
+    if (next.length !== byId.size) return;
+    setFrames((prev) => {
+      const others = prev.filter((x) => !byId.has(x.id));
+      return [...others, ...next];
+    });
+    try {
+      await api.orderSequenceFrames(sid, finalIds);
+    } catch (e) {
+      setNotice(`Reorder failed: ${(e as Error).message}`);
+      try {
+        setFrames(await api.listFrames(projectId));
+      } catch {
+        // Keep the optimistic order when even the revert fails.
+      }
+    }
+  };
+
+  const sendFrameToRender = async (id: string) => {
+    const f = frames.find((x) => x.id === id);
+    if (!f) return;
+    try {
+      const scene = await resolveScene();
+      if (!scene) {
+        setNotice("No timeline yet — create one on the Render tab first.");
+        return;
+      }
+      await api.addClip(scene.id, { kind: "frame", source_id: id, duration: 2 });
+      setNotice(`Sent "${f.name || "frame"}" to "${scene.name}" — open Render to cut.`);
+    } catch (e) {
+      setNotice(`Send failed: ${(e as Error).message}`);
+    }
+  };
+
+  const sendSequenceToRender = async () => {
+    if (seqFrames.length === 0) return;
+    try {
+      const scene = await resolveScene();
+      if (!scene) {
+        setNotice("No timeline yet — create one on the Render tab first.");
+        return;
+      }
+      await api.addClipsBatch(
+        scene.id,
+        seqFrames.map((f) => ({ kind: "frame", source_id: f.id, duration: 2 })),
+      );
+      setNotice(`Sent ${seqFrames.length} frames to "${scene.name}" — open Render to cut.`);
+    } catch (e) {
+      setNotice(`Send failed: ${(e as Error).message}`);
     }
   };
 
@@ -1302,7 +1470,8 @@ export default function DrawPage() {
                 {Math.round(zoom * 100)}%
               </span>
               <IconBtn label="Zoom in" onClick={() => { const nz = clamp(zoomRef.current * 1.25, 0.1, 8); zoomRef.current = nz; setZoom(nz); }}>+</IconBtn>
-              <IconBtn label="Fit to view" onClick={fitZoom}>⤢</IconBtn>
+              <IconBtn label="Fit to view" onClick={() => fitZoom()}>⤢</IconBtn>
+              <IconBtn label="Fullscreen canvas (F)" onClick={() => setFullMode(true)}>⛶</IconBtn>
               <Btn small onClick={() => { zoomRef.current = 1; setZoom(1); }} title="Actual size">1:1</Btn>
               <span style={{ fontSize: 11, color: "var(--kv-faint)" }} title="Hold Ctrl (or pinch) while scrolling to zoom; plain scroll moves the page">
                 Ctrl+scroll zooms
@@ -1715,15 +1884,69 @@ export default function DrawPage() {
             )}
 
             <div
-              style={{
-                position: "relative",
-                background: "var(--kv-inset)",
-                border: "1px solid var(--kv-border)",
-                borderRadius: "var(--kv-radius)",
-                padding: 16,
-                boxShadow: "var(--kv-shadow-hard)",
-              }}
+              style={
+                full
+                  ? {
+                      position: "fixed",
+                      inset: 0,
+                      zIndex: 200,
+                      background: "#0b0b0e",
+                      padding: 10,
+                      display: "flex",
+                      flexDirection: "column",
+                      gap: 8,
+                      overflow: "hidden",
+                    }
+                  : {
+                      position: "relative",
+                      background: "var(--kv-inset)",
+                      border: "1px solid var(--kv-border)",
+                      borderRadius: "var(--kv-radius)",
+                      padding: 16,
+                      boxShadow: "var(--kv-shadow-hard)",
+                    }
+              }
             >
+              {full && (
+                <div style={{ display: "flex", alignItems: "center", gap: 6, flexShrink: 0 }}>
+                  <IconBtn label="Exit fullscreen (Esc)" onClick={() => setFullMode(false)}>×</IconBtn>
+                  <span style={{ fontWeight: 700, fontSize: 14, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                    {frame.name || "Frame"}
+                  </span>
+                  <span className="kv-nums" style={{ fontSize: 12, color: "var(--kv-muted)" }}>
+                    {frame.width}×{frame.height} · {Math.round(zoom * 100)}%
+                  </span>
+                  <span style={{ flex: 1 }} />
+                  <IconBtn label="Undo (Ctrl+Z)" disabled={undoDepth === 0} onClick={doUndo}>↩</IconBtn>
+                  <IconBtn label="Redo (Ctrl+Shift+Z)" disabled={redoDepth === 0} onClick={doRedo}>↪</IconBtn>
+                  <PrimaryBtn small onClick={() => save(false)} disabled={busy}>
+                    {busy ? "Saving…" : dirty ? "● Save" : "✓"}
+                  </PrimaryBtn>
+                  <IconBtn label="Zoom out" onClick={() => { const nz = clamp(zoomRef.current / 1.25, 0.1, 8); zoomRef.current = nz; setZoom(nz); }}>−</IconBtn>
+                  <IconBtn label="Fit to view" onClick={() => fitZoom(true)}>⤢</IconBtn>
+                  <IconBtn label="Zoom in" onClick={() => { const nz = clamp(zoomRef.current * 1.25, 0.1, 8); zoomRef.current = nz; setZoom(nz); }}>+</IconBtn>
+                  <Btn
+                    small
+                    active={brushOpen}
+                    title="Brushes, size and colors"
+                    onClick={() => {
+                      brushRef.current = !brushOpen;
+                      setBrushOpen(!brushOpen);
+                    }}
+                  >
+                    Brushes
+                  </Btn>
+                  <Btn
+                    small
+                    active={onion}
+                    title="Onion skin: show neighboring frames under the canvas"
+                    onClick={() => setOnion(!onion)}
+                  >
+                    ◑
+                  </Btn>
+                </div>
+              )}
+              {!full && (
               <div className="kv-floatbar" role="toolbar" aria-label="Drawing tools">
                 {TOOLS.map((t) => (
                   <Btn
@@ -1737,7 +1960,46 @@ export default function DrawPage() {
                   </Btn>
                 ))}
               </div>
-              {live.tool === "select" && (
+              )}
+              {full && (
+                <div
+                  role="toolbar"
+                  aria-label="Drawing tools"
+                  style={{
+                    position: "absolute",
+                    left: 18,
+                    top: 62,
+                    zIndex: 7,
+                    display: "flex",
+                    flexDirection: "column",
+                    gap: 4,
+                    background: "rgba(12,12,16,0.85)",
+                    border: "1px solid var(--kv-border)",
+                    borderRadius: 8,
+                    padding: 6,
+                  }}
+                >
+                  {TOOLS.map((t) => (
+                    <Btn
+                      key={t.id}
+                      small
+                      active={live.tool === t.id}
+                      onClick={() => updateLive({ tool: t.id })}
+                      title={`${t.label} (${t.key})`}
+                      style={{ minWidth: 54 }}
+                    >
+                      {SHORT_LABEL[t.id]}
+                    </Btn>
+                  ))}
+                  {live.tool === "select" && (
+                    <>
+                      <Btn small active={live.selectMode === "all"} onClick={() => updateLive({ selectMode: "all" })} title="Move the whole marquee rectangle, background included" style={{ minWidth: 54 }}>All</Btn>
+                      <Btn small active={live.selectMode === "ink"} onClick={() => updateLive({ selectMode: "ink" })} title="Move only dark ink strokes; the background stays intact" style={{ minWidth: 54 }}>Ink</Btn>
+                    </>
+                  )}
+                </div>
+              )}
+              {!full && live.tool === "select" && (
                 <div
                   className="kv-floatbar"
                   role="toolbar"
@@ -1766,9 +2028,10 @@ export default function DrawPage() {
                 ref={viewportRef}
                 style={{
                   overflow: "auto",
-                  maxHeight: "70vh",
+                  maxHeight: full ? "none" : "70vh",
+                  height: full ? "calc(100vh - 148px)" : undefined,
                   borderRadius: 4,
-                  marginTop: 76,
+                  marginTop: full ? 0 : 76,
                   cursor,
                   background: "#000",
                   position: "relative",
@@ -1786,6 +2049,17 @@ export default function DrawPage() {
                     zIndex: 5,
                   }}
                 />
+                <div
+                  style={{
+                    minWidth: "100%",
+                    minHeight: "100%",
+                    width: "max-content",
+                    boxSizing: "border-box",
+                    // Breathing room around the paper so it can be dragged
+                    // anywhere in the container, even when it fits on screen.
+                    padding: "30vh 30vw",
+                  }}
+                >
                 <canvas
                   ref={canvasRef}
                   style={{
@@ -1805,7 +2079,131 @@ export default function DrawPage() {
                   }}
                   onContextMenu={(e) => e.preventDefault()}
                 />
+                </div>
               </div>
+              {full && (
+                <div
+                  aria-label="Frames"
+                  style={{
+                    display: "flex",
+                    gap: 6,
+                    alignItems: "center",
+                    flexShrink: 0,
+                    overflowX: "auto",
+                    padding: "2px 2px 0",
+                  }}
+                >
+                  {seqFrames.map((f, i) => (
+                    <button
+                      key={f.id}
+                      type="button"
+                      onClick={() => openFrame(f.id)}
+                      title={f.name || `Frame ${i + 1}`}
+                      aria-label={`Open ${f.name || `frame ${i + 1}`}`}
+                      style={{
+                        flexShrink: 0,
+                        padding: 2,
+                        borderRadius: 6,
+                        cursor: "pointer",
+                        background: "transparent",
+                        border:
+                          f.id === frameId
+                            ? "2px solid var(--kv-accent)"
+                            : "1px solid var(--kv-border)",
+                      }}
+                    >
+                      <img
+                        crossOrigin="use-credentials"
+                        src={`${api.frameThumbnailUrl(f.id)}?v=${thumbBust[f.id] ?? 0}`}
+                        alt=""
+                        width={72}
+                        height={40}
+                        style={{ display: "block", borderRadius: 4, objectFit: "cover", background: "#f6f1e8" }}
+                        loading="lazy"
+                        draggable={false}
+                      />
+                    </button>
+                  ))}
+                  <IconBtn onClick={newFrame} label="New frame">＋</IconBtn>
+                </div>
+              )}
+              {full && brushOpen && (
+                <div
+                  role="dialog"
+                  aria-label="Brushes, size and colors"
+                  style={{
+                    position: "absolute",
+                    left: 92,
+                    top: 62,
+                    zIndex: 8,
+                    width: 276,
+                    maxHeight: "calc(100vh - 150px)",
+                    overflowY: "auto",
+                    background: "var(--kv-surface)",
+                    border: "1px solid var(--kv-border-strong)",
+                    borderRadius: 10,
+                    padding: 10,
+                    boxShadow: "var(--kv-shadow-hard)",
+                  }}
+                >
+                  <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
+                    <span style={{ fontWeight: 700, fontSize: 13 }}>
+                      Brush{live.presetId === "custom" ? " - custom" : ""}
+                    </span>
+                    <span style={{ flex: 1 }} />
+                    <IconBtn label="Close brushes" onClick={() => { brushRef.current = false; setBrushOpen(false); }}>×</IconBtn>
+                  </div>
+                  <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 10 }}>
+                    {BRUSH_PRESETS.map((p) => (
+                      <BrushSwatch key={p.id} preset={p} active={live.presetId === p.id} onClick={() => applyPreset(p.id)} />
+                    ))}
+                  </div>
+                  <Slider label="Size" min={1} max={128} value={live.size} onChange={(v) => customBrush({ size: v })} />
+                  <div style={{ fontSize: 12, fontWeight: 700, margin: "8px 0 6px" }}>Color</div>
+                  <div style={{ display: "flex", gap: 4, flexWrap: "wrap", marginBottom: recents.length > 0 ? 6 : 0 }}>
+                    {INKS.map((c) => (
+                      <button
+                        key={c}
+                        type="button"
+                        title={c}
+                        aria-label={`Ink ${c}`}
+                        onClick={() => updateLive({ color: c })}
+                        style={{
+                          width: 24,
+                          height: 24,
+                          borderRadius: 6,
+                          background: c,
+                          border: live.color === c ? "2px solid var(--kv-accent)" : "1px solid var(--kv-border-strong)",
+                          cursor: "pointer",
+                          padding: 0,
+                        }}
+                      />
+                    ))}
+                  </div>
+                  {recents.length > 0 && (
+                    <div style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
+                      {recents.map((c) => (
+                        <button
+                          key={c}
+                          type="button"
+                          title={`Recent ${c}`}
+                          aria-label={`Recent ${c}`}
+                          onClick={() => updateLive({ color: c })}
+                          style={{
+                            width: 24,
+                            height: 24,
+                            borderRadius: 999,
+                            background: c,
+                            border: live.color === c ? "2px solid var(--kv-accent)" : "1px solid var(--kv-border-strong)",
+                            cursor: "pointer",
+                            padding: 0,
+                          }}
+                        />
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
               {playing && (
                 <div
                   className="kv-nums"
@@ -1886,6 +2284,7 @@ export default function DrawPage() {
                 </IconBtn>
                 <IconBtn onClick={newFrame} label="New frame">＋</IconBtn>
                 <IconBtn disabled={!frame} onClick={duplicateFrame} label="Duplicate frame">⧉</IconBtn>
+                <IconBtn disabled={seqFrames.length === 0} onClick={() => void sendSequenceToRender()} label="Send this sequence to the current timeline as clips">▸▸</IconBtn>
                 <IconBtn danger disabled={!frame} onClick={removeFrame} label="Delete frame">×</IconBtn>
               </div>
               <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8, fontSize: 13 }}>
@@ -2032,7 +2431,7 @@ export default function DrawPage() {
                     >
                       <img
                         crossOrigin="use-credentials"
-                        src={`${api.frameThumbnailUrl(f.id)}?v=${thumbBust}`}
+                        src={`${api.frameThumbnailUrl(f.id)}?v=${thumbBust[f.id] ?? 0}`}
                         alt=""
                         width={120}
                         height={68}
@@ -2048,9 +2447,29 @@ export default function DrawPage() {
                       />
                       <div
                         className="kv-nums"
-                        style={{ fontSize: 11, marginTop: 4, opacity: selected ? 1 : 0.75 }}
+                        style={{ fontSize: 11, marginTop: 4, opacity: selected ? 1 : 0.75, display: "flex", alignItems: "center" }}
                       >
-                        FR {String(i + 1).padStart(2, "0")}
+                        <span>FR {String(i + 1).padStart(2, "0")}</span>
+                        <span style={{ flex: 1 }} />
+                        <span
+                          role="button"
+                          tabIndex={0}
+                          title="Send this frame to the current timeline"
+                          aria-label={`Send ${f.name || `frame ${i + 1}`} to the timeline`}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            void sendFrameToRender(f.id);
+                          }}
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter") {
+                              e.stopPropagation();
+                              void sendFrameToRender(f.id);
+                            }
+                          }}
+                          style={{ cursor: "pointer", fontSize: 13, padding: "0 2px", color: "var(--kv-accent)" }}
+                        >
+                          ▸
+                        </span>
                       </div>
                       {renamingFrame === f.id ? (
                         <TextInput

@@ -66,6 +66,13 @@ Amendment: Draw select/transform. Strokes select once on first marquee
 or background resets; cross-layer copy/cut/paste rides the same
 snapshot. The agent and Media/scan handoffs share a current-frame
 notion so "draw on this frame" lands where the user is looking.
+Live strokes paint incrementally (suffix dabs only, stroke-persistent
+rand, one paint per animation frame, no snapshot restore per move);
+the release pass keeps the canonical full repaint, pixel-identical.
+Autosave waits 4s idle and never chains back-to-back; only the saved
+frame's thumbnail refetches. The paper lives in a padded scroll bed
+(30vh/30vw, 60vh/60vw fullscreen) so H/Space-drag pans it in its
+container; fit and frame switches re-center via scroll.
 
 ## ADR-9: M4/M5 finish pragmatics (accepted)
 
@@ -305,6 +312,17 @@ in Media, `attach_frame` defaults to false on the API, the agent tool,
 and MCP — frames are created only on explicit request ("as a frame",
 "add it", timeline placement), staged in an "AI generations" sequence
 so hand-drawn sequences are never polluted.
+
+Amendment: tab cohesion. Every tab sends to the others without leaving
+context: Draw sends a frame or a whole sequence to the timeline
+(stored current scene or first); timeline clips open back in Draw
+(frames directly, panels/stills/generations/pages each mint a fresh
+draw frame via frameFromMedia, videos explode into the current
+sequence); Media generations send to Render/Draw/Scan and pages send
+to Draw/Render; new/duplicated frames insert after the cursor. Media
+send buttons are compact icon buttons with tooltip labels. No new
+backend: all flows reuse addClip/addClipsBatch/frameFromMedia/
+videoToFrames/order/uploadPage.
 
 Amendment: manga UI feel + impact flash. Diagonal language: alternating
 tilted bento tiles, a corner-cut splash panel on the focal tile, tilted

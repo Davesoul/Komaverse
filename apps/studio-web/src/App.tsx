@@ -82,12 +82,19 @@ export default function App() {
     if (prefersReducedMotion() || !mainRef.current) return;
     import("animejs")
       .then(({ animate }) => {
-        if (!mainRef.current) return;
-        animate(mainRef.current, {
+        const el = mainRef.current;
+        if (!el) return;
+        animate(el, {
           opacity: [0.35, 1],
           y: [10, 0],
           duration: 350,
           ease: "outExpo",
+          // Leftover inline transform/opacity would trap position:fixed
+          // descendants (e.g. Draw fullscreen) inside this container.
+          onComplete: () => {
+            el.style.transform = "";
+            el.style.opacity = "";
+          },
         });
       })
       .catch(() => {});
@@ -102,7 +109,7 @@ export default function App() {
       })
       .catch(() => {
         setUser(null);
-        setApiStatus("offline (start backend on :8000)");
+        setApiStatus("offline (start backend on :8001)");
       });
     setOnUnauthorized(() => setUser(null));
   }, []);

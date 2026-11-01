@@ -104,3 +104,5 @@ export type StudioTab = "home" | "scan" | "draw" | "render" | "media";
 export function gotoTab(tab: StudioTab) {
   window.dispatchEvent(new CustomEvent("komaverse:goto-tab", { detail: tab }));
 }
+
+

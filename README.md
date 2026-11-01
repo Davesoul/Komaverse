@@ -20,11 +20,18 @@ started Oct 28, 2026.
   Japanese/modern presets, Ctrl+scroll zoom), frames strip under the canvas,
   last-open frame auto-opens per project, canvas-native playback at 2–24 fps
   with loop, Krita-style onion skin (red previous / green next, counts +
-  opacity, never exported)
+  opacity, never exported), fullscreen canvas mode (F) with a compact
+  tool rail and a Brushes popup (presets, size, colors); frames and
+  whole sequences send to the timeline, new frames land after the cursor;
+  the paper pans inside a padded scroll bed (H tool or Space-drag) and
+  re-centers on fit/frame switch
 - **Render:** CapCut-style V1/A1/S1 timeline (proportional blocks, second
   ruler, tenths timecode, zoom, drag-reorder, edge-trim with cue `end_sec`),
   per-clip inspector (duration steppers, motion), scenes + clips timeline
-  (panels, frames, stills), Ken Burns motion, voiceover recording over
+  (panels, frames, stills) with audio waveforms on cues and Ctrl+wheel
+  zoom + fit-to-width, sidebar grouped by sequence with search,
+  clips open back in Draw (frames directly, stills place, video
+  explodes), Ken Burns motion, voiceover recording over
   playback with auto-cue, SRT subtitles (S1 lane, preview captions, burned
   into MP4 + VTT sidecar), H.264 MP4 export with contain-fit hi-res preview
 - **Media:** per-project library grid (scans, takes, generations, renders)
@@ -179,7 +186,8 @@ via `PUT /api/v1/agent/config`.
   the agent ("transcribe the latest take", optionally "...as subtitles").
 - **Segmentation (SAM 3.1):** `META_SAM_MODEL` (`sam-3.1`) powers the
   `sam` panel detector — text-prompted geometry instead of chat-vision
-  boxes, same 0–1000 contract as YOLO, heuristic fallback.
+  boxes (native segmentation grammar, scaled to pixels),
+  heuristic fallback.
 - **Panel detection via vision:** detector `cloud` with
   `AI_VISION_MODEL`, `meta`, or `OPENROUTER_VISION_MODEL` — same
   0–1000 box contract as YOLO.

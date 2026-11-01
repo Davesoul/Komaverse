@@ -151,7 +151,7 @@ function strokeOptions(s: BrushSettings, diameter: number, last: boolean): Strok
 }
 
 /** Deterministic PRNG so live repaints (snapshot → full stroke) match. */
-function mulberry32(seed: number): () => number {
+export function mulberry32(seed: number): () => number {
   let a = seed >>> 0;
   return () => {
     a |= 0;
@@ -163,15 +163,19 @@ function mulberry32(seed: number): () => number {
 }
 
 /** Dab renderer: stamped marks along the stroke for texture brushes. */
-function paintDabs(
+export const DAB_SEED = 0x9e3779b9;
+
+export function paintDabs(
   ctx: CanvasRenderingContext2D,
   points: StrokeInput[],
   s: BrushSettings,
   color: string,
   erase: boolean,
   last: boolean,
-): void {
-  if (points.length === 0) return;
+  fromStep = 0,
+  rand?: () => number,
+): number {
+  if (points.length === 0) return 0;
   const mode = s.dab ?? "round";
   const spacing = Math.max(1, s.size * (s.spacing ?? 0.15));
   const jitter = s.jitter ?? 0.3;
@@ -179,7 +183,10 @@ function paintDabs(
   const grain = s.grain ?? 0;
   // Fixed seed: every live repaint restarts the same sequence, so dabs
   // stay put while drawing instead of shimmering as points accumulate.
-  const rand = mulberry32(0x9e3779b9);
+  // Incremental live painting passes the stroke-persistent rand and a
+  // fromStep: earlier steps keep the draws they already consumed, so the
+  // suffix lands exactly where a full repaint would put it.
+  const r = rand ?? mulberry32(DAB_SEED);
   // Arc-length walk so dab density is speed-independent.
   type Step = { x: number; y: number; dx: number; dy: number; p: number; i: number };
   const steps: Step[] = [];
@@ -217,9 +224,9 @@ function paintDabs(
   ctx.globalCompositeOperation = erase ? "destination-out" : "source-over";
   ctx.fillStyle = erase ? "#000000" : color;
   ctx.strokeStyle = erase ? "#000000" : color;
-  for (const st of steps) {
-    const jx = (rand() - 0.5) * jitter * s.size;
-    const jy = (rand() - 0.5) * jitter * s.size;
+  for (const st of fromStep > 0 ? steps.slice(fromStep) : steps) {
+    const jx = (r() - 0.5) * jitter * s.size;
+    const jy = (r() - 0.5) * jitter * s.size;
     const x = st.x + jx;
     const y = st.y + jy;
     const w = s.size * (0.35 + 0.65 * Math.min(1, Math.max(0, st.p)));
@@ -274,11 +281,11 @@ function paintDabs(
       ctx.arc(x, y, Math.max(0.5, w * 0.16), 0, Math.PI * 2);
       ctx.fill();
       if (last) {
-        const n = 2 + Math.floor(rand() * 4);
+        const n = 2 + Math.floor(r() * 4);
         for (let k = 0; k < n; k++) {
-          const rr = (0.5 + rand() * 2.2) * w * 0.5;
-          const aa = rand() * Math.PI * 2;
-          const dr = Math.max(0.4, w * 0.06 * (0.4 + rand()));
+          const rr = (0.5 + r() * 2.2) * w * 0.5;
+          const aa = r() * Math.PI * 2;
+          const dr = Math.max(0.4, w * 0.06 * (0.4 + r()));
           ctx.beginPath();
           ctx.arc(x + Math.cos(aa) * rr, y + Math.sin(aa) * rr, dr, 0, Math.PI * 2);
           ctx.fill();
@@ -290,8 +297,8 @@ function paintDabs(
       ctx.save();
       ctx.globalCompositeOperation = "destination-out";
       for (let k = 0; k < n; k++) {
-        const rr = (rand() - 0.2) * w * 0.5;
-        const aa = rand() * Math.PI * 2;
+        const rr = (r() - 0.2) * w * 0.5;
+        const aa = r() * Math.PI * 2;
         ctx.beginPath();
         ctx.arc(x + Math.cos(aa) * rr, y + Math.sin(aa) * rr, Math.max(0.4, w * 0.05), 0, Math.PI * 2);
         ctx.fill();
@@ -300,6 +307,7 @@ function paintDabs(
     }
   }
   ctx.restore();
+  return steps.length;
 }
 
 /** Paint the full stroke polygon onto ctx (logical coords; caller owns transform). */

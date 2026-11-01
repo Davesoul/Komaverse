@@ -12,7 +12,7 @@ import {
   type Sequence,
   type StorageUsage,
 } from "../api";
-import { getCurrentProject, getCurrentScene, getCurrentSequence, gotoTab, setCurrentProject, setCurrentSequence } from "../lib/studio";
+import { getCurrentProject, getCurrentScene, getCurrentSequence, gotoTab, setCurrentProject, setCurrentScene, setCurrentSequence, setDrawFrame } from "../lib/studio";
 import {
   Btn,
   ChapterHeader,
@@ -488,6 +488,76 @@ export default function MediaPage() {
     }
   };
 
+  // Cohesion: resolve the stored current timeline, else the first one.
+  const resolveScene = async () => {
+    if (!project) return null;
+    const scenes = await api.listScenes(project.id);
+    if (scenes.length === 0) return null;
+    const stored = getCurrentScene(project.id);
+    const pick = scenes.find((s) => s.id === stored) ?? scenes[0];
+    setCurrentScene(project.id, pick.id);
+    return pick;
+  };
+
+  // Generations live in the gallery: framing one stages it for Draw or Render.
+  const frameGen = async (job: Job) => {
+    if (!project) throw new Error("no project");
+    const f = await api.frameFromMedia(project.id, `@gen:${job.id}`);
+    setFrames(await api.listFrames(project.id));
+    return f;
+  };
+
+  // Video generations have no still: capture the first frame client-side
+  // (credentialed CORS keeps the canvas clean) and import it as a page.
+  const doVideoToScan = async (job: Job) => {
+    if (!project || !job.result_url) return;
+    setBusy("Sending…");
+    try {
+      const blob: Blob = await new Promise((resolve, reject) => {
+        const video = document.createElement("video");
+        video.muted = true;
+        video.setAttribute("playsinline", "");
+        video.crossOrigin = "use-credentials";
+        video.preload = "auto";
+        const cleanup = () => {
+          video.removeAttribute("src");
+          video.load();
+        };
+        video.onerror = () => {
+          cleanup();
+          reject(new Error("video load failed"));
+        };
+        video.onloadedmetadata = () => {
+          video.currentTime = Math.min(0.1, (video.duration || 1) / 2);
+        };
+        video.onseeked = () => {
+          try {
+            const canvas = document.createElement("canvas");
+            canvas.width = video.videoWidth || 1280;
+            canvas.height = video.videoHeight || 720;
+            canvas.getContext("2d")?.drawImage(video, 0, 0, canvas.width, canvas.height);
+            canvas.toBlob((b) => {
+              cleanup();
+              if (b) resolve(b);
+              else reject(new Error("frame capture failed"));
+            }, "image/png");
+          } catch (e) {
+            cleanup();
+            reject(e);
+          }
+        };
+        video.src = mediaUrl(job.result_url as string);
+      });
+      await api.uploadPage(project.id, new File([blob], `${job.prompt?.slice(0, 30) || "video"}.png`, { type: "image/png" }));
+      await refresh(project.id);
+      setNotice("Imported the opening frame as a scan page — open it in Scan.");
+    } catch (e) {
+      setNotice(`Send failed: ${(e as Error).message}`);
+    } finally {
+      setBusy("");
+    }
+  };
+
   const doAddVideoToTimeline = async (job: Job) => {
     if (!project) return;
     setBusy("Adding to timeline…");
@@ -823,7 +893,45 @@ export default function MediaPage() {
                       <div className="kv-nums" style={{ color: "var(--kv-muted)" }}>
                         {pg.width}×{pg.height} · {pg.panels.length} panel{pg.panels.length === 1 ? "" : "s"}
                       </div>
-                      <div style={{ marginTop: 6 }}>
+                      <div style={{ marginTop: 6, display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
+                        <IconBtn
+                          label="Send to Draw: create a new draw frame from this page"
+                          onClick={async () => {
+                            if (!project) return;
+                            setBusy("Sending…");
+                            try {
+                              const f = await api.frameFromMedia(project.id, `@media:${pg.id}`);
+                              setFrames(await api.listFrames(project.id));
+                              setDrawFrame(project.id, f.id);
+                              gotoTab("draw");
+                            } catch (e) {
+                              setNotice(`Send failed: ${(e as Error).message}`);
+                            } finally {
+                              setBusy("");
+                            }
+                          }}
+                        >
+                          ✎
+                        </IconBtn>
+                        <IconBtn
+                          label="Send to Render: add this page as a still on the current timeline"
+                          onClick={async () => {
+                            if (!project) return;
+                            try {
+                              const scene = await resolveScene();
+                              if (!scene) {
+                                setNotice("No timeline yet — create one on the Render tab first.");
+                                return;
+                              }
+                              await api.addClip(scene.id, { kind: "media", source_id: pg.id, duration: 2 });
+                              setNotice(`Sent to "${scene.name}" — open Render to cut.`);
+                            } catch (e) {
+                              setNotice(`Send failed: ${(e as Error).message}`);
+                            }
+                          }}
+                        >
+                          ▶
+                        </IconBtn>
                         <IconBtn danger onClick={() => doDeletePage(pg, i)} label="Delete page and its scan file">
                           ×
                         </IconBtn>
@@ -995,16 +1103,15 @@ export default function MediaPage() {
                         {j.id} · {j.status}
                       </div>
                       {j.status === "done" && j.kind === "image" && (
-                        <div style={{ marginTop: 6 }}>
-                          <Btn
-                            small
-                            disabled={busy === "Framing…"}
+                        <div style={{ marginTop: 6, display: "flex", gap: 6, flexWrap: "wrap" }}>
+                          <IconBtn
+                            disabled={busy !== ""}
+                            label="Frame it: stage as a draw frame in the current sequence"
                             onClick={async () => {
                               if (!project) return;
                               setBusy("Framing…");
                               try {
-                                const f = await api.frameFromMedia(project.id, `@gen:${j.id}`);
-                                setFrames(await api.listFrames(project.id));
+                                const f = await frameGen(j);
                                 setNotice(`Framed as '${f.name}' — open it in Draw.`);
                               } catch (e) {
                                 setNotice(`Frame failed: ${(e as Error).message}`);
@@ -1013,18 +1120,86 @@ export default function MediaPage() {
                               }
                             }}
                           >
-                            Frame it
-                          </Btn>
+                            ▣
+                          </IconBtn>
+                          <IconBtn
+                            disabled={busy !== ""}
+                            label="Send to Render: frame it and add the frame to the current timeline"
+                            onClick={async () => {
+                              if (!project) return;
+                              setBusy("Sending…");
+                              try {
+                                const scene = await resolveScene();
+                                if (!scene) {
+                                  setNotice("No timeline yet — create one on the Render tab first.");
+                                  return;
+                                }
+                                const f = await frameGen(j);
+                                await api.addClip(scene.id, { kind: "frame", source_id: f.id, duration: 2 });
+                                setNotice(`Sent to "${scene.name}" — open Render to cut.`);
+                              } catch (e) {
+                                setNotice(`Send failed: ${(e as Error).message}`);
+                              } finally {
+                                setBusy("");
+                              }
+                            }}
+                          >
+                            ▶
+                          </IconBtn>
+                          <IconBtn
+                            disabled={busy !== ""}
+                            label="Send to Draw: frame it and open it in the Draw tab"
+                            onClick={async () => {
+                              if (!project) return;
+                              setBusy("Sending…");
+                              try {
+                                const f = await frameGen(j);
+                                setDrawFrame(project.id, f.id);
+                                gotoTab("draw");
+                              } catch (e) {
+                                setNotice(`Send failed: ${(e as Error).message}`);
+                              } finally {
+                                setBusy("");
+                              }
+                            }}
+                          >
+                            ✎
+                          </IconBtn>
+                          <IconBtn
+                            disabled={busy !== ""}
+                            label="Send to Scan: import this generation as a new scan page"
+                            onClick={async () => {
+                              if (!project || !j.result_url) return;
+                              setBusy("Sending…");
+                              try {
+                                const res = await fetch(mediaUrl(j.result_url), { credentials: "include" });
+                                if (!res.ok) throw new Error(`file ${res.status}`);
+                                const blob = await res.blob();
+                                await api.uploadPage(project.id, new File([blob], `${j.prompt?.slice(0, 30) || "gen"}.png`, { type: "image/png" }));
+                                await refresh(project.id);
+                                setNotice("Imported as a scan page — open it in Scan.");
+                              } catch (e) {
+                                setNotice(`Send failed: ${(e as Error).message}`);
+                              } finally {
+                                setBusy("");
+                              }
+                            }}
+                          >
+                            ◫
+                          </IconBtn>
                         </div>
                       )}
                       {j.status === "done" && j.kind === "video" && (
                         <div style={{ marginTop: 6, display: "flex", gap: 6, flexWrap: "wrap" }}>
-                          <Btn small onClick={() => void doAddVideoToTimeline(j)} title="Add as a clip to the current timeline">
-                            To timeline
-                          </Btn>
-                          <Btn small onClick={() => void doVideoToFrames(j)} title="Explode into draw frames in the current sequence">
-                            Frames to Draw
-                          </Btn>
+                          <IconBtn onClick={() => void doAddVideoToTimeline(j)} label="Send to the current timeline as a clip">
+                            ▶
+                          </IconBtn>
+                          <IconBtn onClick={() => void doVideoToFrames(j)} label="Explode into draw frames in the current sequence">
+                            ▦
+                          </IconBtn>
+                          <IconBtn onClick={() => void doVideoToScan(j)} label="Send to Scan: import the opening frame as a scan page">
+                            ◫
+                          </IconBtn>
                         </div>
                       )}
                     </div>

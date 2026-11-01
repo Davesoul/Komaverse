@@ -26,6 +26,7 @@ export default function ScanPage() {
   const [mode, setMode] = useState<Mode>("select");
   const [detector, setDetector] = useState("yolo-leoxs22");
   const [direction, setDirection] = useState("rtl");
+  const [sideQuery, setSideQuery] = useState("");
   const [autoDetect, setAutoDetect] = useState(true);
   const [busy, setBusy] = useState("");
   const [notice, setNotice] = useState("");
@@ -533,8 +534,20 @@ export default function ScanPage() {
       <div className="kv-side" style={{ width: 248, display: "flex", flexDirection: "column", gap: 16 }}>
         <div>
           <SectionTitle>Projects</SectionTitle>
+          <TextInput
+            value={sideQuery}
+            onChange={(e) => setSideQuery(e.target.value)}
+            placeholder="Search projects, pages…"
+            aria-label="Search projects and pages"
+            style={{ width: "100%", marginBottom: 6 }}
+          />
           <div style={{ display: "flex", flexDirection: "column", gap: 4, marginBottom: 8 }}>
-            {projects.map((p) => (
+            {projects.filter((p) => {
+              const q = sideQuery.trim().toLowerCase();
+              if (!q) return true;
+              if (p.name.toLowerCase().includes(q)) return true;
+              return p.pages.some((pg) => (pg.name || "").toLowerCase().includes(q));
+            }).map((p) => (
               <Btn
                 key={p.id}
                 active={p.id === project?.id}
@@ -566,7 +579,11 @@ export default function ScanPage() {
           <div>
             <SectionTitle>Pages ({project.pages.length})</SectionTitle>
             <div style={{ display: "flex", flexDirection: "column", gap: 4, marginBottom: 8 }}>
-              {project.pages.map((p, i) => (
+              {project.pages.filter((p, i) => {
+                const q = sideQuery.trim().toLowerCase();
+                if (!q) return true;
+                return (p.name || "").toLowerCase().includes(q) || `pg ${i + 1}`.includes(q) || `page ${i + 1}`.includes(q);
+              }).map((p, i) => (
                 <Btn
                   key={p.id}
                   active={p.id === page?.id}
