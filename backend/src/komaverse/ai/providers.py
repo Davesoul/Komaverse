@@ -619,6 +619,100 @@ def synthesize_freetts(
     return got.content
 
 
+# Kokoro voice ids served by the free-tts server (/api/voices), copied
+# verbatim from its known-good list so the Brain picker works even when
+# the server is down. Engine prefix added by callers ("kokoro:<name>").
+FREETTS_KNOWN_VOICES = (
+    "af_alloy", "af_ameliaearhart", "af_aoede", "af_bella", "af_heart",
+    "af_jessica", "af_kore", "af_libritts5338", "af_nicole", "af_nova",
+    "af_river", "af_sarah", "af_sky", "am_adam", "am_echo", "am_eric",
+    "am_fenrir", "am_liam", "am_libritts1272", "am_libritts6241",
+    "am_michael", "am_onyx", "am_puck", "am_santa", "am_vincentprice",
+    "bf_alice", "bf_emma", "bf_isabella", "bf_janegoodall", "bf_lily",
+    "bm_daniel", "bm_davidattenborough", "bm_fable", "bm_george",
+    "bm_lewis", "ef_dora", "em_alex", "em_santa", "ff_siwis",
+    "hf_alpha", "hf_beta", "hm_omega", "hm_psi", "if_sara", "im_nicola",
+    "jf_alpha", "jf_gongitsune", "jf_nezumi", "jf_tebukuro", "jm_kumo",
+    "pf_dora", "pm_alex", "pm_santa", "zf_xiaobei", "zf_xiaoni",
+    "zf_xiaoxiao", "zf_xiaoyi", "zm_yunjian", "zm_yunxi", "zm_yunxia",
+    "zm_yunyang",
+)
+
+
+def list_elevenlabs_voices() -> list[dict]:
+    """Live ElevenLabs voice catalog: [{id, label, maker}]. Needs the key."""
+    if not settings.elevenlabs_api_key:
+        raise ProviderError(
+            "elevenlabs voices need ELEVENLABS_API_KEY (elevenlabs.io)"
+        )
+    try:
+        res = httpx.get(
+            f"{settings.elevenlabs_base_url.rstrip('/')}/v1/voices",
+            headers={"xi-api-key": settings.elevenlabs_api_key},
+            timeout=30.0,
+        )
+    except httpx.HTTPError as exc:
+        raise ProviderUnavailable(
+            f"elevenlabs voices request failed: {exc}"
+        ) from exc
+    if res.status_code == 401:
+        raise ProviderError(
+            "elevenlabs rejected the API key (401) — check ELEVENLABS_API_KEY"
+        )
+    if res.status_code >= 400:
+        raise ProviderError(
+            f"elevenlabs voices failed ({res.status_code}): {res.text[:200]}"
+        )
+    try:
+        data = res.json()
+    except ValueError as exc:
+        raise ProviderError("elevenlabs returned non-JSON voices") from exc
+    out = []
+    for v in (data.get("voices") or [])[:100]:
+        vid = str(v.get("voice_id") or "").strip()
+        if not vid:
+            continue
+        name = str(v.get("name") or vid).strip()
+        category = str(v.get("category") or "").strip()
+        label = name if not category or category == "premade" else f"{name} · {category}"
+        out.append({"id": vid, "label": label, "maker": "ElevenLabs"})
+    return out
+
+
+def list_freetts_voices() -> tuple[list[dict], str]:
+    """(voices, source): live /api/voices ids, else the known-good fallback.
+
+    Ids are engine-prefixed ("kokoro:<name>") to match the Brain voice
+    model shape. The server is never spawned — down means "fallback".
+    """
+    base = settings.freetts_base_url.rstrip("/")
+    try:
+        # Short leash: this feeds a picker, not a generation — a dead
+        # server must fall back in ~seconds, not after a generation-scale
+        # timeout.
+        res = httpx.get(f"{base}/api/voices", timeout=4.0)
+    except httpx.HTTPError:
+        res = None
+    names: list[str] = []
+    if res is not None and res.status_code < 400:
+        try:
+            names = [str(v) for v in (res.json().get("voices") or []) if str(v).strip()]
+        except ValueError:
+            names = []
+    if names:
+        return (
+            [{"id": f"kokoro:{n}", "label": n, "maker": "Kokoro"} for n in names],
+            "live",
+        )
+    return (
+        [
+            {"id": f"kokoro:{n}", "label": n, "maker": "Kokoro"}
+            for n in FREETTS_KNOWN_VOICES
+        ],
+        "fallback",
+    )
+
+
 def get_provider(name: str) -> AIProvider:
     if name == "cloud":
         return CloudProvider()

@@ -216,6 +216,19 @@ export interface AiModelCatalog {
   meta_image?: AiModelOption[];
 }
 
+export interface VoiceOption {
+  id: string;
+  label: string;
+  maker: string;
+}
+
+export interface VoiceCatalog {
+  provider: string;
+  /** "live" from the engine, or the known-good "fallback" list. */
+  source: string;
+  voices: VoiceOption[];
+}
+
 export interface CreditEntry {
   id: string;
   delta: number;
@@ -776,6 +789,8 @@ export const api = {
     req<Job>(`/api/v1/ai/jobs/${jobId}/cancel`, { method: "POST" }),
   listJobs: () => req<Job[]>("/api/v1/ai/jobs"),
   listAiModels: () => req<AiModelCatalog>("/api/v1/ai/models"),
+  listVoices: (provider: string) =>
+    req<VoiceCatalog>(`/api/v1/ai/voices?provider=${encodeURIComponent(provider)}`),
   me: () => req<User>("/api/v1/auth/me"),
   register: (body: { email: string; password: string; name?: string }) =>
     req<User>("/api/v1/auth/register", {

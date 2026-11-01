@@ -188,6 +188,11 @@ export default function AgentDock() {
     vision: Record<string, { id: string; label: string; maker?: string }[]>;
     meta_image: { id: string; label: string; maker?: string }[];
   } | null>(null);
+  /** TTS voice picker lists per provider (live or known-good fallback). */
+  const [brainVoices, setBrainVoices] = useState<Record<
+    string,
+    { id: string; label: string; maker?: string }[]
+  > | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const panelRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -1130,6 +1135,20 @@ export default function AgentDock() {
           )
           .catch(() => {});
       }
+      if (!brainVoices) {
+        // ElevenLabs needs a key (400 when unkeyed); free-tts falls back
+        // to its known-good list when the server is down. Either way the
+        // voice row gets a real picker, not one default.
+        void Promise.allSettled([api.listVoices("elevenlabs"), api.listVoices("free-tts")]).then(
+          (rs) => {
+            const next: Record<string, { id: string; label: string; maker?: string }[]> = {};
+            const [el, ft] = rs;
+            if (el.status === "fulfilled") next.elevenlabs = el.value.voices;
+            if (ft.status === "fulfilled") next["free-tts"] = ft.value.voices;
+            if (Object.keys(next).length > 0) setBrainVoices(next);
+          },
+        );
+      }
     }
     setShowBrain((v) => !v);
   };
@@ -1145,8 +1164,11 @@ export default function AgentDock() {
     kind: BrainKind,
   ): { id: string; label: string; maker?: string }[] => {
     if (kind === "voice") {
-      // No catalog section: two known-good defaults, free text takes any id
-      // (ElevenLabs voice id, or free-tts "engine:voice").
+      // Live catalog when fetched (ElevenLabs needs a key; free-tts falls
+      // back to its known-good list with the server down), else one
+      // default per provider. Free text still takes any id.
+      const listed = brainVoices?.[brainRowProvider(kind)];
+      if (listed && listed.length > 0) return listed;
       return brainRowProvider(kind) === "elevenlabs"
         ? [{ id: "21m00Tcm4TlvDq8ikWAM", label: "Rachel (default)" }]
         : [{ id: "kokoro:af_sarah", label: "Kokoro af_sarah (default)" }];

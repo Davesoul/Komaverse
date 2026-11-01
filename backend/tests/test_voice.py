@@ -251,3 +251,89 @@ def test_voice_brain_rejects_speechless_provider(factory, user, saved_settings):
     with factory() as s, pytest.raises(HTTPException) as exc:
         agent_config(AgentConfigBody(voice_provider="meta"), session=s, user=user)
     assert exc.value.status_code == 400
+
+
+def test_list_elevenlabs_voices_ok(saved_settings, monkeypatch):
+    import komaverse.ai.providers as providers
+
+    monkeypatch.setattr(settings, "elevenlabs_api_key", "test-key")
+    seen = {}
+
+    def fake_get(url, headers=None, timeout=None):
+        seen.update(url=url, key=headers.get("xi-api-key"))
+        return FakeResp(
+            200,
+            payload={
+                "voices": [
+                    {"voice_id": "abc123", "name": "Aria", "category": "premade"},
+                    {"voice_id": "def456", "name": "Mine", "category": "cloned"},
+                    {"name": "NoId"},
+                ]
+            },
+        )
+
+    monkeypatch.setattr(providers.httpx, "get", fake_get)
+    voices = providers.list_elevenlabs_voices()
+    assert seen["url"].endswith("/v1/voices")
+    assert seen["key"] == "test-key"
+    assert voices == [
+        {"id": "abc123", "label": "Aria", "maker": "ElevenLabs"},
+        {"id": "def456", "label": "Mine · cloned", "maker": "ElevenLabs"},
+    ]
+
+
+def test_list_elevenlabs_voices_needs_key(saved_settings):
+    import komaverse.ai.providers as providers
+
+    with pytest.raises(Exception) as exc:
+        providers.list_elevenlabs_voices()
+    assert "ELEVENLABS_API_KEY" in str(exc.value)
+
+
+def test_list_freetts_voices_live(saved_settings, monkeypatch):
+    import komaverse.ai.providers as providers
+
+    monkeypatch.setattr(
+        providers.httpx,
+        "get",
+        lambda *a, **k: FakeResp(200, payload={"voices": ["af_sarah", "am_adam"]}),
+    )
+    voices, source = providers.list_freetts_voices()
+    assert source == "live"
+    assert voices == [
+        {"id": "kokoro:af_sarah", "label": "af_sarah", "maker": "Kokoro"},
+        {"id": "kokoro:am_adam", "label": "am_adam", "maker": "Kokoro"},
+    ]
+
+
+def test_list_freetts_voices_fallback_when_down(saved_settings, monkeypatch):
+    import httpx
+    import komaverse.ai.providers as providers
+
+    def fake_get(*a, **k):
+        raise httpx.ConnectError("refused")
+
+    monkeypatch.setattr(providers.httpx, "get", fake_get)
+    voices, source = providers.list_freetts_voices()
+    assert source == "fallback"
+    assert len(voices) == len(providers.FREETTS_KNOWN_VOICES)
+    assert voices[0] == {"id": "kokoro:af_alloy", "label": "af_alloy", "maker": "Kokoro"}
+    assert any(v["id"] == "kokoro:af_sarah" for v in voices)
+
+
+def test_ai_voices_route(factory, user, saved_settings, monkeypatch):
+    import httpx
+    import komaverse.ai.providers as providers
+    from komaverse.api.ai import ai_voices
+
+    def fake_get(*a, **k):
+        raise httpx.ConnectError("refused")
+
+    monkeypatch.setattr(providers.httpx, "get", fake_get)
+    out = ai_voices("free-tts", user)
+    assert out.provider == "free-tts"
+    assert out.source == "fallback"
+    assert len(out.voices) > 50
+    with pytest.raises(HTTPException) as exc:
+        ai_voices("meta", user)
+    assert exc.value.status_code == 400

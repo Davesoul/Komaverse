@@ -341,6 +341,9 @@ Amendment: voice generation + text cards + grades. TTS is a Brain-routed
 free-tts server over HTTP — Komaverse never spawns it; downtime errors
 name `python server.py`). `POST /projects/{id}/audio/synthesize` lands a
 normal take (waveforms, cues, mix all work) with optional one-trip cueing.
+`GET /ai/voices` feeds the Brain voice picker: ElevenLabs live (keyed),
+free-tts live or its 61-voice known-good fallback (verbatim `/api/voices`
+list, 4s leash so a dead server can't stall the picker).
 Timeline gains `text` clips (backend-rastered title cards: size/color/
 position/entrance fade-rise, `GET /clips/{id}/preview` artwork, Draw ▸
 hidden since cards live on the timeline), per-clip grades

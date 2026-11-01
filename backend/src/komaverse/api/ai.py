@@ -35,6 +35,8 @@ from komaverse.ai.providers import (
     check_openrouter_model,
     get_chat_config,
     get_provider,
+    list_elevenlabs_voices,
+    list_freetts_voices,
     list_openrouter_models,
 )
 from komaverse import storage
@@ -588,6 +590,41 @@ def cancel_job(
 def ai_models(user: UserRow = Depends(get_current_user)):
     """Curated OpenRouter model catalog + server defaults for the picker."""
     return list_openrouter_models()
+
+
+class VoiceOption(BaseModel):
+    id: str
+    label: str
+    maker: str
+
+
+class VoiceCatalog(BaseModel):
+    provider: str
+    source: str  # live | fallback
+    voices: list[VoiceOption]
+
+
+@router.get("/ai/voices", response_model=VoiceCatalog)
+def ai_voices(provider: str = "free-tts", user: UserRow = Depends(get_current_user)):
+    """TTS voice picker catalog for the Brain voice row.
+
+    ElevenLabs voices come live from the API (needs the key);
+    free-tts voices come live from the local server, or from its
+    known-good list when the server is down (source says which).
+    """
+    kind = (provider or "").strip().lower()
+    if kind == "elevenlabs":
+        try:
+            voices = list_elevenlabs_voices()
+        except ProviderError as exc:
+            raise HTTPException(400, str(exc)) from None
+        return VoiceCatalog(provider=kind, source="live", voices=voices)
+    if kind == "free-tts":
+        voices, source = list_freetts_voices()
+        return VoiceCatalog(provider=kind, source=source, voices=voices)
+    raise HTTPException(
+        400, f'unknown voice provider "{provider}" (want: elevenlabs, free-tts)'
+    )
 
 
 @router.get("/projects/{project_id}/entities", response_model=list[Entity])
