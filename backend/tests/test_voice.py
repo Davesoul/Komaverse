@@ -365,3 +365,39 @@ def test_ai_voices_route(user):
     with pytest.raises(HTTPException) as exc:
         ai_voices("meta", user)
     assert exc.value.status_code == 400
+
+
+def test_voice_local_honors_brain_default_voice(monkeypatch):
+    """Blank engine+voice speaks the Brain default (was: always af_sarah)."""
+    import komaverse.ai.voice_local as local
+
+    monkeypatch.setattr(settings, "freetts_voice_model", "kokoro:af_bella")
+    monkeypatch.setattr(local, "_kokoro_available", lambda: True)
+    seen = {}
+
+    def fake_kokoro(text, voice, lang, mp3_path):
+        seen.update(voice=voice)
+        mp3_path.write_bytes(b"ID3x")
+
+    monkeypatch.setattr(local, "_run_kokoro", fake_kokoro)
+    assert local.synthesize_local("hello village") == b"ID3x"
+    assert seen["voice"] == "af_bella"
+
+
+def test_voice_local_falls_back_when_default_engine_missing(monkeypatch):
+    """Brain default on a missing engine still speaks via auto-pick."""
+    import komaverse.ai.voice_local as local
+
+    monkeypatch.setattr(settings, "freetts_voice_model", "kokoro:af_bella")
+    monkeypatch.setattr(local, "_kokoro_available", lambda: False)
+    monkeypatch.setattr(local, "_espeak_exe", lambda: None)
+    monkeypatch.setattr(local, "_pyttsx3_available", lambda: True)
+    seen = {}
+
+    def fake_pyttsx3(text, mp3_path):
+        seen.update(engine="pyttsx3")
+        mp3_path.write_bytes(b"ID3x")
+
+    monkeypatch.setattr(local, "_run_pyttsx3", fake_pyttsx3)
+    assert local.synthesize_local("hello village") == b"ID3x"
+    assert seen["engine"] == "pyttsx3"

@@ -93,6 +93,17 @@ def available_engines() -> list[tuple[str, bool]]:
     ]
 
 
+def _engine_usable(engine: str) -> bool:
+    """Whether a named engine can speak right now (no installs)."""
+    if engine == "kokoro":
+        return _kokoro_available()
+    if engine == "espeak-ng":
+        return _espeak_exe() is not None
+    if engine == "pyttsx3":
+        return _pyttsx3_available()
+    return False
+
+
 def _wav_to_mp3(wav_path: Path, mp3_path: Path) -> Path:
     """WAV -> 192k MP3 via the bundled ffmpeg (no PATH dependency)."""
     proc = subprocess.run(
@@ -261,7 +272,8 @@ def synthesize_local(
 ) -> bytes:
     """Text -> MP3 bytes from the vendored local engines (no network).
 
-    No preference (blank engine AND voice) auto-picks the first usable
+    No preference (blank engine AND voice) honors the Brain voice
+    default when its engine is usable, else auto-picks the first usable
     engine. An explicit engine is honored strictly; a bare voice name
     implies Kokoro. "coqui-clone" refuses: cloning isn't vendored.
     """
@@ -271,8 +283,12 @@ def synthesize_local(
     want_engine = (engine or "").strip().lower()
     want_voice = (voice or "").strip()
     if want_engine in ("", "auto") and not want_voice:
-        resolved_engine = _auto_engine()
-        resolved_voice = "af_sarah" if resolved_engine == "kokoro" else ""
+        default_engine, default_voice = parse_freetts_voice(None)
+        if _engine_usable(default_engine):
+            resolved_engine, resolved_voice = default_engine, default_voice
+        else:
+            resolved_engine = _auto_engine()
+            resolved_voice = "af_sarah" if resolved_engine == "kokoro" else ""
     elif want_engine in ("", "auto"):
         resolved_engine, resolved_voice = parse_freetts_voice(want_voice)
     else:

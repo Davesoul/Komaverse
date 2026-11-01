@@ -1216,12 +1216,13 @@ export default function RenderPage() {
                 <option value="comfyui">ComfyUI (local)</option>
                 <option value="fake">Fake (demo)</option>
               </SelectInput>
-              <div style={{ display: "flex", gap: 6 }}>
+              <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
                 <SelectInput
                   value={genKind}
                   onChange={(e) => setGenKind(e.target.value)}
                   aria-label="Generation kind"
                   disabled={!!busy}
+                  style={{ flex: "1 1 60px", minWidth: 0 }}
                 >
                   <option value="image">Image</option>
                   <option value="video">Video (OpenRouter)</option>
@@ -1232,6 +1233,7 @@ export default function RenderPage() {
                     onChange={(e) => setGenSeconds(e.target.value)}
                     aria-label="Video length"
                     disabled={!!busy}
+                    style={{ flex: "1 1 60px", minWidth: 0 }}
                   >
                     <option value="2">2s</option>
                     <option value="4">4s</option>
@@ -1245,6 +1247,7 @@ export default function RenderPage() {
                       aria-label="Image aspect ratio"
                       title={`Image ratio — ${genDims.width}×${genDims.height}`}
                       disabled={!!busy}
+                      style={{ flex: "1 1 60px", minWidth: 0 }}
                     >
                       <option value="1:1">1:1</option>
                       <option value="16:9">16:9</option>
@@ -1258,6 +1261,7 @@ export default function RenderPage() {
                       aria-label="Image long edge"
                       title={`Long edge — ${genDims.width}×${genDims.height}`}
                       disabled={!!busy}
+                      style={{ flex: "1 1 60px", minWidth: 0 }}
                     >
                       <option value="512">512</option>
                       <option value="1024">1024</option>
@@ -1732,7 +1736,7 @@ export default function RenderPage() {
 
             {scene ? (
               <>
-                <div style={{ marginBottom: 12 }}>
+                <div style={{ marginBottom: 20 }}>
                   <SectionTitle>Preview — {scene.name}</SectionTitle>
                   <div style={{ position: "relative" }}>
                     <PreviewPlayer
@@ -1768,7 +1772,7 @@ export default function RenderPage() {
                   </div>
                 </div>
 
-                <div style={{ marginBottom: 12 }}>
+                <div style={{ marginBottom: 20 }}>
                   <Timeline
                     clips={clips.map((c) => ({
                       id: c.id,
@@ -1816,7 +1820,7 @@ export default function RenderPage() {
             {scene && selectedClip && (
               <div
                 style={{
-                  marginBottom: 12,
+                  marginBottom: 20,
                   border: "1px solid var(--kv-border)",
                   borderRadius: 8,
                   padding: 12,
@@ -2075,7 +2079,7 @@ export default function RenderPage() {
             )}
 
             {project && (
-              <div style={{ marginBottom: 12 }}>
+              <div style={{ marginBottom: 20 }}>
                 <AudioDeck
                   projectId={project.id}
                   scene={scene ?? null}
@@ -2090,7 +2094,7 @@ export default function RenderPage() {
             )}
 
             {project && scene && (
-              <div style={{ marginBottom: 12 }}>
+              <div style={{ marginBottom: 20 }}>
                 <SectionTitle>Subtitles</SectionTitle>
                 {subtitles ? (
                   <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>

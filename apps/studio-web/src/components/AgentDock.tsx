@@ -1119,6 +1119,7 @@ export default function AgentDock() {
         chatProvider: p.chat ?? agentInfo?.provider ?? "openrouter",
         visionProvider: p.vision ?? agentInfo?.provider ?? "openrouter",
         imageProvider: p.image ?? agentInfo?.provider ?? "openrouter",
+        voiceProvider: p.voice ?? "free-tts",
       }));
       setBrainError(null);
       if (!brainCatalog) {
@@ -1354,17 +1355,24 @@ export default function AgentDock() {
       {showBrain && (
         <div
           style={{
+            position: "absolute",
+            inset: 0,
+            zIndex: 6,
+            background: "var(--kv-surface)",
             padding: "10px 12px",
-            borderBottom: "1px solid var(--kv-border)",
             display: "flex",
             flexDirection: "column",
             gap: 8,
-            flex: "0 1 auto",
-            minHeight: 0,
-            maxHeight: "55%",
             overflowY: "auto",
           }}
         >
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <strong style={{ fontSize: 13 }}>Studio brain</strong>
+            <span style={{ flex: 1 }} />
+            <Btn small onClick={openBrain} aria-label="Close brain settings">
+              Close
+            </Btn>
+          </div>
           <div style={{ fontSize: 12, color: "var(--kv-muted)" }}>
             Studio brain — per family, studio-wide, applies immediately, no restart.
           </div>

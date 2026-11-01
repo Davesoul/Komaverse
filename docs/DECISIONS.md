@@ -362,3 +362,14 @@ hidden since cards live on the timeline), per-clip grades
 motion, and wipe-right/push-left/fade-white transitions. free-tts itself
 stays untouched (its `_run_cli` NameError and missing `--list-voices`
 are its own bugs, avoided by using `/api/generate` + `/api/files`).
+
+Amendment: voice default honored + widget clarity. Blank synthesize
+calls (Render Generate sends no voice) speak the Brain `freetts_voice_model`
+when its engine is usable, falling back to first-available otherwise —
+previously they always spoke `af_sarah`, so changing the Brain voice
+seemed to do nothing. The Brain voice provider dropdown initializes
+from the saved override, and the Brain panel opens as a full-dock
+overlay sheet (its own Close) instead of squeezing the chat to 55%.
+Render main sections (preview, timeline, inspector, voice, subtitles)
+breathe at 20px, and the Generate kind/ratio/long-edge selects shrink
+and wrap instead of overflowing the 248px sidebar.
