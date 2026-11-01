@@ -23,8 +23,8 @@ started Oct 28, 2026.
   opacity, never exported), fullscreen canvas mode (F) with a compact
   tool rail and a Brushes popup (presets, size, colors); frames and
   whole sequences send to the timeline, new frames land after the cursor;
-  the paper pans inside a padded scroll bed (H tool or Space-drag) and
-  re-centers on fit/frame switch
+  the paper sits in a tight scroll bed and moves only on its hotkeys
+  (H tool or Space-drag); it re-centers on fit/frame switch
 - **Render:** CapCut-style V1/A1/S1 timeline (proportional blocks, second
   ruler, tenths timecode, zoom, drag-reorder, edge-trim with cue `end_sec`),
   per-clip inspector (duration steppers, motion), scenes + clips timeline
@@ -35,9 +35,10 @@ started Oct 28, 2026.
   push-left, fade-white added), per-clip color grades (grayscale/sepia/
   vintage/vivid, previewed live, burned into export), text title cards
   with entrance anims (fade/rise), voiceover recording over
-  playback with auto-cue, TTS voice generation (ElevenLabs cloud or local
-  free-tts server, Brain voice row picks the engine, one-tap cue at the
-  playhead), SRT subtitles (S1 lane, preview captions, burned
+  playback with auto-cue, TTS voice generation (ElevenLabs cloud or
+  vendored local voices — Kokoro/system, all in-app; Brain voice row
+  picks the engine, one-tap cue at the playhead), SRT subtitles
+  (S1 lane, preview captions, burned
   into MP4 + VTT sidecar), H.264 MP4 export with contain-fit hi-res preview
 - **Media:** per-project library grid (scans, takes, generations, renders)
   with search/filters/sort, lightbox viewer, storage usage. Takes reach the
@@ -45,7 +46,7 @@ started Oct 28, 2026.
 - **AI:** pluggable providers — Meta Model API (Muse Spark/Wonder
   brain, Muse Image generation, Voice Transcribe takes, SAM 3.1
   segmentation), OpenRouter (chat, image + async video models),
-  ElevenLabs + local free-tts TTS voices, generic cloud endpoint
+  ElevenLabs + vendored local TTS voices, generic cloud endpoint
   (incl. hosted open weights), local ComfyUI, fake demo — background
   jobs with polling; generations land in the Media gallery (frames only
   on explicit request), videos preview in the Generate panel

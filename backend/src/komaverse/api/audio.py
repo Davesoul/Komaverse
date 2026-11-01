@@ -14,13 +14,8 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from komaverse import storage
-from komaverse.ai.providers import (
-    ElevenLabsProvider,
-    MetaProvider,
-    ProviderError,
-    parse_freetts_voice,
-    synthesize_freetts,
-)
+from komaverse.ai.providers import ElevenLabsProvider, MetaProvider, ProviderError
+from komaverse.ai.voice_local import synthesize_local
 from komaverse.studio_settings import provider_for
 from komaverse.api.usage import record_usage
 from komaverse.auth import ensure_owner, get_current_user, own_project
@@ -301,8 +296,9 @@ def synthesize_take(
     """Text-to-speech into the take library (Render tab "Generate").
 
     Provider comes from the Brain voice row: ElevenLabs cloud voices
-    (needs ELEVENLABS_API_KEY) or the local free-tts server (needs
-    `python server.py` running in D:\\Coding\\free-tts). The MP3 lands
+    (needs ELEVENLABS_API_KEY) or the vendored local engines (Kokoro
+    neural voice when `pip install pykokoro` ran, else espeak-ng or
+    system voices — all in-process, no second app). The MP3 lands
     as a normal take, so waveforms, cues, and the export mix just work.
     Duration stays 0 (unknown until decoded); the mux tolerates that.
     """
@@ -320,11 +316,10 @@ def synthesize_take(
             data = ElevenLabsProvider().synthesize(text, voice=body.voice)
             model = settings.elevenlabs_tts_model
         elif provider == "free-tts":
-            engine, voice = parse_freetts_voice(body.voice)
-            data = synthesize_freetts(
+            data = synthesize_local(
                 text,
-                engine=(body.engine or "").strip() or engine,
-                voice=voice,
+                engine=(body.engine or "").strip() or None,
+                voice=body.voice,
                 lang=body.lang,
             )
             model = settings.freetts_voice_model

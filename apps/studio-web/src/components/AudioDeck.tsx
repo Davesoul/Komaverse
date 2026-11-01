@@ -370,7 +370,7 @@ export function AudioDeck({
       <div style={{ marginBottom: 8, border: "1px solid var(--kv-border)", borderRadius: 6, padding: 8 }}>
         <div style={{ fontSize: 12, color: "var(--kv-muted)", marginBottom: 6 }}>
           Generate voice — engine and voice come from the Brain voice row
-          (ElevenLabs cloud or the local free-tts server).
+          (ElevenLabs cloud or local free voices, all in-app).
         </div>
         <textarea
           value={genText}

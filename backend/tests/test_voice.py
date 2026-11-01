@@ -69,7 +69,7 @@ def no_stream(monkeypatch):
 
 
 def test_parse_freetts_voice_shapes():
-    from komaverse.ai.providers import parse_freetts_voice
+    from komaverse.ai.voice_local import parse_freetts_voice
 
     assert parse_freetts_voice(None) == ("kokoro", "af_sarah")
     assert parse_freetts_voice("") == ("kokoro", "af_sarah")
@@ -154,62 +154,74 @@ def test_synthesize_caps_length(factory, user, project_id, saved_settings):
     assert exc.value.status_code == 400
 
 
-def test_synthesize_freetts_ok(factory, user, project_id, saved_settings, monkeypatch, no_stream):
-    import komaverse.ai.providers as providers
-
+def test_synthesize_local_ok(factory, user, project_id, saved_settings, monkeypatch, no_stream):
     monkeypatch.setattr(settings, "voice_provider", "free-tts")
     calls = {}
 
-    def fake_post(url, json=None, timeout=None):
-        calls["generate"] = json
-        return FakeResp(200, payload={"ok": True, "file": {"name": "tts_1.mp3"}})
+    def fake_synth(text, *, engine=None, voice=None, lang="en"):
+        calls.update(text=text, engine=engine, voice=voice, lang=lang)
+        return b"ID3fake-mp3-bytes"
 
-    def fake_get(url, timeout=None):
-        calls["fetch"] = url
-        return FakeResp(200, content=b"ID3fake-mp3-bytes")
-
-    monkeypatch.setattr(providers.httpx, "post", fake_post)
-    monkeypatch.setattr(providers.httpx, "get", fake_get)
+    monkeypatch.setattr(audio_api, "synthesize_local", fake_synth)
     with factory() as s:
         take = synthesize_take(
             project_id, SynthCreate(text="Once upon a panel"), s, user
         )
     assert take.name.startswith("Voice:")
-    assert calls["generate"]["engine"] == "kokoro"
-    assert calls["generate"]["voice"] == "af_sarah"
-    assert calls["fetch"].endswith("/api/files/tts_1.mp3")
+    assert take.mime == "audio/mpeg"
+    assert calls["text"] == "Once upon a panel"
     with factory() as s:
         takes = audio_api.list_takes(project_id, s, user)
     assert [t.id for t in takes] == [take.id]
 
 
-def test_synthesize_freetts_down_names_the_fix(factory, user, project_id, saved_settings, monkeypatch):
-    import httpx
-    import komaverse.ai.providers as providers
+def test_synthesize_local_missing_engine_names_the_install(
+    factory, user, project_id, saved_settings, monkeypatch
+):
+    """kokoro:voice without pykokoro fails loudly with the pip fix."""
+    import sys
 
+    # Poison the import so the test holds with or without pykokoro
+    # installed: `from pykokoro import ...` raises ImportError either way.
+    monkeypatch.setitem(sys.modules, "pykokoro", None)
     monkeypatch.setattr(settings, "voice_provider", "free-tts")
-
-    def fake_post(*a, **k):
-        raise httpx.ConnectError("refused")
-
-    monkeypatch.setattr(providers.httpx, "post", fake_post)
     with factory() as s, pytest.raises(HTTPException) as exc:
-        synthesize_take(project_id, SynthCreate(text="hi"), s, user)
+        synthesize_take(
+            project_id, SynthCreate(text="hi", voice="kokoro:af_sarah"), s, user
+        )
     assert exc.value.status_code == 400
-    assert "server.py" in exc.value.detail
+    assert "pykokoro" in exc.value.detail
+
+
+def test_synthesize_local_refuses_clone(factory, user, project_id, saved_settings, monkeypatch):
+    monkeypatch.setattr(settings, "voice_provider", "free-tts")
+    with factory() as s, pytest.raises(HTTPException) as exc:
+        synthesize_take(
+            project_id,
+            SynthCreate(text="hi", voice="coqui-clone:/x/ref.wav"),
+            s,
+            user,
+        )
+    assert exc.value.status_code == 400
+    assert "cloning" in exc.value.detail
+
+
+def test_synthesize_local_rejects_unknown_engine(factory, user, project_id, saved_settings, monkeypatch):
+    monkeypatch.setattr(settings, "voice_provider", "free-tts")
+    with factory() as s, pytest.raises(HTTPException) as exc:
+        synthesize_take(
+            project_id, SynthCreate(text="hi", engine="glados"), s, user
+        )
+    assert exc.value.status_code == 400
+    assert "glados" in exc.value.detail
 
 
 def test_synthesize_cues_in_one_trip(factory, user, project_id, saved_settings, monkeypatch, no_stream):
-    import komaverse.ai.providers as providers
-
     monkeypatch.setattr(settings, "voice_provider", "free-tts")
     monkeypatch.setattr(
-        providers.httpx,
-        "post",
-        lambda *a, **k: FakeResp(200, payload={"ok": True, "file": {"name": "t.mp3"}}),
-    )
-    monkeypatch.setattr(
-        providers.httpx, "get", lambda *a, **k: FakeResp(200, content=b"ID3x")
+        audio_api,
+        "synthesize_local",
+        lambda text, *, engine=None, voice=None, lang="en": b"ID3x",
     )
     with factory() as s:
         from komaverse.api.animate import list_scenes
@@ -290,49 +302,65 @@ def test_list_elevenlabs_voices_needs_key(saved_settings):
     assert "ELEVENLABS_API_KEY" in str(exc.value)
 
 
-def test_list_freetts_voices_live(saved_settings, monkeypatch):
-    import komaverse.ai.providers as providers
+def test_list_freetts_voices_is_the_vendored_catalog():
+    """No server involved: the picker list is the known Kokoro set."""
+    from komaverse.ai.voice_local import FREETTS_KNOWN_VOICES, list_freetts_voices
 
-    monkeypatch.setattr(
-        providers.httpx,
-        "get",
-        lambda *a, **k: FakeResp(200, payload={"voices": ["af_sarah", "am_adam"]}),
-    )
-    voices, source = providers.list_freetts_voices()
-    assert source == "live"
-    assert voices == [
-        {"id": "kokoro:af_sarah", "label": "af_sarah", "maker": "Kokoro"},
-        {"id": "kokoro:am_adam", "label": "am_adam", "maker": "Kokoro"},
-    ]
-
-
-def test_list_freetts_voices_fallback_when_down(saved_settings, monkeypatch):
-    import httpx
-    import komaverse.ai.providers as providers
-
-    def fake_get(*a, **k):
-        raise httpx.ConnectError("refused")
-
-    monkeypatch.setattr(providers.httpx, "get", fake_get)
-    voices, source = providers.list_freetts_voices()
-    assert source == "fallback"
-    assert len(voices) == len(providers.FREETTS_KNOWN_VOICES)
+    voices, source = list_freetts_voices()
+    assert source == "local"
+    assert len(voices) == len(FREETTS_KNOWN_VOICES) == 61
     assert voices[0] == {"id": "kokoro:af_alloy", "label": "af_alloy", "maker": "Kokoro"}
     assert any(v["id"] == "kokoro:af_sarah" for v in voices)
 
 
-def test_ai_voices_route(factory, user, saved_settings, monkeypatch):
-    import httpx
-    import komaverse.ai.providers as providers
+def test_voice_local_auto_pick_prefers_kokoro(monkeypatch):
+    import komaverse.ai.voice_local as local
+
+    monkeypatch.setattr(local, "_kokoro_available", lambda: True)
+    assert local._auto_engine() == "kokoro"
+
+
+def test_voice_local_auto_pick_falls_back(monkeypatch):
+    import komaverse.ai.voice_local as local
+
+    monkeypatch.setattr(local, "_kokoro_available", lambda: False)
+    monkeypatch.setattr(local, "_espeak_exe", lambda: None)
+    monkeypatch.setattr(local, "_pyttsx3_available", lambda: True)
+    assert local._auto_engine() == "pyttsx3"
+
+
+def test_voice_local_auto_pick_empty_names_installs(monkeypatch):
+    import komaverse.ai.voice_local as local
+
+    monkeypatch.setattr(local, "_kokoro_available", lambda: False)
+    monkeypatch.setattr(local, "_espeak_exe", lambda: None)
+    monkeypatch.setattr(local, "_pyttsx3_available", lambda: False)
+    with pytest.raises(Exception) as exc:
+        local._auto_engine()
+    assert "pykokoro" in str(exc.value)
+
+
+def test_voice_local_wav_to_mp3_roundtrip(tmp_path):
+    """The file pipeline (wav -> bundled-ffmpeg mp3) runs with no TTS."""
+    import numpy as np
+
+    from komaverse.ai.voice_local import _wav_to_mp3, _write_wav_mono
+    from komaverse.renderer import audio_has_stream
+
+    wav = tmp_path / "s.wav"
+    mp3 = tmp_path / "s.mp3"
+    _write_wav_mono(wav, np.zeros(8000, dtype=np.float32), 8000)
+    _wav_to_mp3(wav, mp3)
+    assert mp3.stat().st_size > 0
+    assert audio_has_stream(mp3)
+
+
+def test_ai_voices_route(user):
     from komaverse.api.ai import ai_voices
 
-    def fake_get(*a, **k):
-        raise httpx.ConnectError("refused")
-
-    monkeypatch.setattr(providers.httpx, "get", fake_get)
     out = ai_voices("free-tts", user)
     assert out.provider == "free-tts"
-    assert out.source == "fallback"
+    assert out.source == "local"
     assert len(out.voices) > 50
     with pytest.raises(HTTPException) as exc:
         ai_voices("meta", user)

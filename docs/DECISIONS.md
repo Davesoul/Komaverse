@@ -70,9 +70,10 @@ Live strokes paint incrementally (suffix dabs only, stroke-persistent
 rand, one paint per animation frame, no snapshot restore per move);
 the release pass keeps the canonical full repaint, pixel-identical.
 Autosave waits 4s idle and never chains back-to-back; only the saved
-frame's thumbnail refetches. The paper lives in a padded scroll bed
-(30vh/30vw, 60vh/60vw fullscreen) so H/Space-drag pans it in its
-container; fit and frame switches re-center via scroll.
+frame's thumbnail refetches. The paper sits in a tight scroll bed
+(32px breathing room) and dragging it is hotkey-only (H tool or
+Space-drag — a plain brush drag never moves it); fit and frame
+switches re-center via scroll.
 
 ## ADR-9: M4/M5 finish pragmatics (accepted)
 
@@ -337,13 +338,23 @@ model ids are pinned in conftest so a user .env (e.g. a cheaper chat
 variant) can't break default assertions.
 
 Amendment: voice generation + text cards + grades. TTS is a Brain-routed
-`voice` kind (ElevenLabs cloud via `ELEVENLABS_API_KEY`, else the local
-free-tts server over HTTP — Komaverse never spawns it; downtime errors
-name `python server.py`). `POST /projects/{id}/audio/synthesize` lands a
-normal take (waveforms, cues, mix all work) with optional one-trip cueing.
-`GET /ai/voices` feeds the Brain voice picker: ElevenLabs live (keyed),
-free-tts live or its 61-voice known-good fallback (verbatim `/api/voices`
-list, 4s leash so a dead server can't stall the picker).
+`voice` kind (ElevenLabs cloud via `ELEVENLABS_API_KEY`, else vendored
+local engines — no second app). `POST /projects/{id}/audio/synthesize`
+lands a normal take (waveforms, cues, mix all work) with optional
+one-trip cueing. `GET /ai/voices` feeds the Brain voice picker:
+ElevenLabs live (keyed), free voices from the vendored Kokoro catalog.
+Local engines live in `komaverse/ai/voice_local.py`, learned from
+free-tts `tts.py` (lazy imports, first-available auto-pick, WAV
+intermediates, 192k MP3 — but MP3 via the bundled imageio-ffmpeg, WAV
+via stdlib `wave`, no soundfile dep, no PATH ffmpeg). pyttsx3 ships in
+main deps (out-of-box system voice); Kokoro is a `voice` extra
+(`pykokoro`, weights fetch on first run); XTTS cloning is refused
+loudly (GBs of weights — not vendored). SAPI speaks on a dedicated
+fresh STA thread per call: uvicorn reuses worker threads and a prior
+MTA init there fails SAPI with "Cannot change thread mode" (proven;
+was a 500, now impossible — thread errors map to 400). A backend
+started before the voice packages were installed needs one restart
+(the error names it).
 Timeline gains `text` clips (backend-rastered title cards: size/color/
 position/entrance fade-rise, `GET /clips/{id}/preview` artwork, Draw ▸
 hidden since cards live on the timeline), per-clip grades

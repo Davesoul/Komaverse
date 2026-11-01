@@ -74,9 +74,10 @@ class Settings(BaseSettings):
         default="sam-3.1", validation_alias="META_SAM_MODEL"
     )
     # Voice synthesis (TTS) for the Render tab: ElevenLabs cloud voices and
-    # the local free-tts server (D:\Coding\free-tts, kokoro/XTTS/espeak).
-    # The Brain "voice" row picks the provider; the voice id is
-    # provider-shaped (elevenlabs voice id, or free-tts "engine:voice").
+    # vendored local engines (kokoro/espeak-ng/pyttsx3, learned from
+    # free-tts and implemented in-process — no second app). The Brain
+    # "voice" row picks the provider; the voice id is provider-shaped
+    # (elevenlabs voice id, or free-tts "engine:voice").
     voice_provider: str | None = Field(default=None, validation_alias="VOICE_PROVIDER")
     elevenlabs_api_key: str | None = Field(
         default=None, validation_alias="ELEVENLABS_API_KEY"
@@ -90,13 +91,9 @@ class Settings(BaseSettings):
     elevenlabs_voice_model: str = Field(
         default="21m00Tcm4TlvDq8ikWAM", validation_alias="ELEVENLABS_VOICE_ID"
     )
-    freetts_base_url: str = Field(
-        default="http://127.0.0.1:5000", validation_alias="FREE_TTS_URL"
-    )
     freetts_voice_model: str = Field(
         default="kokoro:af_sarah", validation_alias="FREE_TTS_VOICE"
     )
-    freetts_timeout_sec: int = Field(default=180, validation_alias="FREE_TTS_TIMEOUT")
     # OpenRouter — chat, image models, async video models, one key.
     openrouter_api_key: str | None = Field(
         default=None, validation_alias="OPENROUTER_API_KEY"

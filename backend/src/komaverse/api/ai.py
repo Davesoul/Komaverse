@@ -36,9 +36,10 @@ from komaverse.ai.providers import (
     get_chat_config,
     get_provider,
     list_elevenlabs_voices,
-    list_freetts_voices,
     list_openrouter_models,
 )
+from komaverse.ai.voice_local import list_freetts_voices
+
 from komaverse import storage
 from komaverse.api.usage import record_usage
 from komaverse.auth import ensure_owner, get_current_user
@@ -609,8 +610,7 @@ def ai_voices(provider: str = "free-tts", user: UserRow = Depends(get_current_us
     """TTS voice picker catalog for the Brain voice row.
 
     ElevenLabs voices come live from the API (needs the key);
-    free-tts voices come live from the local server, or from its
-    known-good list when the server is down (source says which).
+    free voices are the vendored Kokoro catalog (source "local").
     """
     kind = (provider or "").strip().lower()
     if kind == "elevenlabs":

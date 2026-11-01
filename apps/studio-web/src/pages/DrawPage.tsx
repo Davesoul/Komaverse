@@ -801,6 +801,8 @@ export default function DrawPage() {
       pinchStartRef.current = { dist: pinchDist(), zoom: zoomRef.current };
       return;
     }
+    // Dragging the paper is hotkey-only: hold Space, or the Pan tool
+    // (H). A plain brush drag never moves the paper.
     if (spaceRef.current || engine.tool === "pan") {
       panRef.current = { x: e.clientX, y: e.clientY, sl: el.scrollLeft, st: el.scrollTop };
       setPanning(true);
@@ -1902,7 +1904,7 @@ export default function DrawPage() {
                       background: "var(--kv-inset)",
                       border: "1px solid var(--kv-border)",
                       borderRadius: "var(--kv-radius)",
-                      padding: 16,
+                      padding: 8,
                       boxShadow: "var(--kv-shadow-hard)",
                     }
               }
@@ -2055,9 +2057,10 @@ export default function DrawPage() {
                     minHeight: "100%",
                     width: "max-content",
                     boxSizing: "border-box",
-                    // Breathing room around the paper so it can be dragged
-                    // anywhere in the container, even when it fits on screen.
-                    padding: "30vh 30vw",
+                    // Small breathing room around the paper edge. Dragging
+                    // the paper around stays on its hotkeys (hold Space,
+                    // or the Pan tool via H) — see onPointerDown.
+                    padding: 32,
                   }}
                 >
                 <canvas
