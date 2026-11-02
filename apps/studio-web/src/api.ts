@@ -180,6 +180,7 @@ export interface Job {
   seed: number | null;
   negative_prompt: string;
   style: string;
+  genre: string;
   camera_move: string;
   enhance: boolean;
   reference_frame_id: string | null;
@@ -761,6 +762,7 @@ export const api = {
     negative_prompt?: string;
     enhance?: boolean;
     style?: string;
+    genre?: string;
     camera_move?: string;
     entity_ids?: string[];
     reference_frame_id?: string;

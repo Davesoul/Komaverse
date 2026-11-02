@@ -397,8 +397,9 @@ Generations take an anime `genre` (shonen/shojo/seinen/slice-of-life/
 mecha/retro-ova) end to end: API `GenerateRequest`, `JobRow.genre`
 (+ ALTER backfill, NULL-safe read), `build_final_prompt` order
 base → entities → genre → style, validation before billing, agent
-`create_image`/`create_video` + MCP. The Generate panel UI keeps
-style-only for now (genre is agent/API-first); DemoBrain parses no
+`create_image`/`create_video` + MCP; the Generate panel has a genre
+picker beside style (same key list, server-validated), and the Job card
+shows the final prompt carrying the tags. DemoBrain parses no
 genre (cloud brain is the skills vehicle).
 
 Amendment: research tools + command discovery. The agent fetches the

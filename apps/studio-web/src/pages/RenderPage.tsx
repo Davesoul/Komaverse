@@ -54,6 +54,16 @@ const STYLES = [
   ["noir", "Noir"],
   ["pencil", "Pencil sketch"],
 ] as const;
+// Mirror backend ai/direction.py keys; the server validates unknown ids.
+const GENRES = [
+  ["none", "No genre"],
+  ["shonen", "Shonen action"],
+  ["shojo", "Shojo drama"],
+  ["seinen", "Seinen drama"],
+  ["slice-of-life", "Slice of life"],
+  ["mecha", "Mecha"],
+  ["retro-ova", "Retro 90s OVA"],
+] as const;
 const CAMERA_MOVES = [
   ["none", "Static"],
   ["dolly-in", "Slow dolly-in"],
@@ -281,6 +291,7 @@ export default function RenderPage() {
   const [genNegative, setGenNegative] = useState("");
   const [genEnhance, setGenEnhance] = useState(false);
   const [genStyle, setGenStyle] = useState("none");
+  const [genGenre, setGenGenre] = useState("none");
   const [genCamera, setGenCamera] = useState("none");
   const [entities, setEntities] = useState<Entity[]>([]);
   const [entityIds, setEntityIds] = useState<string[]>([]);
@@ -850,6 +861,7 @@ export default function RenderPage() {
         negative_prompt: genNegative.trim() || undefined,
         enhance: genEnhance || undefined,
         style: genStyle !== "none" ? genStyle : undefined,
+        genre: genGenre !== "none" ? genGenre : undefined,
         camera_move: isVideo && genCamera !== "none" ? genCamera : undefined,
         entity_ids: entityIds.length ? entityIds : undefined,
         reference_frame_id: refFrame || undefined,
@@ -1360,6 +1372,18 @@ export default function RenderPage() {
                       flexWrap: "wrap",
                     }}
                   >
+                    <SelectInput
+                      value={genGenre}
+                      onChange={(e) => setGenGenre(e.target.value)}
+                      aria-label="Anime genre"
+                      disabled={!!busy}
+                    >
+                      {GENRES.map(([v, label]) => (
+                        <option key={v} value={v}>
+                          {label}
+                        </option>
+                      ))}
+                    </SelectInput>
                     {genKind === "video" && (
                       <SelectInput
                         value={genCamera}

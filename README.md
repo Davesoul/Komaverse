@@ -256,7 +256,7 @@ with `KOMAVERSE_MCP_USER` in the environment. Claude Desktop
 ## Tests
 
 ```bash
-cd backend && python -m pytest -q     # 311 tests, no sockets needed
+cd backend && python -m pytest -q     # 375 tests, no sockets needed
 cd ../apps/studio-web && npx tsc --noEmit && npm run build
 ```
 
