@@ -33,6 +33,34 @@ STYLE_PRESETS: dict[str, dict[str, str]] = {
     },
 }
 
+GENRE_TAGS: dict[str, dict[str, str]] = {
+    "none": {"label": "No genre", "suffix": ""},
+    "shonen": {
+        "label": "Shonen action",
+        "suffix": "cel-shaded shonen anime, bold outlines, saturated high-contrast palette, dynamic pose",
+    },
+    "shojo": {
+        "label": "Shojo drama",
+        "suffix": "cel-shaded shojo anime, delicate linework, soft pastel palette, large sparkling eyes",
+    },
+    "seinen": {
+        "label": "Seinen drama",
+        "suffix": "cel-shaded seinen anime, realistic proportions, muted desaturated palette, subdued expression",
+    },
+    "slice-of-life": {
+        "label": "Slice of life",
+        "suffix": "cel-shaded slice-of-life anime, soft natural lighting, gentle muted palette, everyday setting",
+    },
+    "mecha": {
+        "label": "Mecha",
+        "suffix": "cel-shaded mecha anime, hard-surface mechanical detail, panel lines, dramatic lighting",
+    },
+    "retro-ova": {
+        "label": "Retro 90s OVA",
+        "suffix": "cel-shaded 90s OVA anime, hand-painted background, heavy line weight, film grain, warm white point",
+    },
+}
+
 CAMERA_MOVES: dict[str, dict[str, str]] = {
     "none": {"label": "Static", "sentence": ""},
     "dolly-in": {
@@ -84,6 +112,13 @@ def camera_sentence(move: str) -> str:
         raise ValueError(f"unknown camera move: {move}")
 
 
+def genre_suffix(genre: str) -> str:
+    try:
+        return GENRE_TAGS[genre]["suffix"]
+    except KeyError:
+        raise ValueError(f"unknown genre: {genre}")
+
+
 def build_final_prompt(
     *,
     prompt: str,
@@ -92,10 +127,11 @@ def build_final_prompt(
     camera_move: str = "none",
     kind: str = "image",
     negative_prompt: str = "",
+    genre: str = "none",
 ) -> str:
-    """Assemble the provider prompt: base + entity anchors + style + camera.
+    """Assemble the provider prompt: base + entity anchors + genre + style.
 
-    Raises ValueError on unknown style/camera ids (surfaced as 400).
+    Raises ValueError on unknown style/genre/camera ids (surfaced as 400).
     Negative prompts fold into the text for providers whose dedicated API
     has no negative field (OpenRouter /images, /videos).
     """
@@ -104,6 +140,9 @@ def build_final_prompt(
         anchor = (ent.get("anchor") or "").strip()
         label = f'{ent.get("name", "entity")} ({ent.get("kind", "prop")})'
         parts.append(f"{label}: {anchor}" if anchor else label)
+    genre_tags = genre_suffix(genre)
+    if genre_tags:
+        parts.append(genre_tags)
     suffix = style_suffix(style)
     if suffix:
         parts.append(suffix)

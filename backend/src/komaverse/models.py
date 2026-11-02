@@ -202,10 +202,11 @@ class Job(BaseModel):
     seed: int | None = None  # seed sent to the provider (random when unset)
     negative_prompt: str = ""
     style: str = "none"
+    genre: str = "none"  # GENRE_TAGS key (anime direction grammar)
     camera_move: str = "none"
     enhance: bool = False
     reference_frame_id: str | None = None
-    final_prompt: str = ""  # exact text sent after entities/style/camera/negative
+    final_prompt: str = ""  # exact text sent after entities/genre/style/camera/negative
     entities_json: str = "[]"  # snapshot [{name, kind}] for the UI
     status: Literal["queued", "running", "done", "failed", "cancelled"] = "queued"
     progress: float = 0.0

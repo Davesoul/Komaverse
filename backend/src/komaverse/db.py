@@ -80,6 +80,7 @@ def init_db() -> None:
         "ALTER TABLE jobs ADD COLUMN seed INTEGER",
         "ALTER TABLE jobs ADD COLUMN negative_prompt TEXT",
         "ALTER TABLE jobs ADD COLUMN style VARCHAR(32)",
+        "ALTER TABLE jobs ADD COLUMN genre VARCHAR(32)",
         "ALTER TABLE jobs ADD COLUMN camera_move VARCHAR(32)",
         "ALTER TABLE jobs ADD COLUMN final_prompt TEXT",
         "ALTER TABLE jobs ADD COLUMN entities_json TEXT",

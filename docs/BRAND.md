@@ -2,10 +2,10 @@
 
 ## Positioning
 
-Indie track, **Build for Your World**: the manga creator's studio where
-Meta's models (Muse Spark brain, Muse Image, SAM 3.1, open weights) do
-detection, generation, transcription, and agentic editing inside one
-canvas. Spine: **"A universe, one panel at a time."**
+Indie track, **Build for Your World**: an animation studio where manga
+and comics become anime — Meta's models (Muse Spark brain, Muse Image,
+SAM 3.1, open weights) do detection, generation, transcription, and
+agentic editing inside one canvas. Spine: **"A universe, one panel at a time."**
 
 ## Identity law (from Marvel / Netflix / Higgsfield research)
 

@@ -26,6 +26,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from komaverse import storage
+from komaverse.ai.direction import genre_suffix
 from komaverse.ai.providers import (
     MetaProvider,
     ProviderError,
@@ -101,6 +102,7 @@ from komaverse.db_models import (
     UserRow,
 )
 from komaverse.security import limiter
+from komaverse.skills import SkillError, list_skills, read_skill
 from pydantic import BaseModel
 
 logger = logging.getLogger("komaverse.agent")
@@ -295,6 +297,40 @@ def tool_status(session: Session, user: UserRow, project_id: str) -> str:
         f"'{p.name}': {len(p.pages)} pages, {panels} panels, "
         f"{clips} clips in {len(p.scenes)} scenes, {len(p.frames)} frames."
     )
+
+
+def tool_list_skills():
+    """Name + describe every installed studio craft skill."""
+    found = list_skills()
+    if not found:
+        return "No craft skills installed."
+    lines = ["- " + s["name"] + ": " + s["description"] for s in found]
+    return "Studio craft skills: " + "; ".join(lines)
+
+
+def tool_read_skill(name, section=None):
+    """Read one studio craft skill (or a single ## section) into context."""
+    try:
+        return read_skill(name or "", section=section or None)
+    except SkillError as exc:
+        return str(exc)
+
+
+def _parse_skill_name(text):
+    """Skill name next to skill(s): X skill or skill X (found by its dash)."""
+    strip_chars = '.,!?"' + chr(39)
+    tokens = text.split()
+    for i, tok in enumerate(tokens):
+        if tok.strip(strip_chars) in ("skill", "skills"):
+            before = tokens[i - 1] if i > 0 else ""
+            after = tokens[i + 1] if i + 1 < len(tokens) else ""
+            for cand in (before, after):
+                cand = cand.strip(strip_chars)
+                if cand and "-" in cand and all(
+                    ch.islower() or ch.isdigit() or ch == "-" for ch in cand
+                ):
+                    return cand
+    return None
 
 
 DETECTORS = ("heuristic", "yolo", "yolo-leoxs22", "cloud", "meta", "openrouter", "sam", "local")
@@ -632,6 +668,7 @@ def tool_generate(
     job_factory=None,
     model: str | None = None,
     style: str = "none",
+    genre: str = "none",
     negative_prompt: str = "",
     reference_frame_id: str | None = None,
     references=None,
@@ -648,6 +685,10 @@ def tool_generate(
         return "Tell me what to generate - e.g. \"generate a moonlit robot\"."
     refs = _generation_references(raw, references, fallback_references)
     snaps, notes = gather_reference_snapshots(session, user, project_id, prompt, refs, entity_ids)
+    try:
+        genre_suffix(genre or "none")
+    except ValueError as exc:
+        return str(exc)
     provider = provider_for("image")
     if provider not in PROVIDERS:
         provider = "cloud"
@@ -684,6 +725,7 @@ def tool_generate(
         height=height,
         attach_frame=attach_frame,
         style=style or "none",
+        genre=genre or "none",
         negative_prompt=negative_prompt or "",
         reference_frame_id=reference_frame_id,
         entities_json=json.dumps(snaps),
@@ -730,6 +772,7 @@ def tool_create_video(
     job_factory=None,
     references=None,
     entity_ids=None,
+    genre: str = "none",
     fallback_references=None,
 ) -> str:
     """Start an async OpenRouter video job; watch it with check_job."""
@@ -739,6 +782,10 @@ def tool_create_video(
         return "Tell me what to render - e.g. \"generate a video of a robot walking\"."
     refs = _generation_references(raw, references, fallback_references)
     snaps, notes = gather_reference_snapshots(session, user, project_id, prompt, refs, entity_ids)
+    try:
+        genre_suffix(genre or "none")
+    except ValueError as exc:
+        return str(exc)
     provider = "openrouter"
     if not settings.openrouter_api_key:
         return (
@@ -761,6 +808,7 @@ def tool_create_video(
         width=320,
         height=240,
         attach_frame=False,
+        genre=genre or "none",
         entities_json=json.dumps(snaps),
     )
     session.add(job)
@@ -2605,6 +2653,12 @@ def demo_turn(
         reply = run("frame_from_media", tool_frame_from_media, session, user, project_id, message, None)
     elif any(p in text for p in CREATE_FRAME_PHRASES):
         reply = run("create_frame", tool_create_frame, session, user, project_id)
+    elif "skill" in text:
+        skill_name = _parse_skill_name(text)
+        if skill_name:
+            reply = run("read_skill", tool_read_skill, skill_name)
+        else:
+            reply = run("list_skills", tool_list_skills)
     elif any(
         k in text for k in ("status", "summary", "what", "show", "list", "how many")
     ):
@@ -2634,7 +2688,11 @@ _SYSTEM = (
     "call no tools unless the user asks for an action, a change, or "
     "information not already in context. Reference images attach only "
     "when the user asked to reuse a frame, panel, scan, generation, "
-    "or entity — never assume one."
+    "or entity — never assume one. "
+    "For anime-styled generation or direction, read the "
+    "anime-animation-production skill (list_skills/read_skill) for genre "
+    "tags, shot grammar, and QC: pass a genre to create_image/"
+    "create_video so prompts carry the craft."
 )
 
 _TOOLS_SCHEMA = [
@@ -2644,6 +2702,37 @@ _TOOLS_SCHEMA = [
             "name": "project_status",
             "description": "Summarize pages, panels, clips, and frames.",
             "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_skills",
+            "description": (
+                "List the studio craft skills (anime direction, manga, "
+                "motion design) with one-line descriptions. Read one with "
+                "read_skill before anime-styled generation or direction."
+            ),
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "read_skill",
+            "description": (
+                "Read one studio craft skill into context. Prefer a single "
+                "## section (e.g. anime-animation-production + Prompting "
+                "vocabulary) over the whole file."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "Skill name from list_skills."},
+                    "section": {"type": "string", "description": "Optional ## heading prefix."},
+                },
+                "required": ["name"],
+            },
         },
     },
     {
@@ -2773,6 +2862,7 @@ _TOOLS_SCHEMA = [
                     "prompt": {"type": "string", "description": "Clean scene text, no @-mentions."},
                     "model": {"type": "string"},
                     "style": {"type": "string"},
+                    "genre": {"type": "string"},
                     "negative_prompt": {"type": "string"},
                     "reference_frame_id": {"type": "string"},
                     "references": {"type": "array", "description": "[{kind, id}] for user-mentioned refs to reuse (frame|panel|media|gen). Omit otherwise."},
@@ -2801,6 +2891,7 @@ _TOOLS_SCHEMA = [
                     "prompt": {"type": "string", "description": "Clean scene text, no @-mentions."},
                     "seconds": {"type": "number"},
                     "model": {"type": "string"},
+                    "genre": {"type": "string"},
                     "references": {"type": "array", "description": "[{kind, id}] for user-mentioned refs to reuse. Omit otherwise."},
                 },
                 "required": ["prompt"],
@@ -3245,6 +3336,7 @@ def _exec_cloud_tool(
                 job_factory,
                 model=args.get("model"),
                 style=str(args.get("style") or "none"),
+                genre=str(args.get("genre") or "none"),
                 negative_prompt=str(args.get("negative_prompt") or ""),
                 reference_frame_id=args.get("reference_frame_id"),
                 references=args.get("references"),
@@ -3268,6 +3360,7 @@ def _exec_cloud_tool(
                 job_factory,
                 args.get("references"),
                 args.get("entity_ids"),
+                str(args.get("genre") or "none"),
                 fallback_references=turn_references,
             )
         elif name == "list_takes":
@@ -3378,6 +3471,12 @@ def _exec_cloud_tool(
             )
         elif name == "cancel_job":
             result = tool_cancel_job(session, user, str(args.get("job") or ""))
+        elif name == "list_skills":
+            result = tool_list_skills()
+        elif name == "read_skill":
+            result = tool_read_skill(
+                str(args.get("name") or ""), args.get("section")
+            )
         else:
             result = f"unknown tool: {name}"
     except HTTPException as exc:

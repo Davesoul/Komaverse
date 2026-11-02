@@ -386,3 +386,17 @@ button instead of failing silently). Sound identity switches from the
 KACHI hyoshigi sketch to "Fingerstyle Impact" (Suno instrumental,
 5.6s — opening hit/groove/accent/tail map onto
 enter/travel/settle/resolve). Full sync map in `docs/BRAND.md`.
+
+Amendment: studio craft skills for the agent. The agent had tool verbs
+but no craft knowledge; it now reads the repo's Agent Skills
+(`.agents/skills`: anime direction, manga, motion design) via
+`list_skills`/`read_skill` tools (same pair over MCP, progressive
+disclosure — names only until one is read) plus a DemoBrain keyword
+path, and a system line points anime-styled work at the anime skill.
+Generations take an anime `genre` (shonen/shojo/seinen/slice-of-life/
+mecha/retro-ova) end to end: API `GenerateRequest`, `JobRow.genre`
+(+ ALTER backfill, NULL-safe read), `build_final_prompt` order
+base → entities → genre → style, validation before billing, agent
+`create_image`/`create_video` + MCP. The Generate panel UI keeps
+style-only for now (genre is agent/API-first); DemoBrain parses no
+genre (cloud brain is the skills vehicle).

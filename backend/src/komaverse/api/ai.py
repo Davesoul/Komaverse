@@ -86,6 +86,7 @@ class GenerateRequest(BaseModel):
     negative_prompt: str = ""
     enhance: bool = False  # LLM rewrite before sending (fail-soft)
     style: str = "none"  # STYLE_PRESETS key
+    genre: str = "none"  # GENRE_TAGS key (anime direction grammar)
     camera_move: str = "none"  # CAMERA_MOVES key (video only)
     entity_ids: list[str] = Field(default_factory=list)
     reference_frame_id: str | None = None  # start frame (video) / redraw (image)
@@ -293,6 +294,7 @@ def run_ai_job(job_id: str, factory=None) -> None:
                 prompt=job.prompt,
                 entities=entities,
                 style=job.style or "none",
+                genre=job.genre if job.genre is not None else "none",
                 camera_move=job.camera_move or "none",
                 kind=job.kind,
                 negative_prompt=job.negative_prompt or "",
@@ -479,11 +481,12 @@ def generate(
     if len(body.entity_ids) > 8:
         raise HTTPException(400, "at most 8 entities per generation")
     try:
-        # Validates style/camera ids up front (unknown ids never bill).
+        # Validates style/genre/camera ids up front (unknown ids never bill).
         build_final_prompt(
             prompt="x",
             entities=[],
             style=body.style,
+            genre=body.genre,
             camera_move=body.camera_move,
             kind=body.kind,
         )
@@ -541,6 +544,7 @@ def generate(
         seed=body.seed,
         negative_prompt=body.negative_prompt,
         style=body.style,
+        genre=body.genre,
         camera_move=body.camera_move,
         enhance=body.enhance,
         reference_frame_id=body.reference_frame_id,

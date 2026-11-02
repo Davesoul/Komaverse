@@ -1,8 +1,9 @@
 # Komaverse — AI Anime Studio
 
-Manga scan → panels → animation → video, in one cross-platform studio:
-drawing canvas, frame-by-frame timeline, and AI generation (cloud-first,
-local-pluggable).
+Animation studio in one cross-platform app: draw, animate on a
+frame-by-frame timeline, and generate with AI (cloud-first,
+local-pluggable) — starting from manga/comic pages (scan → panels →
+clips) or from a blank canvas.
 
 Rebuild of `../saas-projects/koma-wari` (kept as legacy reference —
 do not import from it, port deliberately). All work in this repo
@@ -89,7 +90,9 @@ started Oct 28, 2026.
   the Brain sets a provider + verified model per kind (chat/vision/
   image/video/transcribe); `@`-mentions offer a live preview list over
   renamable pages, panels, and frames; the mic button dictates via
-  Meta transcription
+  Meta transcription. The agent reads studio craft skills (anime
+  direction, manga, motion design) and passes an anime genre into
+  image/video prompts so generations carry the genre grammar
 
 ## Layout
 

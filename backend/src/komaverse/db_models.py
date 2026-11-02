@@ -459,6 +459,7 @@ class JobRow(Base):
     seed: Mapped[int | None] = mapped_column(default=None)
     negative_prompt: Mapped[str] = mapped_column(Text, default="")
     style: Mapped[str] = mapped_column(String(32), default="none")
+    genre: Mapped[str] = mapped_column(String(32), default="none")
     camera_move: Mapped[str] = mapped_column(String(32), default="none")
     enhance: Mapped[bool] = mapped_column(default=False)
     reference_frame_id: Mapped[str | None] = mapped_column(String(12), default=None)
@@ -480,6 +481,8 @@ class JobRow(Base):
             seed=self.seed,
             negative_prompt=self.negative_prompt or "",
             style=self.style or "none",
+            # Pre-genre rows hold NULL (ALTER backfill): same guard as clips.
+            genre=self.genre if self.genre is not None else "none",
             camera_move=self.camera_move or "none",
             # Pre-enhance rows hold NULL (ALTER backfill): same guard as clips.
             enhance=self.enhance if self.enhance is not None else False,

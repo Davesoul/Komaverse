@@ -45,6 +45,8 @@ from komaverse.agent import (
     tool_generate,
     tool_layer_from_media,
     tool_list_frames,
+    tool_list_skills,
+    tool_read_skill,
     tool_list_takes,
     tool_manage_clips,
     tool_manage_frames,
@@ -126,6 +128,7 @@ def call_tool(
             job_factory,
             model=args.get("model"),
             style=_str(args, "style") or "none",
+            genre=_str(args, "genre") or "none",
             negative_prompt=_str(args, "negative_prompt"),
             reference_frame_id=args.get("reference_frame_id"),
             references=args.get("references"),
@@ -144,6 +147,7 @@ def call_tool(
             job_factory,
             args.get("references"),
             args.get("entity_ids"),
+            _str(args, "genre") or "none",
         )
     if name == "check_job":
         return tool_check_job(session, user, _str(args, "job_id"))
@@ -299,6 +303,10 @@ def call_tool(
         )
     if name == "cancel_job":
         return tool_cancel_job(session, user, _str(args, "job"))
+    if name == "list_skills":
+        return tool_list_skills()
+    if name == "read_skill":
+        return tool_read_skill(_str(args, "name"), args.get("section"))
     raise KeyError(f"unknown tool: {name}")
 
 
@@ -320,6 +328,26 @@ def _tool_defs() -> list[dict]:
             "name": "list_projects",
             "description": "List your projects with ids.",
             "inputSchema": {"type": "object", "properties": {}},
+        },
+        {
+            "name": "list_skills",
+            "description": (
+                "List the studio craft skills (anime direction, manga, "
+                "motion design) with one-line descriptions."
+            ),
+            "inputSchema": {"type": "object", "properties": {}},
+        },
+        {
+            "name": "read_skill",
+            "description": (
+                "Read one studio craft skill (or a single ## section) "
+                "into context."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {"name": s, "section": s},
+                "required": ["name"],
+            },
         },
         {
             "name": "create_project",
@@ -437,6 +465,7 @@ def _tool_defs() -> list[dict]:
                     "prompt": s,
                     "model": s,
                     "style": s,
+                    "genre": s,
                     "negative_prompt": s,
                     "reference_frame_id": s,
                     "references": arr,
@@ -459,6 +488,7 @@ def _tool_defs() -> list[dict]:
                     "prompt": s,
                     "seconds": num,
                     "model": s,
+                    "genre": s,
                     "references": arr,
                     "entity_ids": arr,
                 },
