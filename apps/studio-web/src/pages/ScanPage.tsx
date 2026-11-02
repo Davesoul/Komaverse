@@ -30,6 +30,7 @@ export default function ScanPage() {
   const [autoDetect, setAutoDetect] = useState(true);
   const [busy, setBusy] = useState("");
   const [notice, setNotice] = useState("");
+  // First-run weight downloads surface in the App-shell card (all tabs).
   const [zoom, setZoom] = useState(1);
   // True size (1:1): one image pixel per screen pixel, so the scan looks
   // exactly like the upload instead of a CSS fit-downscale. Any fit/+/−

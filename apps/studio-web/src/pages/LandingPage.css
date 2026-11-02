@@ -1,4 +1,4 @@
-/* Komaverse landing â€” video backdrop, splash intro, marketing sections. */
+/* Komaverse landing — video backdrop, splash intro, marketing sections. */
 
 .lv-bg {
   position: fixed;
@@ -54,8 +54,8 @@
 }
 .lv-splash-logo {
   position: relative;
-  width: 120px;
-  height: 120px;
+  width: 200px;
+  height: auto;
   object-fit: contain;
 }
 .lv-splash-tag {
@@ -121,7 +121,7 @@
   font-size: 17px;
 }
 .lv-brand img {
-  width: 30px;
+  width: auto;
   height: 30px;
   object-fit: contain;
 }
@@ -159,8 +159,8 @@
   margin: 0 0 16px;
 }
 .lv-logo {
-  width: 80px;
-  height: 80px;
+  width: 190px;
+  height: auto;
   object-fit: contain;
   margin-bottom: 16px;
 }
@@ -270,7 +270,7 @@
 .lv-bento-card.large {
   grid-column: span 3;
 }
-/* Splash panel: the focal tile breaks the rectangle â€” diagonal corner
+/* Splash panel: the focal tile breaks the rectangle — diagonal corner
  * cuts like a manga splash, with a drop-shadow filter for depth. */
 .lv-bento-card.large {
   border-width: 2px;
@@ -287,8 +287,8 @@
 .lv-bento-card.large:hover {
   transform: rotate(0deg);
 }
-/* The splash card's corner cuts clip anything sticking out â€” including the
- * red SFX sticker â€” so on the large tile the shout lives inside the frame
+/* The splash card's corner cuts clip anything sticking out — including the
+ * red SFX sticker — so on the large tile the shout lives inside the frame
  * instead of above it. */
 .lv-bento-card.large .lv-sfx {
   top: 12px;
@@ -460,7 +460,7 @@
   gap: 6px;
 }
 .lv-price-features li::before {
-  content: "â€” ";
+  content: "— ";
   color: var(--kv-faint);
 }
 .lv-price-note {
@@ -532,7 +532,7 @@
   color: var(--kv-faint);
 }
 .lv-footer-row img {
-  width: 22px;
+  width: auto;
   height: 22px;
   object-fit: contain;
 }
@@ -600,7 +600,7 @@
 /* Manga page sheet: ruled tiers read right-to-left, top-to-bottom, so DOM
  * order maps to tier 1 establishing (wide + tall side panel), tier 2 busy
  * action trio, tier 3 full-bleed splash finale. Open even gutters and page
- * margins â€” panels never touch except for the splash beat. */
+ * margins — panels never touch except for the splash beat. */
 .lv-reels {
   display: grid;
   grid-template-columns: repeat(12, 1fr);
@@ -616,7 +616,7 @@
   position: relative;
   margin: 0;
   min-width: 0;
-  /* Sharp ink corners â€” manga panels don't do rounded boxes, which also
+  /* Sharp ink corners — manga panels don't do rounded boxes, which also
    * retires the corner-clipping issue entirely. */
   border: 2px solid rgba(244, 239, 228, 0.2);
   border-radius: 0;
@@ -635,7 +635,7 @@
 /* Panels keep their frames and gutters; emphasis comes from the SFX
  * caption, not card motion. The finale breaks its frame: borderless,
  * near-bleed, with a diagonal-cut top edge slicing in from the tier
- * above â€” the classic splash entry. */
+ * above — the classic splash entry. */
 .lv-reel.span-12 {
   border: none;
   box-shadow: none;
@@ -656,7 +656,7 @@
   border-bottom-color: var(--kv-accent-text);
 }
 /* Diagonal + irregular beats. Grid position never changes, so the
- * right-to-left reading order survives â€” only the painted frame breaks.
+ * right-to-left reading order survives — only the painted frame breaks.
  * cut-slash: a parallelogram speed frame. clip-path would eat a real
  * border, so the ink stroke is redrawn with a zero-blur drop-shadow
  * stack that follows the clipped silhouette, plus a hard offset shadow.
@@ -674,7 +674,7 @@
     drop-shadow(0 -2px 0 rgba(244, 239, 228, 0.2))
     drop-shadow(5px 5px 0 rgba(0, 0, 0, 0.8));
   /* This outranks the reveal transition, so carry its opacity/transform
-   * with the same tokens â€” shaped panels fade/slide in like the rest. */
+   * with the same tokens — shaped panels fade/slide in like the rest. */
   transition:
     opacity var(--kv-dur-slow) var(--kv-ease-out) var(--kv-reveal-delay, 0ms),
     transform var(--kv-dur-slow) var(--kv-ease-out) var(--kv-reveal-delay, 0ms),
@@ -684,7 +684,7 @@
  * percent slant would cut each at a different angle and the facing edges
  * would converge. A fixed 24px shift over the full tier height keeps
  * every inner edge parallel, so each divider reads as one clean diagonal
- * channel without carving a double gutter â€” the grid gap itself stays at
+ * channel without carving a double gutter — the grid gap itself stays at
  * the page standard everywhere. */
 .lv-reel.cut-slash {
   clip-path: polygon(24px 0, 100% 0, calc(100% - 24px) 100%, 0 100%);
@@ -823,7 +823,7 @@
 @media (max-width: 860px) {
   .lv-instrument { grid-template-columns: 1fr; }
 }
-/* Dock: one plain panel holding the whole set â€” the traveling pen glides
+/* Dock: one plain panel holding the whole set — the traveling pen glides
    in and rests among the permanent lineup, no visible split between the
    zones. Geometry (flex ratios) still marks the rest and lineup areas,
    but visually it is a single instrument. */
@@ -878,7 +878,24 @@
 
 /* Short laptop viewports: keep the whole hero inside the first screen. */
 @media (max-height: 780px) {
-  .lv-logo { width: 56px; height: 56px; margin-bottom: 12px; }
+  .lv-logo { width: 150px; height: auto; margin-bottom: 12px; }
   .lv-scroll-hint { display: none; }
   .lv-hero { padding: 24px 16px; }
+}
+
+/* Nav links answer in brand red on hover, press, and keyboard focus.
+ * The underline reveal already uses currentColor, so it follows along. */
+.lv-link {
+  transition: background-size var(--kv-motion-normal) var(--kv-ease-out), color 90ms var(--kv-ease-out);
+}
+.lv-link:hover {
+  color: var(--kv-accent-hover);
+}
+.lv-link:active {
+  color: var(--kv-accent);
+}
+.lv-link:focus-visible {
+  color: var(--kv-accent-hover);
+  outline: 2px solid var(--kv-accent-border);
+  outline-offset: 2px;
 }

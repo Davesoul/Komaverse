@@ -97,6 +97,21 @@ def test_chat_config_meta(monkeypatch):
     assert model == "muse-spark-1.3"
 
 
+def test_chat_config_meta_vision_falls_back_to_chat_model(monkeypatch):
+    """Meta vision reuses the chat (multimodal) model unless overridden."""
+    monkeypatch.setattr(settings, "ai_provider", "meta")
+    monkeypatch.setattr(settings, "meta_api_key", "mk-test")
+    monkeypatch.setattr(settings, "meta_vision_model", None)
+    _, _, vision_model = get_chat_config(vision=True)
+    assert vision_model == settings.meta_chat_model
+    monkeypatch.setattr(settings, "meta_vision_model", "muse-wonder-1.0")
+    _, _, override = get_chat_config(vision=True)
+    assert override == "muse-wonder-1.0"
+    # Text brain is unaffected by the vision override.
+    _, _, chat_model = get_chat_config()
+    assert chat_model == settings.meta_chat_model
+
+
 def test_chat_config_openrouter(monkeypatch):
     monkeypatch.setattr(settings, "ai_provider", "openrouter")
     monkeypatch.setattr(settings, "openrouter_api_key", "or-test")

@@ -20,8 +20,22 @@ const YAW = [0.5, 0, -0.4];
 export default function InstrumentModels() {
   const hostRef = useRef<HTMLDivElement>(null);
   const [gone, setGone] = useState(false);
+  // Same intro gate as the scroll companion: shader compile + FBX inflate
+  // + texture uploads stay off the ident's frames.
+  const [live, setLive] = useState(false);
+  useEffect(() => {
+    if (live) return;
+    const release = () => setLive(true);
+    window.addEventListener("komaverse:intro-done", release, { once: true });
+    const fallback = window.setTimeout(release, 6500);
+    return () => {
+      window.removeEventListener("komaverse:intro-done", release);
+      window.clearTimeout(fallback);
+    };
+  }, [live]);
 
   useEffect(() => {
+    if (!live) return;
     const host = hostRef.current;
     if (!host) return;
     let cancelled = false;
@@ -232,7 +246,7 @@ export default function InstrumentModels() {
       io.disconnect();
       cleanup?.();
     };
-  }, []);
+  }, [live]);
 
   if (gone) return null;
   return <div ref={hostRef} className="lv-dock-models" aria-hidden="true" />;

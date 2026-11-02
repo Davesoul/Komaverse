@@ -311,7 +311,31 @@ def test_scan_routes_registered():
         "/api/v1/pages/{page_id}/panels/order",
         "/api/v1/panels/{panel_id}",
         "/api/v1/panels/{panel_id}/preview",
+        "/api/v1/detect-status",
     }
+
+
+def test_weight_download_progress_reported(tmp_path, monkeypatch):
+    from komaverse import detect as detect_mod
+
+    source = tmp_path / "hosted-probe.pt"
+    source.write_bytes(b"x" * 3000)
+    dest = tmp_path / "cache" / "probe.pt"
+    try:
+        assert detect_mod._ensure_weights(dest, source.as_uri(), "probe-dl") is True
+        snap = detect_mod.weight_status()["probe-dl"]
+        assert snap["state"] == "ready"
+        assert snap["bytes"] == 3000
+    finally:
+        detect_mod._WEIGHT_STATUS.pop("probe-dl", None)
+
+
+def test_detect_status_endpoint_reports_weights(factory, user):
+    from komaverse.api.scans import detect_status
+
+    with factory() as s:
+        out = detect_status(session=s, user=user)
+    assert isinstance(out["weights"], dict)
 
 
 def test_redetect_needs_confirm(factory, user):

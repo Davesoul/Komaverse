@@ -10,6 +10,21 @@ const InkDots = lazy(() => import("./InkDots"));
 export default function Backdrop() {
   const [activeIdx, setActiveIdx] = useState(0);
   const bgRefs = useRef<(HTMLVideoElement | null)[]>([]);
+  // The intro overlay is fully opaque: booting backdrop reels and the
+  // three.js ink field underneath it steals decode + compile budget from
+  // the ident's first frames and reads as lag when the music starts.
+  // Mount them only once the intro releases the page (or a fallback).
+  const [live, setLive] = useState(false);
+  useEffect(() => {
+    if (live) return;
+    const release = () => setLive(true);
+    window.addEventListener("komaverse:intro-done", release, { once: true });
+    const fallback = window.setTimeout(release, 6500);
+    return () => {
+      window.removeEventListener("komaverse:intro-done", release);
+      window.clearTimeout(fallback);
+    };
+  }, [live]);
   // Hero-first overlay: the dimming veil sits lighter over the hero so the
   // reels show through, then eases to full once the content scrolls in.
   const [veil, setVeil] = useState(1);
@@ -43,8 +58,31 @@ export default function Backdrop() {
   useEffect(() => {
     bgRefs.current.forEach((v, i) => {
       if (!v) return;
-      if (i !== activeIdx) v.pause();
-      else v.play().catch(() => {});
+      if (i !== activeIdx) {
+        v.pause();
+        return;
+      }
+      // Every reel starts from its own first frame on its turn: rewind,
+      // then play. A resumed mid-stream position reads as the reel
+      // "already being in the middle".
+      try {
+        if (v.readyState > 0) v.currentTime = 0;
+        else
+          v.addEventListener(
+            "loadedmetadata",
+            () => {
+              try {
+                v.currentTime = 0;
+              } catch {
+                /* metadata unavailable, play from wherever */
+              }
+            },
+            { once: true },
+          );
+      } catch {
+        /* seek unsupported, play from wherever */
+      }
+      v.play().catch(() => {});
     });
     // Warm the next reel while the current one plays, so rotation never
     // waits on the network (paused + hidden, it only buffers).
@@ -57,24 +95,27 @@ export default function Backdrop() {
 
   return (
     <div className="lv-bg" aria-hidden="true">
-      {VIDEOS.map((src, i) => (
-        <video
-          key={src}
-          ref={(el) => {
-            bgRefs.current[i] = el;
-          }}
-          src={src}
-          autoPlay
-          muted
-          loop
-          playsInline
-          preload={i === activeIdx ? "auto" : "metadata"}
-          className={i === activeIdx ? "active" : ""}
-        />
-      ))}
-      <Suspense fallback={null}>
-        <InkDots />
-      </Suspense>
+      {live &&
+        VIDEOS.map((src, i) => (
+          <video
+            key={src}
+            ref={(el) => {
+              bgRefs.current[i] = el;
+            }}
+            src={src}
+            autoPlay
+            muted
+            loop
+            playsInline
+            preload={i === activeIdx ? "auto" : "metadata"}
+            className={i === activeIdx ? "active" : ""}
+          />
+        ))}
+      {live && (
+        <Suspense fallback={null}>
+          <InkDots />
+        </Suspense>
+      )}
       <div className="lv-bg-overlay" style={{ opacity: veil }} />
     </div>
   );

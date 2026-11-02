@@ -1432,7 +1432,7 @@ export default function AgentDock() {
           <Btn small active={showBrain} onClick={openBrain} aria-label="Brain settings" title="Switch provider and models">
             Brain
           </Btn>
-          <Btn small onClick={() => { setMessages([GREETING]); api.clearAgentHistory(getCurrentProject()).catch(() => {}); }} aria-label="Clear chat history">
+          <Btn small onClick={() => { if (!window.confirm("Clear this chat history? The conversation memory is deleted. This can't be undone.")) return; setMessages([GREETING]); api.clearAgentHistory(getCurrentProject()).catch(() => {}); }} aria-label="Clear chat history">
             Clear
           </Btn>
           <Btn small onClick={() => setOpen(false)} aria-label="Close agent">

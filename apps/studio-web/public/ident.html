@@ -9,6 +9,7 @@
   started at t=0 by IntroOverlay — the page itself stays silent so browsers
   never block its autoplay).
   Open fullscreen and screen-record for the hackathon video.
+  ?embed=1  single playthrough, no loop restart (used by the app intro).
     R         restart        Space  play/pause
     ?debug=1  scrub slider   ?clean=1  hold frame 0, no autoplay
   Beats: travel 0–2.2s (camera flows through a 3-panel manga page:
@@ -23,7 +24,8 @@
   href="https://fonts.googleapis.com/css2?family=Oswald:wght@600;700&family=Archivo:wght@500;600&display=swap"
   rel="stylesheet"
 />
-<script src="https://cdn.jsdelivr.net/npm/gsap@3.12.5/dist/gsap.min.js"></script>
+<script src="./vendor/gsap.min.js"></script>
+<script>if (!window.gsap) document.write('<script src="https://cdn.jsdelivr.net/npm/gsap@3.12.5/dist/gsap.min.js"><\/script>');</script>
 <style>
   :root {
     --ink: #0b0b0d;
@@ -288,7 +290,10 @@
 
   /* ---------- hold: the lockup alone, then dip to black for a loop ---------- */
   tl.to("#lockup", { opacity: 0, duration: 0.25 }, 4.72);
-  tl.add(function () { tl.play(0); });
+  // In-app the overlay owns the ending: play once and hold the last
+  // frame under its fade. Standalone keeps the seamless loop for
+  // screen-recording (?embed=1 disables the restart).
+  tl.add(function () { if (!qs.has("embed")) tl.play(0); });
 
   /* ---------- transport ---------- */
   var scrub = document.getElementById("scrub");

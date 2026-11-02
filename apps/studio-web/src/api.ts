@@ -462,6 +462,10 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ detector, direction, confirm }),
     }),
+  detectStatus: () =>
+    req<{ weights: Record<string, { state: string; bytes: number; total: number | null }> }>(
+      "/api/v1/detect-status",
+    ),
   addPanel: (pageId: string, box: { x: number; y: number; w: number; h: number }) =>
     req<Panel>(`/api/v1/pages/${pageId}/panels`, {
       method: "POST",

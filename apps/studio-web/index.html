@@ -22,7 +22,12 @@
       content="Turn manga into animation: scan, draw, animate, and generate with AI."
     />
     <link rel="manifest" href="/manifest.webmanifest" />
-    <link rel="icon" type="image/png" href="/koma-wari-logo-sm.png" />
+    <link rel="icon" type="image/png" href="/komaverse-logo.png" />
+    <!-- First paint is the ident: fetch its animation + sting during HTML
+      parse so both are decoded before the overlay mounts (no startup hitch
+      when the music starts). -->
+    <link rel="preload" href="/ident.html" as="document" fetchpriority="high" />
+    <link rel="preload" href="/audio/ident-sting.mp3" as="audio" fetchpriority="high" />
     <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png" />
     <title>Komaverse — AI Anime Studio</title>
   </head>

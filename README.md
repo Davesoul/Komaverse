@@ -14,7 +14,8 @@ started Oct 28, 2026.
 - **Scan:** upload manga pages, detect panels (YOLO `yolo-leoxs22`
   default, `yolo` best-comic option via `KOMA_YOLO_MODEL`, heuristic
   fallback, cloud with local fallback; missing weights can be fetched
-  once from `KOMA_YOLO_LEOXS_URL` / `KOMA_YOLO_URL` on web deploys),
+  once from `KOMA_YOLO_LEOXS_URL` / `KOMA_YOLO_URL` on web deploys, with
+  a bottom-left download card visible on every tab until ready),
   1:1 true-size viewer, SVG overlay editor (move/reshape/add/delete,
   reading order), Send-to-Render handoff
 - **Draw:** layered canvas (brush/eraser, pressure, undo/redo, G-pen and
@@ -27,7 +28,9 @@ started Oct 28, 2026.
   the paper sits in a tight scroll bed and moves only on its hotkeys
   (H tool or Space-drag); it re-centers on fit/frame switch
 - **Render:** CapCut-style V1/A1/S1 timeline (proportional blocks, second
-  ruler, tenths timecode, zoom, drag-reorder, edge-trim with cue `end_sec`),
+  ruler, tenths timecode, zoom, drag-reorder, edge-trim with cue `end_sec`,
+  undo/redo with Ctrl+Z / Ctrl+Shift+Z like Draw), every delete gated by
+  a confirm pop-up,
   per-clip inspector (duration steppers, motion), scenes + clips timeline
   (panels, frames, stills) with audio waveforms on cues and Ctrl+wheel
   zoom + fit-to-width, sidebar grouped by sequence with search,
@@ -60,10 +63,11 @@ started Oct 28, 2026.
   desktop shell (Windows/macOS/Linux), remote-API base URL setting
 - **Auth & security:** register/login/logout, per-user projects, rate limits,
   security headers; **landing page** with auth gate included
-- **App intro:** a 5s manga-panel ident (`apps/studio-web/public/ident.html`)
-  plays over every app load with its sting (`public/audio/ident-sting.mp3`,
+- **App intro:** a 5s manga-panel ident (`apps/studio-web/public/ident.html`,
+  `?embed=1` for a single in-app playthrough) plays over every app load
+  with its sting (`public/audio/ident-sting.mp3`,
   "Fingerstyle Impact") — skippable (Skip/Esc), silent-safe when the browser
-  blocks autoplay, skipped under reduced motion. See
+  blocks autoplay; reduced motion is covered by Skip/Escape/auto-dismiss. See
   [docs/BRAND.md](docs/BRAND.md)
 - **Observability:** JSON logs + request IDs, Prometheus `/metrics`,
   `/ready`, error ring, client error funnel ([docs](docs/OBSERVABILITY.md))

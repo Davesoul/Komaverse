@@ -435,3 +435,101 @@ skills added (all `muse skills validate` clean): visual-composition,
 drawing-fundamentals (line/perspective/screentone/layer discipline),
 color-theory (cel shadow colors, light logic), manga-literacy
 (direction, transitions, SFX, adaptation to timeline), web-research.
+
+## ADR-16: First-run downloads, timeline undo, delete approvals (accepted)
+
+- **Model download card (all tabs):** first Scan detect fetches YOLO
+  weights once via `/api/v1/detect-status` (`weight_status()` bytes/total
+  snapshot, covered in `test_scans.py`). The polling card moved from
+  Scan-only into the `App` shell (`ModelDownloadCard`, bottom-left,
+  `role="status"`), so Draw/Render/Media show the same one-time notice.
+  The progress tracking deadlocked (`_WEIGHT_LOCK` re-taken mid-download);
+  the guard is now an RLock, covered by the download tests.
+- **Render undo/redo (Draw parity):** the timeline keeps up to 50
+  pre-mutation snapshots of every scene's clip list. Undo restores by
+  reconciling through the same endpoints the buttons use (delete added,
+  re-add removed, patch changed, reorder); scene add/remove/duplicate
+  clears the stacks, cues/subtitles/scene order are out of scope.
+  Ctrl+Z / Ctrl+Shift+Z / Ctrl+Y, skipped inside text fields.
+- **Delete approvals:** every user-initiated delete now passes a
+  `window.confirm` pop-up naming the target — panels, pages, projects,
+  frames, layers, scenes, clips, entities, subtitles, takes, cues,
+  sequences, and agent chat-history clear. The four previously
+  unguarded paths (entity, clip, subtitles, cue) were fixed; the
+  undo-restore's internal deletes are not user deletes and stay silent.
+  Agent tool deletes remain intent-driven (the typed instruction plus
+  live dock tool events), not pop-up gated — a pre-execution approval
+  step is future work.
+- **App security (verified, no gaps found):** all `/api/v1` routers
+  require `get_current_user`; `/media/*` additionally checks project/job
+  ownership with traversal-guarded paths; MCP-over-HTTP resolves a
+  configured user, never cookies; rate limits (10–600/min by route) +
+  security headers in `main.py`; credits ledger append-only with 402
+  enforcement.
+- **Agent loop (verified reliable):** the cloud brain runs at most 6
+  tool steps per turn (`_cloud_loop`), records chat/token usage every
+  turn, falls back to DemoBrain on any transport/provider error with
+  the cause surfaced (not silent), and scopes every tool through the
+  same ownership-checked endpoint functions as the UI. History is
+  per-user+project, capped (10 loaded / 100 kept).
+- **Meta vision = Meta chat unless overridden:** `get_chat_config(
+  vision=True)` resolves `META_VISION_MODEL or META_CHAT_MODEL`
+  (default `muse-spark-1.3`) — the Muse text models are multimodal, so
+  no separate vision model is needed; setting `META_VISION_MODEL`
+  (e.g. `muse-wonder-1.0`) opts a vision call out. Covered by
+  `test_chat_config_meta_vision_falls_back_to_chat_model`.
+
+## ADR-17: Ident is the brand, plays unconditionally (accepted)
+
+- The GSAP rooms ident (`public/ident.html`) stays the app intro:
+  camera travels the manga panels, impact, then the lockup holds.
+  Its final lockup IS the komaverse logo (Koma/Verse tilted panels),
+  captured from the running ident into `public/komaverse-logo.png`
+  (transparent) and used for the header, landing, and tab icon —
+  no separate logo artwork, everything comes from the ident.
+- The ident plays on every first load with no OS reduced-motion gate
+  (Netflix rule). Reduced-motion users are covered by Skip, Escape,
+  and the 5.2s auto-dismiss; no flashing anywhere (WCAG 2.2.2/2.3.1).
+  GSAP is vendored (`public/vendor/gsap.min.js`, CDN fallback) so a
+  blocked CDN can't silently kill first paint. The sting is preloaded
+  at parse and started two frames after the timeline kick so audio
+  spin-up never shares the first-frame tick. The four backdrop reels,
+  the three.js ink field, and the splash video all mount only on
+  `komaverse:intro-done` (6.5s fallback) — nothing decodes or compiles
+  underneath the opaque ident, which was the actual hitch: six videos
+  plus a WebGL init used to boot inside the ident window.
+- Nav links answer in brand red on hover/press/focus; the active app
+  tab renders red. Color-only state change, <100ms transition.
+
+## ADR-18: Intro hitch was lazy FBX stages, not the audio (accepted)
+
+- The music-start lag survived the ADR-17 stagger (videos + Backdrop +
+  splash gated on `komaverse:intro-done`) because two three.js stages
+  were missed: `ScrollCompanion` booted its pen on a 500ms timer and
+  `InstrumentModels` fired on an IntersectionObserver that trips on
+  load. FBX inflate (`unzlibSync`), texture uploads (`texSubImage2D`),
+  and first-use shader compiles then saturated the main thread for
+  ~3s mid-intro while the sting kept playing - which reads as
+  "lag exactly when the music starts". A CDP CPU profile during the
+  intro named them; the audio path was innocent (warm muted play at
+  mount, unmuted restart at kick, verified playing + in sync).
+- Both stages now use the same `live` gate as Backdrop: boot only on
+  `komaverse:intro-done` (6.5s fallback for overlay-less mounts).
+  Measured after the fix: worst frame gap 114ms (was 2072ms), no gaps
+  over 50ms past the mount window, sting clock tracking wall clock.
+  Post-intro shader compile correctly moves to after dismiss.
+
+## ADR-19: Intro plays once, reels rewind (accepted)
+
+- The in-app ident ran `ident.html` with its authoring loop intact, so
+  at ~5s the timeline restarted and the rooms replayed under the
+  overlay's fade. The iframe now loads `ident.html?embed=1`, which
+  plays a single playthrough and holds the end frame; standalone
+  `ident.html` keeps the seamless loop for screen-recording. No visual
+  change to the ident itself.
+- Backdrop reels all auto-played at mount and resumed mid-stream on
+  rotation, so a reel's turn often began in its middle. The active reel
+  is now rewound to its first frame on every activation (guarded for
+  not-yet-loaded metadata) while the 4.5s crossfade cadence is
+  unchanged. Verified: three consecutive activations start at
+  0.24-0.46s and advance in step.

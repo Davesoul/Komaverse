@@ -10,7 +10,6 @@ path (its SAHI tiling bugs left behind).
 from __future__ import annotations
 
 import logging
-import shutil
 import threading
 import urllib.request
 from pathlib import Path
@@ -235,7 +234,27 @@ def _model_path() -> Path:
 
 
 _MODEL_CACHE: dict[str, Any] = {}
-_WEIGHT_LOCK = threading.Lock()
+# Reentrant: _ensure_weights holds this across the download while
+# _note_weight (per-chunk progress for the UI card) takes it again.
+_WEIGHT_LOCK = threading.RLock()
+
+# Weight download progress for the UI card: name -> {state, bytes, total}.
+# States: downloading | ready | error. Absent name = never attempted.
+_WEIGHT_STATUS: dict[str, dict] = {}
+
+
+def _note_weight(
+    name: str, state: str, nbytes: int = 0, total: int | None = None
+) -> None:
+    with _WEIGHT_LOCK:
+        entry = _WEIGHT_STATUS.setdefault(name, {})
+        entry.update({"state": state, "bytes": nbytes, "total": total})
+
+
+def weight_status() -> dict[str, dict]:
+    """Snapshot for the download card: {name: {state, bytes, total, path}}."""
+    with _WEIGHT_LOCK:
+        return {k: dict(v) for k, v in _WEIGHT_STATUS.items()}
 
 
 def _ensure_weights(path: Path, url: str, name: str) -> bool:
@@ -244,6 +263,9 @@ def _ensure_weights(path: Path, url: str, name: str) -> bool:
     Web deploys do not vendor the .pt files: the first scan downloads them
     into the configured path and every later scan reuses the cache. Any
     failure returns False and callers fall back to heuristic.
+
+    Locking: the guard is an RLock because the per-chunk progress notes
+    re-take it while the download holds it (a plain Lock deadlocks).
     """
     if path.is_file():
         return True
@@ -256,12 +278,28 @@ def _ensure_weights(path: Path, url: str, name: str) -> bool:
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
             with urllib.request.urlopen(url, timeout=60) as resp, open(tmp, "wb") as fh:
-                shutil.copyfileobj(resp, fh, length=1024 * 256)
+                raw_total = resp.headers.get("Content-Length")
+                try:
+                    total = int(raw_total) if raw_total else None
+                except (TypeError, ValueError):
+                    total = None
+                _note_weight(name, "downloading", 0, total)
+                downloaded = 0
+                while True:
+                    chunk = resp.read(1024 * 256)
+                    if not chunk:
+                        break
+                    fh.write(chunk)
+                    downloaded += len(chunk)
+                    _note_weight(name, "downloading", downloaded, total)
             tmp.replace(path)
-            logger.info("%s weights downloaded (%d bytes)", name, path.stat().st_size)
+            size = path.stat().st_size
+            _note_weight(name, "ready", size, size)
+            logger.info("%s weights downloaded (%d bytes)", name, size)
             return True
         except Exception as exc:
             logger.warning("%s weights download failed (%s); using heuristic", name, exc)
+            _note_weight(name, "error")
             try:
                 tmp.unlink(missing_ok=True)
             except OSError:

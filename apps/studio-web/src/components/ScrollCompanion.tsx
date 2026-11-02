@@ -28,9 +28,24 @@ export default function ScrollCompanion({
     () => typeof window === "undefined" || window.innerWidth >= 720,
   );
   const [gone, setGone] = useState(false);
+  // The intro overlay is fully opaque: compiling shaders, inflating the
+  // FBX, and uploading its textures underneath it steals main-thread
+  // budget from the ident's frames and reads as lag when the music
+  // starts. Boot only once the intro releases the page (or a fallback).
+  const [live, setLive] = useState(false);
+  useEffect(() => {
+    if (live) return;
+    const release = () => setLive(true);
+    window.addEventListener("komaverse:intro-done", release, { once: true });
+    const fallback = window.setTimeout(release, 6500);
+    return () => {
+      window.removeEventListener("komaverse:intro-done", release);
+      window.clearTimeout(fallback);
+    };
+  }, [live]);
 
   useEffect(() => {
-    if (!enabled) return;
+    if (!enabled || !live) return;
     const host = hostRef.current;
     if (!host) return;
     let cancelled = false;
@@ -454,17 +469,14 @@ export default function ScrollCompanion({
       };
     };
 
-    // Short deferred start: one model only, so setup is fast — just let
-    // first paint win the race before three.js downloads.
-    const timer = window.setTimeout(() => {
-      void start();
-    }, 500);
+    // Start once the intro has released the page: parse + textures land
+    // on the landing, never on the ident's frames.
+    void start();
     return () => {
       cancelled = true;
-      window.clearTimeout(timer);
       cleanup?.();
     };
-  }, [enabled, dockRef, onDock]);
+  }, [enabled, live, dockRef, onDock]);
 
   if (!enabled || gone) return null;
   return <div ref={hostRef} className="kv-companion" />;

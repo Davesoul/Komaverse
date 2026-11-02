@@ -9,7 +9,7 @@ import "./LandingPage.css";
 
 const ScrollCompanion = lazy(() => import("../components/ScrollCompanion"));
 const InstrumentModels = lazy(() => import("../components/InstrumentModels"));
-const LOGO = "/koma-wari-logo-sm.png";
+const LOGO = "/komaverse-logo.png";
 
 function Icon({ paths }: { paths: string[] }) {
   return (
@@ -144,21 +144,33 @@ export default function LandingPage({
     return () => lenis?.destroy();
   }, []);
 
-  // Splash: try unmuted first (works with prior engagement), fall back to
-  // muted so it always plays; skip entirely on end or error.
+  // Splash: held until the intro overlay is done (or a 6.5s fallback) so
+  // its decode never shares the ident's first frames. Try unmuted first
+  // (works with prior engagement), fall back to muted; skip on end/error.
   useEffect(() => {
     if (reducedMotion) return;
     const video = splashRef.current;
     if (!video) return;
-    video.muted = false;
-    video
-      .play()
-      .then(() => setMuted(false))
-      .catch(() => {
-        video.muted = true;
-        setMuted(true);
-        video.play().catch(() => setSplashDone(true));
-      });
+    let started = false;
+    const start = () => {
+      if (started) return;
+      started = true;
+      video.muted = false;
+      video
+        .play()
+        .then(() => setMuted(false))
+        .catch(() => {
+          video.muted = true;
+          setMuted(true);
+          video.play().catch(() => setSplashDone(true));
+        });
+    };
+    window.addEventListener("komaverse:intro-done", start, { once: true });
+    const fallback = window.setTimeout(start, 6500);
+    return () => {
+      window.removeEventListener("komaverse:intro-done", start);
+      window.clearTimeout(fallback);
+    };
   }, [reducedMotion]);
 
   useEffect(() => {
@@ -226,7 +238,7 @@ export default function LandingPage({
             src="/intro.mp4"
             autoPlay
             playsInline
-            preload="auto"
+            preload="metadata"
             onEnded={() => setSplashDone(true)}
             onError={() => setSplashDone(true)}
           />

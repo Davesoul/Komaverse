@@ -312,6 +312,21 @@ export default function RenderPage() {
   const [renamingScene, setRenamingScene] = useState("");
   const [dragId, setDragId] = useState<string | null>(null);
   const [selectedClipId, setSelectedClipId] = useState<string | null>(null);
+  /** Timeline undo/redo (Draw parity): snapshots of every scene's clip
+   * list, so cross-scene auto-direct restores too. Capped at 50; scene
+   * add/remove/duplicate clears the stacks because ids no longer
+   * reconcile. Cues, subtitles, and scene order are out of scope. */
+  const [clipPast, setClipPast] = useState<Scene[][]>([]);
+  const [clipFuture, setClipFuture] = useState<Scene[][]>([]);
+  const pushClipHistory = () => {
+    const snap: Scene[] = JSON.parse(JSON.stringify(scenes));
+    setClipPast((p) => [...p.slice(-49), snap]);
+    setClipFuture([]);
+  };
+  const clearClipHistory = () => {
+    setClipPast([]);
+    setClipFuture([]);
+  };
 
   // Reload restores the persisted project (validated against the server
   // list) instead of asking again; manual selection still publishes.
@@ -341,6 +356,28 @@ export default function RenderPage() {
       window.removeEventListener("komaverse:agent-job-done", onAgent);
       window.removeEventListener("komaverse:agent-timeline-changed", onAgent);
     };
+  });
+
+  // Draw parity: Ctrl+Z undo, Ctrl+Shift+Z / Ctrl+Y redo for timeline edits.
+  // Skipped inside text fields so typing is never hijacked.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (!(e.ctrlKey || e.metaKey) || e.altKey) return;
+      const t = e.target as HTMLElement | null;
+      const tag = t?.tagName ?? "";
+      if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || t?.isContentEditable) return;
+      const key = e.key.toLowerCase();
+      if (key === "z" && !e.shiftKey) {
+        e.preventDefault();
+        void undoClips();
+      } else if ((key === "z" && e.shiftKey) || key === "y") {
+        e.preventDefault();
+        void redoClips();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   });
 
   const refresh = async (projectId: string, keepScene?: string) => {
@@ -455,6 +492,7 @@ export default function RenderPage() {
     previewMotion = false,
   ) => {
     if (!project || !scene) return;
+    pushClipHistory();
     try {
       await api.patchClip(id, patch);
       if (
@@ -719,6 +757,7 @@ export default function RenderPage() {
 
   const addAllPanels = async () => {
     if (!project || !scene || busy) return;
+    pushClipHistory();
     setBusy("add-all");
     try {
       // One server path for UI + agent: dedupe, motion cycling, scene choice.
@@ -742,6 +781,7 @@ export default function RenderPage() {
 
   const moveClip = async (clipId: string, delta: -1 | 1) => {
     if (!project || !scene) return;
+    pushClipHistory();
     const ids = clips.map((c) => c.id);
     const i = ids.indexOf(clipId);
     const j = i + delta;
@@ -753,11 +793,99 @@ export default function RenderPage() {
 
   const dropClip = async (targetId: string) => {
     if (!project || !scene || !dragId || dragId === targetId) return;
+    pushClipHistory();
     const ids = clips.map((c) => c.id).filter((id) => id !== dragId);
     ids.splice(ids.indexOf(targetId), 0, dragId);
     setDragId(null);
     await api.orderClips(scene.id, ids);
     await refresh(project.id, scene.id);
+  };
+
+  /** Mutable clip fields reconciled by undo/redo (ids drive add/delete). */
+  const CLIP_UNDO_FIELDS = [
+    "duration", "motion", "transition", "transition_duration", "fade_in",
+    "fade_out", "filter", "text", "text_size", "text_color",
+    "text_position", "text_anim",
+  ] as const;
+
+  const restoreClipSnapshot = async (snap: Scene[]) => {
+    if (!project) return;
+    for (const snapScene of snap) {
+      const live = scenes.find((s) => s.id === snapScene.id);
+      if (!live) continue; // scene deleted since: nothing to reconcile
+      const liveById = new Map(live.clips.map((c) => [c.id, c]));
+      const snapById = new Map(snapScene.clips.map((c) => [c.id, c]));
+      for (const c of live.clips) {
+        if (!snapById.has(c.id)) await api.deleteClip(c.id);
+      }
+      const idMap = new Map<string, string>();
+      for (const s of snapScene.clips) {
+        if (!liveById.has(s.id)) {
+          const created = await api.addClip(snapScene.id, {
+            kind: s.kind,
+            source_id: s.source_id,
+            duration: s.duration,
+            motion: s.motion,
+            transition: s.transition,
+            transition_duration: s.transition_duration,
+            fade_in: s.fade_in,
+            fade_out: s.fade_out,
+            filter: s.filter,
+            text: s.text,
+            text_size: s.text_size,
+            text_color: s.text_color,
+            text_position: s.text_position,
+            text_anim: s.text_anim,
+          });
+          idMap.set(s.id, created.id);
+        } else {
+          const cur = liveById.get(s.id)!;
+          const patch: Partial<Clip> = {};
+          for (const k of CLIP_UNDO_FIELDS) {
+            if (cur[k] !== s[k]) (patch as Record<string, unknown>)[k] = s[k];
+          }
+          if (Object.keys(patch).length > 0) await api.patchClip(s.id, patch);
+        }
+      }
+      await api.orderClips(
+        snapScene.id,
+        snapScene.clips.map((s) => idMap.get(s.id) ?? s.id),
+      );
+    }
+    setSelectedClipId(null);
+    await refresh(project.id, sceneId);
+  };
+
+  const undoClips = async () => {
+    const top = clipPast[clipPast.length - 1];
+    if (!top || !project || busy) return;
+    setBusy("undo");
+    try {
+      setClipFuture((f) => [...f.slice(-49), JSON.parse(JSON.stringify(scenes))]);
+      setClipPast((p) => p.slice(0, -1));
+      await restoreClipSnapshot(top);
+      setNotice("Undid timeline change.");
+    } catch (e) {
+      setNotice(`Undo failed: ${(e as Error).message}`);
+    } finally {
+      setBusy("");
+    }
+  };
+
+  const redoClips = async () => {
+    const top = clipFuture[clipFuture.length - 1];
+    if (!top || !project || busy) return;
+    setBusy("redo");
+    try {
+      setClipPast((p) => [...p.slice(-49), JSON.parse(JSON.stringify(scenes))]);
+      setClipFuture((f) => f.slice(0, -1));
+      await restoreClipSnapshot(top);
+      setNotice("Redid timeline change.");
+    } catch (e) {
+      setNotice(`Redo failed: ${(e as Error).message}`);
+    } finally {
+      setBusy("");
+    }
   };
 
   const moveScene = async (delta: -1 | 1) => {
@@ -776,6 +904,7 @@ export default function RenderPage() {
     if (!window.confirm(`Delete scene "${scene.name}" with its clips and cues? This can't be undone.`)) return;
     await api.deleteScene(scene.id);
     setSceneId("");
+    clearClipHistory();
     await refresh(project.id);
   };
 
@@ -809,6 +938,8 @@ export default function RenderPage() {
 
   const removeEntity = async (id: string) => {
     if (busy) return;
+    const target = entities.find((e) => e.id === id);
+    if (!window.confirm(`Delete entity "${target?.name || id}"? Generations using it keep their frames, but the guide is gone. This can't be undone.`)) return;
     setBusy("entity");
     try {
       await api.deleteEntity(id);
@@ -897,6 +1028,7 @@ export default function RenderPage() {
 
   const addResultToTimeline = async () => {
     if (!project || !scene || frames.length === 0) return;
+    pushClipHistory();
     const newest = [...frames].sort((a, b) => a.index - b.index).pop()!;
     await api.addClip(scene.id, { kind: "frame", source_id: newest.id, duration: 2 });
     await refresh(project.id, scene.id);
@@ -968,6 +1100,7 @@ export default function RenderPage() {
                   onClick={async () => {
                     if (!project) return;
                     const s = await api.createScene(project.id, `Scene ${scenes.length + 1}`);
+                    clearClipHistory();
                     await refresh(project.id, s.id);
                   }}
                 >
@@ -983,6 +1116,7 @@ export default function RenderPage() {
                   onClick={async () => {
                     if (!project || !scene) return;
                     const copy = await api.duplicateScene(scene.id);
+                    clearClipHistory();
                     await refresh(project.id, copy.id);
                   }}
                 >
@@ -1032,6 +1166,7 @@ export default function RenderPage() {
                         title={`Add every ${s.name} frame as a clip`}
                         onClick={async () => {
                           if (!project || !scene) return;
+                          pushClipHistory();
                           await api.addClipsBatch(
                             scene.id,
                             list.map((f) => ({ kind: "frame", source_id: f.id, duration: 2 })),
@@ -1089,6 +1224,7 @@ export default function RenderPage() {
                 disabled={!framePick}
                 onClick={async () => {
                   if (!project) return;
+                  pushClipHistory();
                   await api.addClip(scene.id, { kind: "frame", source_id: framePick, duration: 2 });
                   await refresh(project.id, scene.id);
                 }}
@@ -1111,6 +1247,7 @@ export default function RenderPage() {
                   disabled={!pagePick}
                   onClick={async () => {
                     if (!project) return;
+                    pushClipHistory();
                     await api.addClip(scene.id, { kind: "media", source_id: pagePick, duration: 2 });
                     await refresh(project.id, scene.id);
                   }}
@@ -1138,6 +1275,7 @@ export default function RenderPage() {
                   disabled={!panelPick}
                   onClick={async () => {
                     if (!project) return;
+                    pushClipHistory();
                     await api.addClip(scene.id, { kind: "panel", source_id: panelPick, duration: 2 });
                     await refresh(project.id, scene.id);
                   }}
@@ -1163,6 +1301,7 @@ export default function RenderPage() {
                   disabled={!videoPick}
                   onClick={async () => {
                     if (!project) return;
+                    pushClipHistory();
                     const picked = doneVideos.find((j) => j.id === videoPick);
                     await api.addClip(scene.id, {
                       kind: "video",
@@ -1186,6 +1325,7 @@ export default function RenderPage() {
                     if (e.key === "Enter" && textPick.trim()) {
                       const v = textPick;
                       setTextPick("");
+                      pushClipHistory();
                       void (async () => {
                         await api.addClip(scene.id, { kind: "text", source_id: "", text: v, duration: 2 });
                         await refresh(project.id, scene.id);
@@ -1199,6 +1339,7 @@ export default function RenderPage() {
                     if (!project) return;
                     const v = textPick;
                     setTextPick("");
+                    pushClipHistory();
                     await api.addClip(scene.id, { kind: "text", source_id: "", text: v, duration: 2 });
                     await refresh(project.id, scene.id);
                   }}
@@ -1797,6 +1938,29 @@ export default function RenderPage() {
                 </div>
 
                 <div style={{ marginBottom: 20 }}>
+                  <div style={{ display: "flex", gap: 6, alignItems: "center", marginBottom: 8 }}>
+                    <IconBtn
+                      label="Undo timeline change (Ctrl+Z)"
+                      disabled={clipPast.length === 0 || !!busy}
+                      onClick={() => void undoClips()}
+                      data-testid="timeline-undo"
+                    >
+                      ↩
+                    </IconBtn>
+                    <IconBtn
+                      label="Redo timeline change (Ctrl+Shift+Z)"
+                      disabled={clipFuture.length === 0 || !!busy}
+                      onClick={() => void redoClips()}
+                      data-testid="timeline-redo"
+                    >
+                      ↪
+                    </IconBtn>
+                    <span style={{ fontSize: 12, color: "var(--kv-muted)" }} aria-live="polite">
+                      {clipPast.length > 0
+                        ? `${clipPast.length} timeline step${clipPast.length > 1 ? "s" : ""} to undo`
+                        : "Timeline edits are undoable"}
+                    </span>
+                  </div>
                   <Timeline
                     clips={clips.map((c) => ({
                       id: c.id,
@@ -2084,8 +2248,11 @@ export default function RenderPage() {
                     <Btn
                       small
                       danger
+                      data-testid="clip-delete"
                       onClick={async () => {
                         if (!project || !scene) return;
+                        if (!window.confirm(`Delete this clip? This can't be undone.`)) return;
+                        pushClipHistory();
                         try {
                           await api.deleteClip(selectedClip.id);
                           setSelectedClipId(null);
@@ -2131,6 +2298,7 @@ export default function RenderPage() {
                       danger
                       disabled={subBusy}
                       onClick={async () => {
+                        if (!window.confirm(`Remove subtitles from "${scene.name}"? The .srt track is deleted from the timeline and exports. This can't be undone.`)) return;
                         try {
                           await api.deleteSubtitles(scene.id);
                           setSubtitles(null);

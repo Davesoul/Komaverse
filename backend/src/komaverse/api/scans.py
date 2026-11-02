@@ -28,7 +28,7 @@ from komaverse.db_models import (
     SceneRow,
     UserRow,
 )
-from komaverse.detect import run_detector
+from komaverse.detect import run_detector, weight_status
 from komaverse.models import Page, Panel, Project
 from komaverse.observability import metrics
 
@@ -267,6 +267,15 @@ def upload_page(
     session.add(row)
     session.commit()
     return row.to_schema()
+
+
+@router.get("/detect-status")
+def detect_status(
+    session: Session = Depends(get_session),
+    user: UserRow = Depends(get_current_user),
+):
+    """Weight download progress for the first-scan card (bytes/total)."""
+    return {"weights": weight_status()}
 
 
 @router.post("/pages/{page_id}/detect", response_model=DetectResponse)

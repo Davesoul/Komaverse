@@ -1,5 +1,4 @@
 import { useEffect, useRef, useState } from "react";
-import { prefersReducedMotion } from "./Reveal";
 
 const STING_SRC = "/audio/ident-sting.mp3";
 // The ident sting runs 5.0s; the track runs 5.6s with its tail.
@@ -13,14 +12,14 @@ const FADE_MS = 350;
 let introShown = false;
 
 export default function IntroOverlay() {
+  // Netflix rule: the ident plays on every first load, no OS check.
+  // Reduced-motion users are covered by Skip, Escape, and the 5.2s
+  // auto-dismiss (WCAG 2.2.2 stop control + 2.3.1 no-flash) — never
+  // a trapped fullscreen animation.
   const [visible, setVisible] = useState(() => {
     if (introShown) return false;
     introShown = true;
-    try {
-      return !prefersReducedMotion();
-    } catch {
-      return true;
-    }
+    return true;
   });
   const [leaving, setLeaving] = useState(false);
   const [soundBlocked, setSoundBlocked] = useState(false);
@@ -30,28 +29,65 @@ export default function IntroOverlay() {
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const dismissTimer = useRef(0);
 
+  const doneFired = useRef(false);
   const dismiss = () => {
     if (!visible) return;
     window.clearTimeout(dismissTimer.current);
     setLeaving(true);
     window.setTimeout(() => setVisible(false), FADE_MS);
+    // Release whatever waits behind the intro (the landing holds its
+    // splash video until this fires so two videos never boot at once).
+    if (!doneFired.current) {
+      doneFired.current = true;
+      window.dispatchEvent(new Event("komaverse:intro-done"));
+    }
   };
 
   useEffect(() => {
     if (!visible) return;
-    const a = audioRef.current;
-    if (a) {
+    // Warm the whole audio path (fetch, decode, OS stream) up front,
+    // muted: muted autoplay is always allowed, so this never blocks.
+    // The audible start at kick then flips a warm switch instead of
+    // cold-starting the pipeline on the animation's first frames.
+    const warmEl = audioRef.current;
+    if (warmEl) {
+      warmEl.muted = true;
+      const warm = warmEl.play();
+      if (warm) warm.catch(() => {});
+    }
+    // Start the music two frames in: lets the first animation frames land
+    // first, costs ~33ms (inaudible), and never holds the start waiting —
+    // a held start reads as lag at the top of the intro.
+    let alive = true;
+    const kick = () => {
+      if (!alive) return;
+      const a = audioRef.current;
+      if (!a) return;
+      // Pipeline is already warm: restart from the top, unmuted, so the
+      // audible start lands on the timeline kick instead of lagging it.
+      try {
+        a.pause();
+        a.currentTime = 0;
+      } catch {
+        /* fresh element, nothing to reset */
+      }
+      a.muted = false;
+      if (typeof performance.mark === "function") {
+        performance.mark("ident-audio-start");
+      }
       const p = a.play();
       // Browsers block audible autoplay until the first interaction:
       // keep the silent animation running and offer a replay button.
       if (p) p.catch(() => setSoundBlocked(true));
-    }
+    };
+    requestAnimationFrame(() => requestAnimationFrame(kick));
     dismissTimer.current = window.setTimeout(dismiss, SHOW_MS);
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") dismiss();
     };
     window.addEventListener("keydown", onKey);
     return () => {
+      alive = false;
       window.clearTimeout(dismissTimer.current);
       window.removeEventListener("keydown", onKey);
     };
@@ -83,7 +119,7 @@ export default function IntroOverlay() {
       <iframe
         key={runId}
         title="Komaverse intro animation"
-        src="/ident.html"
+        src="/ident.html?embed=1"
         style={{ position: "absolute", inset: 0, width: "100%", height: "100%", border: "none" }}
       />
       <audio key={`a-${runId}`} ref={audioRef} src={STING_SRC} preload="auto" />

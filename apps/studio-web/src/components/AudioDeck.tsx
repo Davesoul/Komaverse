@@ -489,6 +489,7 @@ export function AudioDeck({
                   </span>
                   <IconBtn
                     onClick={() => {
+                      if (!window.confirm(`Remove this cue from the timeline? The take stays in the library. This can't be undone.`)) return;
                       void api.deleteCue(c.id).then(onScene);
                     }}
                     label="Remove cue from the timeline"

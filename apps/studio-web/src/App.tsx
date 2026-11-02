@@ -26,6 +26,64 @@ const TABS: { id: Tab; label: string; hint: string }[] = [
   { id: "media", label: "Media", hint: "Library, takes & storage" },
 ];
 
+/** Bottom-left card while first-run detection weights download (all tabs).
+ * The Scan detect call fetches YOLO weights once; the card polls the same
+ * /detect-status snapshot so every tab shows it, not just Scan. */
+function ModelDownloadCard({ active }: { active: boolean }) {
+  const [dl, setDl] = useState<{ name: string; bytes: number; total: number | null } | null>(null);
+  useEffect(() => {
+    if (!active) {
+      setDl(null);
+      return;
+    }
+    let stop = false;
+    const tick = async () => {
+      try {
+        const st = await api.detectStatus();
+        if (stop) return;
+        const hit = Object.entries(st.weights).find(([, w]) => w.state === "downloading");
+        setDl(hit ? { name: hit[0], bytes: hit[1].bytes, total: hit[1].total } : null);
+      } catch {
+        /* offline or logged out: the header dot already reports it */
+      }
+    };
+    void tick();
+    const poll = window.setInterval(() => void tick(), 2500);
+    return () => {
+      stop = true;
+      window.clearInterval(poll);
+    };
+  }, [active]);
+  if (!dl) return null;
+  const fmt = (n: number) =>
+    n >= 1048576 ? `${(n / 1048576).toFixed(1)} MB` : `${Math.round(n / 1024)} KB`;
+  return (
+    <div
+      role="status"
+      aria-live="polite"
+      style={{
+        position: "fixed",
+        left: 16,
+        bottom: 16,
+        zIndex: 500,
+        background: "var(--kv-inset)",
+        border: "1px solid var(--kv-border)",
+        borderRadius: "var(--kv-radius)",
+        boxShadow: "var(--kv-shadow-hard)",
+        padding: "10px 12px",
+        fontSize: 12,
+        maxWidth: 300,
+      }}
+    >
+      <div style={{ fontWeight: 700, marginBottom: 4 }}>Downloading detection models</div>
+      <div style={{ color: "var(--kv-muted)" }}>
+        {dl.name}: {fmt(dl.bytes)}
+        {dl.total ? ` of ${fmt(dl.total)}` : ""} — one-time download, the scan continues automatically.
+      </div>
+    </div>
+  );
+}
+
 export default function App() {
   const [user, setUser] = useState<User | null | undefined>(undefined);
   const [authMode, setAuthMode] = useState<"login" | "register">("register");
@@ -196,9 +254,9 @@ export default function App() {
                 }}
               >
                 <img
-                  src="/koma-wari-logo-sm.png"
+                  src="/komaverse-logo.png"
                   alt=""
-                  style={{ width: 28, height: 28, objectFit: "contain" }}
+                  style={{ height: 28, width: "auto", objectFit: "contain" }}
                 />
                 <strong style={{ fontSize: 16 }}>Komaverse</strong>
                 <span style={{ marginLeft: "auto" }}>
@@ -261,9 +319,9 @@ export default function App() {
         >
           <span style={{ display: "inline-flex", alignItems: "center", gap: 8, marginRight: 12, whiteSpace: "nowrap" }}>
             <img
-              src="/koma-wari-logo-sm.png"
+              src="/komaverse-logo.png"
               alt=""
-              style={{ width: 24, height: 24, objectFit: "contain" }}
+              style={{ height: 24, width: "auto", objectFit: "contain" }}
             />
             <strong style={{ fontSize: 17 }}>Komaverse</strong>
           </span>
@@ -274,6 +332,11 @@ export default function App() {
               aria-pressed={tab === t.id}
               onClick={() => setTab(t.id)}
               title={t.hint}
+              style={
+                tab === t.id
+                  ? { color: "var(--kv-accent-hover)", fontWeight: 700 }
+                  : undefined
+              }
             >
               {t.label}
             </Btn>
@@ -485,6 +548,7 @@ export default function App() {
         )}
       </main>
       <AgentDock />
+      <ModelDownloadCard active={user !== null} />
     </div>
   );
 }
