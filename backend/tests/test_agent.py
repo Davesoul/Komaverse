@@ -980,15 +980,30 @@ def test_agent_history_clear_scopes_to_project(factory, user):
 
 
 def test_agent_status_reports_models_without_keys(factory, user):
-    """Widget parameters: provider + model names, never secret material."""
+    """Widget parameters: provider + model names, never secret values.
+
+    keys_set reports presence (set-or-not) so the widget can label each
+    provider; names are config, values must never appear.
+    """
     import json
+
+    from komaverse.config import settings as live_settings
 
     with factory() as s:
         status = agent_status(s, user)
     assert status.provider
     assert status.cloud is False
     blob = json.dumps(status.model_dump())
-    assert "sk-" not in blob and "key" not in blob.lower()
+    assert "sk-" not in blob
+    for field in (
+        "meta_api_key",
+        "openrouter_api_key",
+        "elevenlabs_api_key",
+        "ai_api_key",
+    ):
+        value = getattr(live_settings, field, None)
+        if value:
+            assert value not in blob
 
 
 def test_demo_greeting_with_current_frame_takes_no_action(factory, user):

@@ -1,10 +1,12 @@
 """Studio-wide AI brain overrides: persisted, hot, no restart.
 
-Only model/provider *selection* lives here — never secrets. Rows overlay
+Model/provider selection plus provider API keys live here. Rows overlay
 the process environment via setattr on the shared settings object, the
 same object the test-suite already mutates, so every existing reader
 (env defaults, chat, vision, generation) honors overrides with no
 plumbing changes. Deleting a row falls back to the env default.
+Secrets are masked at the API boundary: reads report set-or-not,
+never values.
 """
 
 from __future__ import annotations
@@ -16,6 +18,14 @@ from komaverse.config import settings
 from komaverse.db_models import StudioSettingRow
 
 # Settings fields the widget may override (provider + per-provider models).
+# Secret keys ride the same overlay so a judge can paste keys in the UI
+# instead of editing .env; the API masks values (set-or-not only).
+AI_SECRET_KEYS = (
+    "meta_api_key",
+    "openrouter_api_key",
+    "elevenlabs_api_key",
+    "ai_api_key",
+)
 AI_OVERRIDE_KEYS = (
     "ai_provider",
     "chat_provider",
@@ -98,7 +108,9 @@ def model_field(provider: str, kind: str) -> str | None:
 def get_ai_overrides(session: Session) -> dict[str, str]:
     rows = (
         session.execute(
-            select(StudioSettingRow).where(StudioSettingRow.key.in_(AI_OVERRIDE_KEYS))
+            select(StudioSettingRow).where(
+                StudioSettingRow.key.in_(AI_OVERRIDE_KEYS + AI_SECRET_KEYS)
+            )
         )
         .scalars()
         .all()
@@ -108,7 +120,7 @@ def get_ai_overrides(session: Session) -> dict[str, str]:
 
 def set_ai_override(session: Session, key: str, value: str | None) -> None:
     """Store an override; None/blank deletes it (env default wins)."""
-    if key not in AI_OVERRIDE_KEYS:
+    if key not in AI_OVERRIDE_KEYS + AI_SECRET_KEYS:
         raise KeyError(f"unknown AI setting {key!r}")
     session.execute(delete(StudioSettingRow).where(StudioSettingRow.key == key))
     if value is not None and str(value).strip():
@@ -138,7 +150,7 @@ def apply_ai_overrides(session: Session) -> dict[str, str]:
 
 def snapshot_ai_settings() -> dict[str, str | None]:
     """Current effective values (for tests to restore after mutating)."""
-    return {k: getattr(settings, k, None) for k in AI_OVERRIDE_KEYS}
+    return {k: getattr(settings, k, None) for k in AI_OVERRIDE_KEYS + AI_SECRET_KEYS}
 
 
 def restore_ai_settings(saved: dict[str, str | None]) -> None:

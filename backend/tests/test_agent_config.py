@@ -302,3 +302,24 @@ def test_status_lists_active_overrides(factory, user, saved_settings):
         agent_config(AgentConfigBody(provider="meta"), session=s, user=user)
     with factory() as s:
         assert agent_status(s, user).overrides == ["ai_provider"]
+
+
+def test_agent_config_keys_write_masked_clear(factory, user, saved_settings):
+    """Keys paste via the widget: stored hot, masked on read, blank clears."""
+    with factory() as s:
+        out = agent_config(
+            AgentConfigBody(meta_api_key="sk-test-123", openrouter_api_key="  "),
+            session=s,
+            user=user,
+        )
+    assert "meta_api_key" in out.keys_set
+    assert settings.meta_api_key == "sk-test-123"
+    with factory() as s:
+        status = agent_status(session=s, user=user)
+        assert "sk-test-123" not in status.model_dump_json()
+        assert "meta_api_key" in status.keys_set
+    with factory() as s:
+        out = agent_config(
+            AgentConfigBody(meta_api_key=""), session=s, user=user
+        )
+        assert "meta_api_key" not in get_ai_overrides(s)

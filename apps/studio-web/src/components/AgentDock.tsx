@@ -185,6 +185,10 @@ export default function AgentDock() {
     transcribe: "",
     voiceProvider: "free-tts",
     voice: "",
+    meta_api_key: "",
+    openrouter_api_key: "",
+    elevenlabs_api_key: "",
+    ai_api_key: "",
   });
   const [brainSaving, setBrainSaving] = useState(false);
   const [brainError, setBrainError] = useState<string | null>(null);
@@ -1286,6 +1290,10 @@ export default function AgentDock() {
           video_model: "",
           transcribe_model: "",
           voice_model: "",
+          meta_api_key: "",
+          openrouter_api_key: "",
+          elevenlabs_api_key: "",
+          ai_api_key: "",
         }
       : {
           chat_provider: brainForm.chatProvider,
@@ -1303,6 +1311,10 @@ export default function AgentDock() {
       put("video_model", brainForm.video);
       put("transcribe_model", brainForm.transcribe);
       put("voice_model", brainForm.voice);
+      put("meta_api_key", brainForm.meta_api_key);
+      put("openrouter_api_key", brainForm.openrouter_api_key);
+      put("elevenlabs_api_key", brainForm.elevenlabs_api_key);
+      put("ai_api_key", brainForm.ai_api_key);
     }
     setBrainSaving(true);
     setBrainError(null);
@@ -1310,7 +1322,7 @@ export default function AgentDock() {
       const st = await api.agentConfig(body);
       setAgentInfo(st);
       if (!reset) {
-        setBrainForm((f) => ({ ...f, chat: "", vision: "", image: "", video: "", transcribe: "", voice: "" }));
+        setBrainForm((f) => ({ ...f, chat: "", vision: "", image: "", video: "", transcribe: "", voice: "", meta_api_key: "", openrouter_api_key: "", elevenlabs_api_key: "", ai_api_key: "" }));
       }
     } catch (e) {
       setBrainError((e as Error).message);
@@ -1534,6 +1546,42 @@ export default function AgentDock() {
               ))}
             </datalist>
           ))}
+          <div style={{ display: "flex", flexDirection: "column", gap: 4, marginTop: 4 }}>
+            <div style={{ fontSize: 13, fontWeight: 700 }}>Provider keys</div>
+            <div style={{ fontSize: 12, color: "var(--kv-muted)" }}>
+              Paste a key to use it immediately, no restart, no .env edit. Stored
+              server-side, never shown again - blank keeps the current value.
+            </div>
+            {(
+              [
+                { field: "meta_api_key", label: "Meta", hint: "Muse brain, vision, image, transcribe" },
+                { field: "openrouter_api_key", label: "OpenRouter", hint: "Chat, vision, image, video" },
+                { field: "elevenlabs_api_key", label: "ElevenLabs", hint: "Voice-over" },
+                { field: "ai_api_key", label: "Cloud AI", hint: "Fallback chat, vision, image" },
+              ] as const
+            ).map(({ field, label, hint }) => {
+              const state = brainOverridden.has(field)
+                ? "saved in studio"
+                : agentInfo?.keys_set?.includes(field)
+                  ? "from environment"
+                  : "not set";
+              return (
+                <div key={field} style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                  <span style={{ width: 64, fontSize: 13 }}>{label}</span>
+                  <TextInput
+                    type="password"
+                    value={brainForm[field]}
+                    onChange={(e) => setBrainForm((f) => ({ ...f, [field]: e.target.value }))}
+                    placeholder={state}
+                    aria-label={`${label} API key (blank keeps current)`}
+                    title={hint}
+                    autoComplete="off"
+                    style={{ flex: 1, fontFamily: "var(--kv-mono)", fontSize: 12 }}
+                  />
+                </div>
+              );
+            })}
+          </div>
           {brainError && (
             <div style={{ fontSize: 12, color: "var(--kv-danger)" }}>{brainError}</div>
           )}

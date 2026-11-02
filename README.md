@@ -157,6 +157,26 @@ npm run dev        # tauri dev (loads studio-web, API via base-URL setting)
 docker compose -f infra/docker-compose.yml up postgres redis
 ```
 
+## Docker (judge / demo run)
+
+All-in-one image: builds the web UI, serves API + UI on one port.
+Keys ship empty — paste them in the studio Brain panel under
+Provider keys (Meta, OpenRouter, ElevenLabs, Cloud AI), no `.env`
+editing, no restart.
+
+```powershell
+docker build -t komaverse .
+docker run -p 8000:8000 -v komaverse-data:/data komaverse
+# or: docker compose up --build   (adds backend/.env when present)
+
+# first scan without weights? set KOMA_YOLO_URL to a weights URL and
+# rescan, otherwise detection falls back to fast heuristics
+```
+
+Open http://localhost:8000, create an account, paste keys in the
+agent Brain panel, and generate. Data (DB, uploads, model caches)
+persists in the `komaverse-data` volume.
+
 ## Demo login
 
 Seeded by `python scripts/seed_demo.py` (from `backend/` with the venv

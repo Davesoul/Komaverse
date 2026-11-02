@@ -8,6 +8,7 @@ gzip. Observability: request IDs, structured logs, Prometheus metrics.
 from __future__ import annotations
 
 import logging
+import os
 import re
 import time
 from contextlib import asynccontextmanager
@@ -200,11 +201,17 @@ def resolve_spa_file(dist: Path, path: str) -> Path:
     return dist / "index.html"
 
 
-_WEB_DIST = (
+_REPO_DIST = (
     Path(__file__).resolve().parent.parent.parent.parent
     / "apps"
     / "studio-web"
     / "dist"
+)
+# Packaged deploys (Docker) keep the built UI elsewhere; the env var wins.
+_WEB_DIST = (
+    Path(os.environ["KOMAVERSE_WEB_DIST"])
+    if os.environ.get("KOMAVERSE_WEB_DIST")
+    else _REPO_DIST
 )
 
 if settings.serve_web:

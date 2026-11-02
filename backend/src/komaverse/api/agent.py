@@ -30,6 +30,7 @@ from komaverse.db_models import ChatTurnRow, UserRow
 from komaverse.models import Scene
 from komaverse.studio_settings import (
     AI_OVERRIDE_KEYS,
+    AI_SECRET_KEYS,
     KIND_PROVIDERS,
     PROVIDER_PREFIX,
     apply_ai_overrides,
@@ -84,6 +85,9 @@ class AgentStatusOut(BaseModel):
     providers: dict[str, str] = {}
     # Studio override keys currently active (env wins when absent).
     overrides: list[str] = []
+    # Secret keys with a non-empty effective value (env or studio row).
+    # Presence only — values never leave the server.
+    keys_set: list[str] = []
 
 
 class AgentConfigBody(BaseModel):
@@ -102,6 +106,13 @@ class AgentConfigBody(BaseModel):
     video_model: str | None = None
     transcribe_model: str | None = None
     voice_model: str | None = None
+    # Provider API keys: non-blank stores a studio row (hot, no restart),
+    # blank clears back to the env default, null leaves it alone.
+    # Values are write-only; reads report set-or-not via keys_set.
+    meta_api_key: str | None = None
+    openrouter_api_key: str | None = None
+    elevenlabs_api_key: str | None = None
+    ai_api_key: str | None = None
 
 
 class ChatTurnOut(BaseModel):
@@ -309,6 +320,7 @@ def agent_status(
         voice_model=voices.get(providers["voice"]),
         providers=providers,
         overrides=sorted(get_ai_overrides(session).keys()),
+        keys_set=sorted(k for k in AI_SECRET_KEYS if getattr(settings, k, None)),
     )
 
 
@@ -355,6 +367,14 @@ def agent_config(
             set_ai_override(session, f"{kind}_provider", text)
         else:
             set_ai_override(session, f"{kind}_provider", None)
+    apply_ai_overrides(session)
+    # Phase 1.5: provider API keys. Non-blank stores a studio row (hot,
+    # no restart); blank clears back to the env default; null is untouched.
+    for key in AI_SECRET_KEYS:
+        wanted = getattr(body, key, None)
+        if wanted is None:
+            continue
+        set_ai_override(session, key, wanted.strip() or None)
     apply_ai_overrides(session)
     # Phase 2: models against the now-effective providers.
     for kind in ("chat", "vision", "image", "video", "transcribe", "voice"):

@@ -412,14 +412,25 @@ primitives (entities as cast sheets, references attached visibly,
 lettering as text clips) instead of the file-based `img-memory`
 workflow the in-app agent cannot follow.
 `list_tools` names every tool from the live cloud schema (same pair
-over MCP). `web_search` does keyless research in priority order — DDG
+over MCP). Provider keys paste in the widget Brain panel (Meta,
+OpenRouter, ElevenLabs, Cloud AI): non-blank stores a studio row via
+the same overlay (hot, no restart), blank clears back to the env
+default, reads report set-or-not only - values never leave the
+server, masked tests included. `web_search` does keyless research in priority order — DDG
 HTML web hits, DDG instant answers, Wikipedia fallback (all without
 keys; keyed providers like Tavily remain a future upgrade) — and the
 agent cites what it fetched via `web_fetch`. Demo brain: URL-shaped
 messages fetch, "search the web"-shaped messages search. The dock composer has `/skills` and `/tools` slash commands
 with the @-mention popup pattern (caret-anchored, Arrow/Enter/Tab/Esc,
 mutually exclusive): accepting leaves `/name ` in the box, send
-translates to the plain request both brains answer. Six project
+translates to the plain request both brains answer. Docker all-in-one
+image (root Dockerfile: node build stage, python slim + CPU torch +
+system libs, UI + API on :8000, keys via Brain panel, `hf-cache`
+volume) plus fixed `backend/Dockerfile` system libs; `httpx` moved to
+prod deps (providers + agent import it); `KOMAVERSE_WEB_DIST` env lets
+packaged deploys relocate the built UI. Usage table scrolls
+horizontally under 420px instead of breaking the page.
+Six project
 skills added (all `muse skills validate` clean): visual-composition,
 drawing-fundamentals (line/perspective/screentone/layer discipline),
 color-theory (cel shadow colors, light logic), manga-literacy

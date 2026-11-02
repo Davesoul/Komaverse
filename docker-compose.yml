@@ -1,0 +1,21 @@
+# Local / judge run: API + built UI on http://localhost:8000.
+# Keys are pasted in the studio Brain panel (Provider keys) — no .env
+# editing needed. Data (DB, uploads, weights cache) persists in volumes.
+services:
+  studio:
+    build: .
+    ports:
+      - "${PORT:-8000}:8000"
+    env_file:
+      - path: ./backend/.env
+        required: false
+    environment:
+      SERVE_WEB: "true"
+    volumes:
+      - komaverse-data:/data
+      - hf-cache:/root/.cache
+    restart: unless-stopped
+
+volumes:
+  komaverse-data:
+  hf-cache:

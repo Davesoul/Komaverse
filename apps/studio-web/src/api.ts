@@ -278,6 +278,7 @@ export interface AgentStatus {
   voice_model: string | null;
   providers: Record<string, string>;
   overrides: string[];
+  keys_set: string[];
 }
 
 export interface AgentConfigBody {
@@ -292,6 +293,10 @@ export interface AgentConfigBody {
   video_model?: string | null;
   transcribe_model?: string | null;
   voice_model?: string | null;
+  meta_api_key?: string | null;
+  openrouter_api_key?: string | null;
+  elevenlabs_api_key?: string | null;
+  ai_api_key?: string | null;
 }
 
 export interface ChatTurn {
