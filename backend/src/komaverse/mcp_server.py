@@ -50,6 +50,7 @@ from komaverse.agent import (
     tool_list_takes,
     tool_list_tools,
     tool_web_fetch,
+    tool_web_search,
     tool_manage_clips,
     tool_manage_frames,
     tool_manage_layers,
@@ -313,6 +314,10 @@ def call_tool(
         return tool_list_tools()
     if name == "web_fetch":
         return tool_web_fetch(_str(args, "url"), args.get("max_chars"))
+    if name == "web_search":
+        return tool_web_search(
+            _str(args, "query"), args.get("max_results")
+        )
     raise KeyError(f"unknown tool: {name}")
 
 
@@ -374,6 +379,19 @@ def _tool_defs() -> list[dict]:
                 "type": "object",
                 "properties": {"url": s, "max_chars": num},
                 "required": ["url"],
+            },
+        },
+        {
+            "name": "web_search",
+            "description": (
+                "Search the open web without keys (DDG hits, instant "
+                "answers, Wikipedia fallback), then read hits with "
+                "web_fetch."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {"query": s, "max_results": num},
+                "required": ["query"],
             },
         },
         {

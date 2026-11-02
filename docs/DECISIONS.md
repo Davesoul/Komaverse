@@ -406,11 +406,19 @@ open web via `web_fetch` (httpx, 20s timeout, 2MB cap, scripts
 stripped stdlib-side, text/HTML/JSON only, truncation marked with the
 source URL) for docs, references, and catalogs — paired with a
 `web-research` skill (source hierarchy, corroboration, citation).
+A sixth skill, `manga-studio-pages`, ports page production onto studio
+primitives (entities as cast sheets, references attached visibly,
+lettering as text clips) instead of the file-based `img-memory`
+workflow the in-app agent cannot follow.
 `list_tools` names every tool from the live cloud schema (same pair
-over MCP). The dock composer has `/skills` and `/tools` slash commands
+over MCP). `web_search` does keyless research in priority order — DDG
+HTML web hits, DDG instant answers, Wikipedia fallback (all without
+keys; keyed providers like Tavily remain a future upgrade) — and the
+agent cites what it fetched via `web_fetch`. Demo brain: URL-shaped
+messages fetch, "search the web"-shaped messages search. The dock composer has `/skills` and `/tools` slash commands
 with the @-mention popup pattern (caret-anchored, Arrow/Enter/Tab/Esc,
 mutually exclusive): accepting leaves `/name ` in the box, send
-translates to the plain request both brains answer. Five project
+translates to the plain request both brains answer. Six project
 skills added (all `muse skills validate` clean): visual-composition,
 drawing-fundamentals (line/perspective/screentone/layer discipline),
 color-theory (cel shadow colors, light logic), manga-literacy

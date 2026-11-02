@@ -92,7 +92,7 @@ started Oct 28, 2026.
   renamable pages, panels, and frames; the mic button dictates via
   Meta transcription. The agent reads studio craft skills (anime
   direction, manga, composition, drawing, color, manga-literacy,
-  web research) and passes an anime genre into
+  manga studio pages, web research) and passes an anime genre into
   image/video prompts so generations carry the genre grammar; `/skills`
   and `/tools` slash commands in the composer list them with
   autocomplete, and `web_fetch` reads docs and references for

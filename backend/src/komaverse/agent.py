@@ -22,6 +22,7 @@ import threading
 
 import httpx
 from fastapi import HTTPException
+from html.parser import HTMLParser
 from PIL import Image, ImageDraw
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -404,6 +405,205 @@ def tool_web_fetch(url, max_chars=4000):
     if len(text) > limit:
         text = text[:limit] + " ...[truncated]"
     return text + " [from " + str(resp.url) + "]"
+
+
+def _unwrap_ddg(href):
+    """Unwrap DDG redirect links to the real page URL."""
+    from urllib.parse import parse_qs, unquote, urlparse
+
+    if not href:
+        return ""
+    if "uddg=" in href:
+        qs = parse_qs(urlparse(href).query)
+        if qs.get("uddg"):
+            return unquote(qs["uddg"][0])
+    if href.startswith("//"):
+        return "https:" + href
+    return href
+
+
+class _DDGResults(HTMLParser):
+    """Collect DDG html result links + snippets. Stdlib only."""
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.results = []
+        self.cur = None
+        self.in_snippet = 0
+
+    def handle_starttag(self, tag, attrs):
+        cls = dict(attrs).get("class", "")
+        if tag == "a" and "result__a" in cls:
+            self.cur = {"href": dict(attrs).get("href", ""), "title": ""}
+        elif tag in ("td", "div") and "result-snippet" in cls:
+            self.in_snippet += 1
+
+    def handle_endtag(self, tag):
+        if tag == "a" and self.cur is not None:
+            self.results.append(self.cur)
+            self.cur = None
+        elif tag in ("td", "div") and self.in_snippet:
+            self.in_snippet -= 1
+
+    def handle_data(self, data):
+        if self.cur is not None:
+            self.cur["title"] += data
+        elif self.in_snippet and self.results:
+            prev = self.results[-1].get("snippet", "")
+            self.results[-1]["snippet"] = prev + data
+
+
+def _search_duckduckgo_web(query, limit=5):
+    """Keyless DDG html results: title, url, snippet."""
+    try:
+        resp = httpx.get(
+            "https://html.duckduckgo.com/html/",
+            params={"q": query},
+            timeout=20.0,
+            headers={"User-Agent": "KomaverseStudio/1.0"},
+        )
+    except Exception:
+        return []
+    if resp.status_code >= 400:
+        return []
+    doc = _DDGResults()
+    try:
+        doc.feed(resp.text[:500000])
+        doc.close()
+    except Exception:
+        return []
+    out = []
+    for r in doc.results:
+        url = _unwrap_ddg(r.get("href", ""))
+        if not url.startswith("http"):
+            continue
+        title = " ".join(str(r.get("title", "")).split())
+        snippet = " ".join(str(r.get("snippet", "")).split())
+        if title and url:
+            out.append((title, url, snippet))
+        if len(out) >= limit:
+            break
+    return out
+
+
+def _search_wikipedia(query, limit=5):
+    """Keyless Wikipedia opensearch: titles, urls, descriptions."""
+    try:
+        resp = httpx.get(
+            "https://en.wikipedia.org/w/api.php",
+            params={
+                "action": "opensearch",
+                "search": query,
+                "limit": limit,
+                "format": "json",
+            },
+            timeout=20.0,
+            headers={"User-Agent": "KomaverseStudio/1.0"},
+        )
+    except Exception:
+        return []
+    if resp.status_code >= 400:
+        return []
+    try:
+        data = resp.json()
+    except ValueError:
+        return []
+    titles = data[1] if len(data) > 1 else []
+    descs = data[2] if len(data) > 2 else []
+    urls = data[3] if len(data) > 3 else []
+    out = []
+    for i, title in enumerate(titles):
+        url = urls[i] if i < len(urls) else ""
+        desc = descs[i] if i < len(descs) else ""
+        out.append((str(title), str(url), str(desc)))
+    return out
+
+
+def _search_duckduckgo_instant(query, limit=5):
+    """Keyless DDG instant answers: abstract + related topics."""
+    try:
+        resp = httpx.get(
+            "https://api.duckduckgo.com/",
+            params={
+                "q": query,
+                "format": "json",
+                "no_html": 1,
+                "skip_disambig": 1,
+            },
+            timeout=20.0,
+            headers={"User-Agent": "KomaverseStudio/1.0"},
+        )
+    except Exception:
+        return "", "", []
+    if resp.status_code >= 400:
+        return "", "", []
+    try:
+        data = resp.json()
+    except ValueError:
+        return "", "", []
+    if not isinstance(data, dict):
+        return "", "", []
+    abstract = str(data.get("AbstractText") or "")
+    abstract_url = str(data.get("AbstractURL") or "")
+    topics = []
+    for item in data.get("RelatedTopics") or []:
+        if isinstance(item, dict) and item.get("Text") and item.get("FirstURL"):
+            topics.append((str(item["Text"]), str(item["FirstURL"])))
+        if len(topics) >= limit:
+            break
+    return abstract, abstract_url, topics
+
+
+def tool_web_search(query, max_results=5):
+    """Search the open web without keys: hits, answers, wiki fallback."""
+    cleaned = (query or "").strip()
+    if not cleaned:
+        return "web_search needs a query, e.g. web_search cel shading tutorial."
+    try:
+        limit = min(max(int(max_results or 5), 1), 10)
+    except (TypeError, ValueError):
+        limit = 5
+    lines = ["Web results for " + cleaned + ":"]
+    for title, url, snippet in _search_duckduckgo_web(cleaned, limit):
+        line = "- " + title[:120] + " (" + url + ")"
+        if snippet:
+            line += ": " + snippet[:200]
+        lines.append(line)
+    abstract, abstract_url, topics = _search_duckduckgo_instant(cleaned, limit)
+    if abstract:
+        line = "Answer: " + abstract[:300]
+        if abstract_url:
+            line += " [" + abstract_url + "]"
+        lines.append(line)
+    for ttext, turl in topics:
+        lines.append("- " + ttext[:200] + " (" + turl + ")")
+    if len(lines) == 1:
+        for title, url, desc in _search_wikipedia(cleaned, limit):
+            line = "- " + title
+            if url:
+                line += " (" + url + ")"
+            if desc:
+                line += ": " + desc[:200]
+            lines.append(line)
+    if len(lines) == 1:
+        return "no results for " + cleaned + " (all sources empty)."
+    lines.append("Use web_fetch to read any result in full.")
+    return chr(10).join(lines)
+
+
+def _parse_search_query(text):
+    """Strip a leading search command, keep the natural question."""
+    lowered = text.strip()
+    for prefix in (
+        "web search",
+        "search the web for",
+        "search for",
+        "look up",
+        "google",
+    ):
+        if lowered.lower().startswith(prefix):
+            return lowered[len(prefix):].strip(" .,!?")
+    return lowered
 
 
 DETECTORS = ("heuristic", "yolo", "yolo-leoxs22", "cloud", "meta", "openrouter", "sam", "local")
@@ -2732,6 +2932,10 @@ def demo_turn(
             reply = run("web_fetch", tool_web_fetch, urls[0])
         else:
             reply = "Send a full http(s) link to fetch."
+    elif "search" in text and any(
+        k in text for k in ("web", "online", "internet", "look up", "google")
+    ):
+        reply = run("web_search", tool_web_search, _parse_search_query(message))
     elif "tool" in text and any(k in text for k in ("list", "show", "what", "which")):
         reply = run("list_tools", tool_list_tools)
     elif "skill" in text:
@@ -2774,7 +2978,7 @@ _SYSTEM = (
     "anime-animation-production skill (list_skills/read_skill) for genre "
     "tags, shot grammar, and QC: pass a genre to create_image/"
     "create_video so prompts carry the craft."
-    "Use web_fetch to read docs and references for online research; "
+    "Research online with web_search, then read hits with web_fetch; "
     "list_tools shows every tool, list_skills shows every skill."
 )
 
@@ -2846,6 +3050,25 @@ _TOOLS_SCHEMA = [
                     "max_chars": {"type": "number", "description": "Max text chars back (default 4000)."},
                 },
                 "required": ["url"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "web_search",
+            "description": (
+                "Search the open web without keys (DDG hits, instant "
+                "answers, Wikipedia fallback). Use for online research, "
+                "then read hits with web_fetch. Pass the natural question."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Natural-language question or terms."},
+                    "max_results": {"type": "number", "description": "Max hits per source (default 5)."},
+                },
+                "required": ["query"],
             },
         },
     },
@@ -3596,6 +3819,10 @@ def _exec_cloud_tool(
         elif name == "web_fetch":
             result = tool_web_fetch(
                 str(args.get("url") or ""), args.get("max_chars")
+            )
+        elif name == "web_search":
+            result = tool_web_search(
+                str(args.get("query") or ""), args.get("max_results")
             )
         else:
             result = f"unknown tool: {name}"
