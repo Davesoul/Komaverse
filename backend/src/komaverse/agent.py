@@ -20,6 +20,7 @@ import math
 import re
 import threading
 
+import httpx
 from fastapi import HTTPException
 from PIL import Image, ImageDraw
 from sqlalchemy import select
@@ -331,6 +332,78 @@ def _parse_skill_name(text):
                 ):
                     return cand
     return None
+
+
+def _html_to_text(html):
+    """Strip tags and scripts from a page; collapse whitespace."""
+    from html.parser import HTMLParser
+
+    class _Text(HTMLParser):
+        def __init__(self):
+            super().__init__()
+            self.parts = []
+            self.skip = 0
+
+        def handle_starttag(self, tag, attrs):
+            if tag in ("script", "style", "noscript"):
+                self.skip += 1
+            elif tag in ("p", "br", "li", "h1", "h2", "h3", "h4", "tr", "title"):
+                self.parts.append(chr(10))
+
+        def handle_endtag(self, tag):
+            if tag in ("script", "style", "noscript") and self.skip:
+                self.skip -= 1
+
+        def handle_data(self, data):
+            if not self.skip:
+                self.parts.append(data)
+
+    doc = _Text()
+    doc.feed(html or "")
+    doc.close()
+    return " ".join("".join(doc.parts).split())
+
+
+def tool_list_tools():
+    """Name + describe every studio tool the agent can call."""
+    lines = []
+    for entry in _TOOLS_SCHEMA:
+        fn = entry.get("function", {}) if isinstance(entry, dict) else {}
+        lines.append("- " + str(fn.get("name", "?")) + ": " + str(fn.get("description", "")))
+    return "Studio tools: " + "; ".join(lines)
+
+
+def tool_web_fetch(url, max_chars=4000):
+    """Fetch one http(s) page and return its text (docs, references)."""
+    cleaned = (url or "").strip()
+    cleaned = cleaned.strip(".,!?" + chr(34) + chr(39) + "<>")
+    if not cleaned.startswith("http://") and not cleaned.startswith("https://"):
+        return "web_fetch needs an http(s) URL."
+    try:
+        limit = min(max(int(max_chars or 4000), 200), 20000)
+    except (TypeError, ValueError):
+        limit = 4000
+    try:
+        resp = httpx.get(
+            cleaned,
+            timeout=20.0,
+            follow_redirects=True,
+            headers={"User-Agent": "KomaverseStudio/1.0"},
+        )
+    except Exception as exc:
+        return "fetch failed: " + type(exc).__name__ + ": " + str(exc)[:160]
+    if resp.status_code >= 400:
+        return "fetch failed: HTTP " + str(resp.status_code)
+    ctype = resp.headers.get("content-type", "")
+    if not ctype.startswith("text/") and "html" not in ctype and "json" not in ctype and "xml" not in ctype:
+        return "not a text page (" + ctype + "): " + cleaned
+    body = resp.text
+    if len(body) > 2000000:
+        body = body[:2000000]
+    text = body if "json" in ctype else _html_to_text(body)
+    if len(text) > limit:
+        text = text[:limit] + " ...[truncated]"
+    return text + " [from " + str(resp.url) + "]"
 
 
 DETECTORS = ("heuristic", "yolo", "yolo-leoxs22", "cloud", "meta", "openrouter", "sam", "local")
@@ -2653,6 +2726,14 @@ def demo_turn(
         reply = run("frame_from_media", tool_frame_from_media, session, user, project_id, message, None)
     elif any(p in text for p in CREATE_FRAME_PHRASES):
         reply = run("create_frame", tool_create_frame, session, user, project_id)
+    elif "http" in text:
+        urls = [t for t in text.split() if t.startswith("http")]
+        if urls:
+            reply = run("web_fetch", tool_web_fetch, urls[0])
+        else:
+            reply = "Send a full http(s) link to fetch."
+    elif "tool" in text and any(k in text for k in ("list", "show", "what", "which")):
+        reply = run("list_tools", tool_list_tools)
     elif "skill" in text:
         skill_name = _parse_skill_name(text)
         if skill_name:
@@ -2693,6 +2774,8 @@ _SYSTEM = (
     "anime-animation-production skill (list_skills/read_skill) for genre "
     "tags, shot grammar, and QC: pass a genre to create_image/"
     "create_video so prompts carry the craft."
+    "Use web_fetch to read docs and references for online research; "
+    "list_tools shows every tool, list_skills shows every skill."
 )
 
 _TOOLS_SCHEMA = [
@@ -2738,7 +2821,38 @@ _TOOLS_SCHEMA = [
     {
         "type": "function",
         "function": {
-            "name": "create_project",
+            "name": "list_tools",
+            "description": (
+                "List every studio tool the agent can call with one-line "
+                "descriptions (generation, timeline, layers, takes, skills, "
+                "web research)."
+            ),
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "web_fetch",
+            "description": (
+                "Fetch one http(s) page and return its text. Use for online "
+                "research: official docs, references, model catalogs. "
+                "Never invent a URL; use user-supplied or fetched links."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url": {"type": "string", "description": "Full http(s) URL to read."},
+                    "max_chars": {"type": "number", "description": "Max text chars back (default 4000)."},
+                },
+                "required": ["url"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "frame_from_media",
             "description": "Create a new project and switch to it.",
             "parameters": {
                 "type": "object",
@@ -3476,6 +3590,12 @@ def _exec_cloud_tool(
         elif name == "read_skill":
             result = tool_read_skill(
                 str(args.get("name") or ""), args.get("section")
+            )
+        elif name == "list_tools":
+            result = tool_list_tools()
+        elif name == "web_fetch":
+            result = tool_web_fetch(
+                str(args.get("url") or ""), args.get("max_chars")
             )
         else:
             result = f"unknown tool: {name}"

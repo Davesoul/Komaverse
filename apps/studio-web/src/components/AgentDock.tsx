@@ -56,6 +56,13 @@ const CHIPS = [
   "Export MP4",
 ];
 
+// Slash commands: /skills and /tools translate to the plain-language
+// requests the brains already answer (extra words ride along).
+const SLASH_COMMANDS = [
+  { name: "/skills", hint: "List studio craft skills", send: "list skills" },
+  { name: "/tools", hint: "List every studio tool", send: "list tools" },
+];
+
 const JOB_RE = /\[job ([A-Za-z0-9_-]+)\]/g;
 
 const LOG_KEY = "komaverse.agentLog";
@@ -295,6 +302,15 @@ export default function AgentDock() {
     start?: number;
     pos?: number;
   } | null>(null);
+  // Slash command popup: type / in the composer for /skills and
+  // /tools. Same caret-anchored splice behavior as the @-mention picker;
+  // the two popups are mutually exclusive.
+  const [slash, setSlash] = useState<{
+    query: string;
+    hi: number;
+    start: number;
+    pos: number;
+  } | null>(null);
   // Ref cache per project: the picker shows cache instantly and refreshes
   // in the background when stale, so the list stays live without
   // blocking typing.
@@ -383,8 +399,21 @@ export default function AgentDock() {
     const caret = inputRef.current?.selectionStart ?? value.length;
     const before = value.slice(0, Math.max(0, Math.min(caret, value.length)));
     const at = before.match(/(^|\s)@([A-Za-z0-9_-]*)$/);
-    if (!at) {
+    if (at) {
+      setSlash(null);
+    } else {
       setMention(null);
+      const sl = before.match(/(^|[ ])[/]([A-Za-z]*)$/);
+      if (!sl) {
+        setSlash(null);
+        return;
+      }
+      setSlash({
+        query: sl[2],
+        hi: 0,
+        start: before.length - sl[2].length - 1,
+        pos: before.length,
+      });
       return;
     }
     const pid = getCurrentProject();
@@ -416,6 +445,13 @@ export default function AgentDock() {
     : [];
   const mentionShown = mentionFiltered.slice(0, 30);
   const mentionHidden = mentionFiltered.length - mentionShown.length;
+  const slashShown = slash
+    ? SLASH_COMMANDS.filter(
+        (c) =>
+          slash.query === "" ||
+          c.name.toLowerCase().startsWith(`/${slash.query.toLowerCase()}`),
+      )
+    : [];
 
   const insertMention = (item: MentionItem) => {
     const token = `@${item.kind}:${item.id} `;
@@ -439,7 +475,40 @@ export default function AgentDock() {
     inputRef.current?.focus();
   };
 
+  const acceptSlash = (name: string) => {
+    const s = slash;
+    setSlash(null);
+    if (!s) return;
+    const next = `${input.slice(0, s.start)}${name} ${input.slice(s.pos)}`;
+    setInput(next);
+    const caret = s.start + name.length + 1;
+    requestAnimationFrame(() => {
+      inputRef.current?.focus();
+      inputRef.current?.setSelectionRange(caret, caret);
+    });
+  };
+
   const onComposerKey = (e: React.KeyboardEvent) => {
+    if (slash && slashShown.length > 0) {
+      if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+        e.preventDefault();
+        const d = e.key === "ArrowDown" ? 1 : -1;
+        setSlash({
+          ...slash,
+          hi: (slash.hi + d + slashShown.length) % slashShown.length,
+        });
+        return;
+      }
+      if (e.key === "Enter" || e.key === "Tab") {
+        e.preventDefault();
+        acceptSlash(slashShown[slash.hi]?.name ?? slashShown[0].name);
+        return;
+      }
+      if (e.key === "Escape") {
+        setSlash(null);
+        return;
+      }
+    }
     if (mention && mentionShown.length > 0) {
       if (e.key === "ArrowDown" || e.key === "ArrowUp") {
         e.preventDefault();
@@ -1005,8 +1074,14 @@ export default function AgentDock() {
   // once the current turn finishes — the chat no longer blocks on long
   // synchronous generations.
   const send = async (text: string) => {
-    const message = text.trim();
-    if (!message) return;
+    const raw = text.trim();
+    if (!raw) return;
+    // Slash commands translate to the plain-language requests the
+    // brains already answer (/skills X keeps its trailing words).
+    const hit = SLASH_COMMANDS.find(
+      (c) => raw === c.name || raw.startsWith(c.name + " "),
+    );
+    const message = hit ? `${hit.send}${raw.slice(hit.name.length)}` : raw;
     // Notion of current frame: the open Draw frame travels as a parameter
     // (bubbles stay clean). The server scopes the turn to it unless the
     // message references another frame by token or name.
@@ -1017,11 +1092,13 @@ export default function AgentDock() {
       setQueued(queueRef.current.length);
       setInput("");
       setMention(null);
+      setSlash(null);
       setMessages((prev) => [...prev, { role: "user", text: message }]);
       return;
     }
     setInput("");
     setMention(null);
+    setSlash(null);
     setFailed(null);
     setMessages((prev) => [...prev, { role: "user", text: message }]);
     setBusy(true);
@@ -1620,6 +1697,52 @@ export default function AgentDock() {
           </Btn>
         </div>
         <div style={{ display: "flex", gap: 6, position: "relative" }}>
+          {slash && slashShown.length > 0 && (
+            <div
+              role="listbox"
+              aria-label="Slash commands"
+              style={{
+                position: "absolute",
+                bottom: "100%",
+                left: 0,
+                right: 0,
+                marginBottom: 6,
+                background: "var(--kv-surface)",
+                border: "1px solid var(--kv-border-strong)",
+                borderRadius: "var(--kv-radius-sm)",
+                boxShadow: "var(--kv-shadow-md)",
+                zIndex: 5,
+              }}
+            >
+              {slashShown.map((cmd, gi) => (
+                <button
+                  key={cmd.name}
+                  type="button"
+                  role="option"
+                  aria-selected={gi === slash.hi}
+                  onMouseDown={(e) => {
+                    e.preventDefault();
+                    acceptSlash(cmd.name);
+                  }}
+                  onMouseEnter={() => setSlash({ ...slash, hi: gi })}
+                  style={{
+                    display: "block",
+                    width: "100%",
+                    textAlign: "left",
+                    padding: "6px 10px",
+                    fontSize: 12,
+                    background: gi === slash.hi ? "var(--kv-raised)" : "none",
+                    border: "none",
+                    cursor: "pointer",
+                    color: "var(--kv-text)",
+                  }}
+                >
+                  <span style={{ fontFamily: "var(--kv-mono)" }}>{cmd.name}</span>
+                  <span style={{ color: "var(--kv-muted)" }}> - {cmd.hint}</span>
+                </button>
+              ))}
+            </div>
+          )}
           {mention && (
             <div
               role="listbox"
@@ -1779,13 +1902,13 @@ export default function AgentDock() {
           </Btn>
           <TextInput
             ref={inputRef}
-            placeholder="Ask the studio… (@ to reference, ＋ to attach audio/image)"
+            placeholder="Ask the studio… (@ to reference, ＋ to attach audio/image, / for commands)"
             value={input}
             onChange={(e) => onComposerChange(e.target.value)}
             onKeyDown={onComposerKey}
             style={{ flex: 1 }}
             aria-label="Agent message"
-            aria-expanded={mention !== null}
+            aria-expanded={mention !== null || slash !== null}
             aria-autocomplete="list"
           />
           {busy ? (

@@ -48,6 +48,8 @@ from komaverse.agent import (
     tool_list_skills,
     tool_read_skill,
     tool_list_takes,
+    tool_list_tools,
+    tool_web_fetch,
     tool_manage_clips,
     tool_manage_frames,
     tool_manage_layers,
@@ -307,6 +309,10 @@ def call_tool(
         return tool_list_skills()
     if name == "read_skill":
         return tool_read_skill(_str(args, "name"), args.get("section"))
+    if name == "list_tools":
+        return tool_list_tools()
+    if name == "web_fetch":
+        return tool_web_fetch(_str(args, "url"), args.get("max_chars"))
     raise KeyError(f"unknown tool: {name}")
 
 
@@ -347,6 +353,27 @@ def _tool_defs() -> list[dict]:
                 "type": "object",
                 "properties": {"name": s, "section": s},
                 "required": ["name"],
+            },
+        },
+        {
+            "name": "list_tools",
+            "description": (
+                "List every studio tool the agent can call with one-line "
+                "descriptions (generation, timeline, layers, takes, skills, "
+                "web research)."
+            ),
+            "inputSchema": {"type": "object", "properties": {}},
+        },
+        {
+            "name": "web_fetch",
+            "description": (
+                "Fetch one http(s) page and return its text. Use for "
+                "online research: official docs, references, catalogs."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {"url": s, "max_chars": num},
+                "required": ["url"],
             },
         },
         {

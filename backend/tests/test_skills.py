@@ -9,7 +9,9 @@ from komaverse.agent import (
     _parse_skill_name,
     run_agent_turn,
     tool_list_skills,
+    tool_list_tools,
     tool_read_skill,
+    tool_web_fetch,
 )
 from komaverse.ai.direction import GENRE_TAGS, build_final_prompt, genre_suffix
 from komaverse.config import settings
@@ -165,6 +167,111 @@ def test_demo_brain_lists_and_reads_skills(factory):
             "read skill anime-animation-production", project.id, s, user
         )
         assert "cel-shaded tags" in out["reply"]
+
+
+def test_list_tools_names_key_tools():
+    out = tool_list_tools()
+    for name in (
+        "create_image",
+        "add_clip",
+        "list_skills",
+        "read_skill",
+        "web_fetch",
+        "list_tools",
+    ):
+        assert name in out
+
+
+class _FakeResp:
+    def __init__(
+        self, text, url="https://example.com/x", status=200, ctype="text/html"
+    ):
+        self.text = text
+        self.url = url
+        self.status_code = status
+        self.headers = {"content-type": ctype}
+
+
+def test_web_fetch_reads_page(monkeypatch):
+    import komaverse.agent as agent_mod
+
+    html = (
+        "<html><head><title>T</title></head><body>"
+        "<script>var x = 1;</script><p>Hello <b>world</b></p></body></html>"
+    )
+    monkeypatch.setattr(agent_mod.httpx, "get", lambda *a, **k: _FakeResp(html))
+    out = tool_web_fetch("https://example.com/x")
+    assert "Hello world" in out
+    assert "var x" not in out
+    assert "from https://example.com/x" in out
+
+
+def test_web_fetch_rejects_and_fails(monkeypatch):
+    import komaverse.agent as agent_mod
+
+    assert "http(s)" in tool_web_fetch("ftp://x")
+    assert "http(s)" in tool_web_fetch("")
+    monkeypatch.setattr(
+        agent_mod.httpx, "get", lambda *a, **k: _FakeResp("", status=404)
+    )
+    assert "HTTP 404" in tool_web_fetch("https://example.com/missing")
+
+    def boom(*a, **k):
+        raise TimeoutError("slow")
+
+    monkeypatch.setattr(agent_mod.httpx, "get", boom)
+    assert "TimeoutError" in tool_web_fetch("https://example.com/x")
+    monkeypatch.setattr(
+        agent_mod.httpx, "get", lambda *a, **k: _FakeResp("x" * 5000)
+    )
+    assert "truncated" in tool_web_fetch("https://example.com/x", max_chars=100)
+
+
+def test_web_fetch_rejects_binary(monkeypatch):
+    import komaverse.agent as agent_mod
+
+    monkeypatch.setattr(
+        agent_mod.httpx,
+        "get",
+        lambda *a, **k: _FakeResp("PNG...", ctype="image/png"),
+    )
+    assert "not a text page" in tool_web_fetch("https://example.com/i.png")
+
+
+def test_demo_lists_tools_and_fetches(factory, monkeypatch):
+    import komaverse.agent as agent_mod
+
+    monkeypatch.setattr(
+        agent_mod.httpx, "get", lambda *a, **k: _FakeResp("<p>Docs body</p>")
+    )
+    with factory() as s:
+        user = create_user(s)
+        from komaverse.api.scans import ProjectCreate, create_project
+
+        project = create_project(ProjectCreate(name="S"), s, user)
+        out = run_agent_turn("list tools", project.id, s, user)
+        assert "web_fetch" in out["reply"]
+        out = run_agent_turn(
+            "fetch https://example.com/docs for me", project.id, s, user
+        )
+        assert "Docs body" in out["reply"]
+
+
+def test_mcp_list_tools_and_fetch(factory, monkeypatch):
+    import komaverse.agent as agent_mod
+
+    tools = {t["name"]: t for t in TOOLS()}
+    assert "list_tools" in tools and "web_fetch" in tools
+    assert tools["web_fetch"]["inputSchema"]["required"] == ["url"]
+    monkeypatch.setattr(
+        agent_mod.httpx, "get", lambda *a, **k: _FakeResp("<p>Hi</p>")
+    )
+    with factory() as s:
+        user = create_user(s)
+        assert "web_fetch" in call_tool("list_tools", {}, s, user)
+        assert "Hi" in call_tool(
+            "web_fetch", {"url": "https://example.com/x"}, s, user
+        )
 
 
 def test_mcp_skill_tools(factory):

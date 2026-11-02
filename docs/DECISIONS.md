@@ -400,3 +400,18 @@ base → entities → genre → style, validation before billing, agent
 `create_image`/`create_video` + MCP. The Generate panel UI keeps
 style-only for now (genre is agent/API-first); DemoBrain parses no
 genre (cloud brain is the skills vehicle).
+
+Amendment: research tools + command discovery. The agent fetches the
+open web via `web_fetch` (httpx, 20s timeout, 2MB cap, scripts
+stripped stdlib-side, text/HTML/JSON only, truncation marked with the
+source URL) for docs, references, and catalogs — paired with a
+`web-research` skill (source hierarchy, corroboration, citation).
+`list_tools` names every tool from the live cloud schema (same pair
+over MCP). The dock composer has `/skills` and `/tools` slash commands
+with the @-mention popup pattern (caret-anchored, Arrow/Enter/Tab/Esc,
+mutually exclusive): accepting leaves `/name ` in the box, send
+translates to the plain request both brains answer. Five project
+skills added (all `muse skills validate` clean): visual-composition,
+drawing-fundamentals (line/perspective/screentone/layer discipline),
+color-theory (cel shadow colors, light logic), manga-literacy
+(direction, transitions, SFX, adaptation to timeline), web-research.
