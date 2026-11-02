@@ -184,9 +184,11 @@ export default function UsageCard() {
             ))}
           </div>
 
+          <div style={{ overflowX: "auto" }}>
           <table
             style={{
               width: "100%",
+              minWidth: 420,
               borderCollapse: "collapse",
               fontSize: 13,
             }}
@@ -277,6 +279,7 @@ export default function UsageCard() {
               ))}
             </tbody>
           </table>
+          </div>
           <p style={{ fontSize: 11, color: "var(--kv-faint)", margin: "8px 0 0" }}>
             Tokens are provider-reported when available, estimated otherwise:
             transcript length for transcription, the standard vision-tile
