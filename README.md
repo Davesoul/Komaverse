@@ -59,6 +59,11 @@ started Oct 28, 2026.
   desktop shell (Windows/macOS/Linux), remote-API base URL setting
 - **Auth & security:** register/login/logout, per-user projects, rate limits,
   security headers; **landing page** with auth gate included
+- **App intro:** a 5s manga-panel ident (`apps/studio-web/public/ident.html`)
+  plays over every app load with its sting (`public/audio/ident-sting.mp3`,
+  "Fingerstyle Impact") — skippable (Skip/Esc), silent-safe when the browser
+  blocks autoplay, skipped under reduced motion. See
+  [docs/BRAND.md](docs/BRAND.md)
 - **Observability:** JSON logs + request IDs, Prometheus `/metrics`,
   `/ready`, error ring, client error funnel ([docs](docs/OBSERVABILITY.md))
 - **Studio agent (the differentiator):** chat that operates the app —
@@ -155,7 +160,7 @@ detected panels, clips, credits, and an export. Re-running is safe
 - Email: `demo@komaverse.local`
 - Password: `demo1234`
 
-Sign in from the landing page (Sign in button, or Start creating →
+Sign in from the landing page (Sign in button, or Create →
 sign in). Registering a new account also works — auth is fully local,
 no email verification.
 

@@ -1,6 +1,7 @@
 import { Suspense, lazy, useEffect, useRef, useState } from "react";
 import { api, reportClientError, setOnUnauthorized, type User } from "./api";
 import AuthForm from "./components/AuthForm";
+import IntroOverlay from "./components/IntroOverlay";
 import AgentDock from "./components/AgentDock";
 import SystemCard from "./components/SystemCard";
 import UsageCard from "./components/UsageCard";
@@ -182,6 +183,7 @@ export default function App() {
   if (user === null) {
     return (
       <div style={{ minHeight: "100vh", padding: "0 24px 48px" }}>
+        <IntroOverlay />
         <div style={{ maxWidth: 1024, margin: "0 auto" }}>
           {showAuth ? (
             <>
@@ -231,6 +233,7 @@ export default function App() {
 
   return (
     <div style={{ minHeight: "100vh", padding: "0 24px 48px" }}>
+      <IntroOverlay />
       <a className="kv-skip" href="#kv-main">
         Skip to content
       </a>

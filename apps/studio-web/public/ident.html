@@ -1,0 +1,321 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Komaverse — Ident</title>
+<!--
+  KOMAVERSE ident sting (5.0s loop; in-app sound is /audio/ident-sting.mp3,
+  started at t=0 by IntroOverlay — the page itself stays silent so browsers
+  never block its autoplay).
+  Open fullscreen and screen-record for the hackathon video.
+    R         restart        Space  play/pause
+    ?debug=1  scrub slider   ?clean=1  hold frame 0, no autoplay
+  Beats: travel 0–2.2s (camera flows through a 3-panel manga page:
+  right-top panel, glide left, drop to the big panel) | impact ~2.3s
+  (page whips away, lockup converges + camera kick + DON, no flash) |
+  settle to 3.0s | resolve from 3.4s (tag, rule leave) | hold: logo
+  alone to 5.0s.
+-->
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link
+  href="https://fonts.googleapis.com/css2?family=Oswald:wght@600;700&family=Archivo:wght@500;600&display=swap"
+  rel="stylesheet"
+/>
+<script src="https://cdn.jsdelivr.net/npm/gsap@3.12.5/dist/gsap.min.js"></script>
+<style>
+  :root {
+    --ink: #0b0b0d;
+    --paper: #f4efe4;
+    --red: #c1121f;
+    --red-deep: #8f0d18;
+    --gold: #e8a020;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { height: 100%; background: var(--ink); overflow: hidden; }
+  body { font-family: "Archivo", system-ui, sans-serif; }
+
+  #stage {
+    position: fixed; inset: 0;
+    display: flex; align-items: center; justify-content: center;
+    background: var(--ink);
+    overflow: hidden;
+  }
+
+  /* ---- the manga page: 2 top panels + 1 big bottom panel ---- */
+  #page { position: absolute; left: 50%; top: 50%; width: 150vmin; height: 118vmin;
+    margin-left: -75vmin; margin-top: -59vmin; }
+  .mpanel { position: absolute; overflow: hidden; }
+  /* rectangular panels draw their own frame; slanted ones use SVG
+     so every edge keeps the same ink outline */
+  #mc { left: 0; top: 58vmin; width: 150vmin; height: 60vmin;
+    background: var(--paper); border: 0.8vmin solid var(--ink); }
+  #ma { right: 0; top: 0; width: 73.5vmin; height: 52vmin; }
+  #mb { left: 0; top: 0; width: 73.5vmin; height: 52vmin; }
+  #ma svg, #mb svg { position: absolute; inset: 0; width: 100%; height: 100%;
+    display: block; pointer-events: none; }
+  #ma polygon, #mb polygon { fill: var(--paper); stroke: var(--ink); stroke-width: 0.8vmin; }
+  /* each panel its own aesthetic: SFX, hanko stamp, monumental kanji */
+  .art-sfx {
+    position: absolute; inset: 0; z-index: 1; display: flex; align-items: center;
+    justify-content: center;
+    font-family: "Hiragino Kaku Gothic ProN", "Yu Gothic", "Meiryo", sans-serif;
+    font-weight: 900; line-height: 1; color: var(--ink);
+    transform: rotate(-8deg); font-size: 20vmin;
+  }
+  .hanko {
+    position: absolute; z-index: 1; right: 9vmin; top: 50%;
+    width: 15vmin; height: 15vmin; margin-top: -7.5vmin;
+    background: var(--red); color: var(--paper); border-radius: 1vmin;
+    display: flex; align-items: center; justify-content: center;
+    font-family: "Hiragino Kaku Gothic ProN", "Yu Gothic", "Meiryo", sans-serif;
+    font-weight: 900; font-size: 9.5vmin; line-height: 1;
+    transform: rotate(6deg);
+  }
+  .kanji-giant {
+    position: absolute; inset: 0; z-index: 1; display: flex; align-items: center;
+    justify-content: center;
+    font-family: "Hiragino Kaku Gothic ProN", "Yu Gothic", "Meiryo", sans-serif;
+    font-weight: 900; line-height: 1; color: var(--ink);
+    font-size: 44vmin; transform: rotate(-4deg);
+  }
+  /* speech bubbles: paper ovals, ink outline, tail aimed at the action */
+  .bubble {
+    position: absolute; z-index: 1;
+    background: var(--paper); border: 0.6vmin solid var(--ink); border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    font-family: "Hiragino Kaku Gothic ProN", "Yu Gothic", "Meiryo", sans-serif;
+    font-weight: 900; color: var(--ink);
+  }
+  .bubble::after {
+    content: ""; position: absolute; bottom: -1.7vmin; left: 32%;
+    width: 2.6vmin; height: 2.6vmin; background: var(--paper);
+    border-right: 0.6vmin solid var(--ink); border-bottom: 0.6vmin solid var(--ink);
+    transform: rotate(45deg) skew(12deg, 12deg);
+  }
+  #ma .bubble { left: 5vmin; top: 4vmin; width: 15vmin; height: 13vmin;
+    font-size: 5vmin; transform: rotate(-8deg); }
+  #mc .bubble { right: 11vmin; top: 5vmin; width: 19vmin; height: 16vmin;
+    font-size: 5.5vmin; transform: rotate(7deg); }
+  #mc .bubble::after { left: auto; right: 30%; }
+  /* freed shouts: big exclamations living outside the bubbles */
+  .shout {
+    position: absolute; z-index: 1;
+    font-family: "Oswald", "Arial Narrow", sans-serif; font-weight: 700;
+    line-height: 1;
+  }
+  #ma .shout { right: 7vmin; bottom: 3vmin; font-size: 11vmin;
+    color: var(--ink); transform: rotate(10deg); }
+  #mc .shout { left: 10vmin; bottom: 4vmin; font-size: 13vmin;
+    color: var(--red); transform: rotate(-8deg); }
+
+
+
+
+  /* ---- lockup: two overlapping koma panels, different tilts ---- */
+  #lockup { position: relative; text-align: center; opacity: 0; will-change: transform, opacity; }
+  #panels-row { display: flex; align-items: center; justify-content: center; }
+  .wordpanel {
+    font-family: "Oswald", "Arial Narrow", sans-serif;
+    font-weight: 700; text-transform: uppercase;
+    font-size: 9vmin; line-height: 1; letter-spacing: 0.01em;
+    background: var(--paper);
+    /* one clean manga frame line — no double border */
+    border: 0.7vmin solid var(--ink);
+    padding: 1.8vmin 3.4vmin 2.2vmin;
+    white-space: nowrap;
+    will-change: transform;
+  }
+  #pkoma {
+    color: var(--ink);
+    transform: rotate(-7deg);
+    /* clean quad, no cut corners */
+  }
+  #pverse {
+    color: var(--red);
+    transform: rotate(5deg);
+    /* bottom-left corner overlaps KOMA's top-right corner */
+    margin-left: -4.5vmin; margin-top: -5.5vmin;
+    /* no CSS border: the inline SVG draws one uniform ink outline
+       around all four sides, diagonal included */
+    border: none;
+    background: none;
+    position: relative;
+  }
+  #pverse svg {
+    position: absolute; inset: 0; width: 100%; height: 100%;
+    display: block; pointer-events: none;
+  }
+  #pverse polygon {
+    fill: var(--paper);
+    stroke: var(--ink);
+    stroke-width: 0.7vmin;
+  }
+  #pverse span { position: relative; z-index: 1; }
+
+  /* ---- impact SFX: one sharp DON, in and out, nothing lingers ---- */
+  #sfx {
+    position: absolute; left: 6vmin; top: 50%; margin-top: -10vmin;
+    font-family: "Hiragino Kaku Gothic ProN", "Yu Gothic", "Meiryo", sans-serif;
+    font-weight: 900; font-size: 20vmin; line-height: 1;
+    color: var(--paper);
+    -webkit-text-stroke: 0.28vmin var(--ink);
+    paint-order: stroke fill;
+    text-shadow: 0.7vmin 0.7vmin 0 var(--red);
+    opacity: 0; pointer-events: none; white-space: nowrap;
+  }
+  #tag {
+    margin-top: 2.4vmin; font-weight: 600;
+    font-size: 2.5vmin; letter-spacing: 0.6em; text-indent: 0.6em;
+    color: var(--paper); opacity: 0; text-transform: uppercase;
+    white-space: nowrap;
+  }
+  #rule { height: 0.5vmin; background: var(--red); margin: 1.8vmin auto 0; width: 0; }
+
+
+
+  /* ---- debug scrub ---- */
+  #debug {
+    position: absolute; left: 12px; right: 12px; bottom: 10px; z-index: 10;
+    display: none; align-items: center; gap: 10px;
+    color: var(--paper); font-size: 12px; font-variant-numeric: tabular-nums;
+  }
+  #debug.on { display: flex; }
+  #debug input { flex: 1; accent-color: var(--red); }
+
+  /* no-GSAP fallback: rest on the final lockup */
+  body.static #lockup { opacity: 1; }
+  body.static #tag { opacity: 1; letter-spacing: 0.32em; text-indent: 0.32em; }
+  body.static #rule { width: 46vmin; }
+  body.static #page, body.static #sfx { display: none; }
+</style>
+</head>
+<body>
+<div id="stage" aria-label="Komaverse ident sting">
+  <div id="page" aria-hidden="true">
+    <!-- ma: ザッ "zats" — the hiss of a slash. bubble gasps あっ "ah!"; free ! shouts beside it -->
+    <div class="mpanel" id="ma"><svg viewBox="0 0 100 71" preserveAspectRatio="none" aria-hidden="true"><polygon points="11,0 100,0 100,71 0,71" vector-effect="non-scaling-stroke" stroke-linejoin="miter" /></svg><div class="art-sfx">ザッ</div><div class="bubble">あっ</div><div class="shout">!</div></div>
+    <!-- mb: 漫 "man" (manga/comics) as a red hanko signature stamp -->
+    <div class="mpanel" id="mb"><svg viewBox="0 0 100 71" preserveAspectRatio="none" aria-hidden="true"><polygon points="0,0 100,0 89,71 0,71" vector-effect="non-scaling-stroke" stroke-linejoin="miter" /></svg><div class="hanko">漫</div></div>
+    <!-- mc: monumental 漫, bubble breathes おおっ "whoa", free !! shouts -->
+    <div class="mpanel" id="mc"><div class="kanji-giant">漫</div><div class="bubble">おおっ</div><div class="shout">!!</div></div>
+  </div>
+  <div id="sfx" aria-hidden="true">ドン</div>
+  <div id="lockup">
+    <div id="panels-row">
+      <div class="wordpanel" id="pkoma">Koma</div>
+      <div class="wordpanel" id="pverse"><svg viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true"><polygon points="11,0 100,0 100,100 0,100" vector-effect="non-scaling-stroke" stroke-linejoin="miter" /></svg><span>Verse</span></div>
+    </div>
+    <div id="tag">A universe, one panel at a time</div>
+    <div id="rule"></div>
+  </div>
+  <div id="debug">
+    <span id="t">0.00</span><input id="scrub" type="range" min="0" max="5" step="0.01" value="0" />
+  </div>
+</div>
+<script>
+(function () {
+  "use strict";
+  var qs = new URLSearchParams(location.search);
+  var DEBUG = qs.has("debug");
+  var CLEAN = qs.has("clean");
+  if (!window.gsap) {
+    // CDN blocked: rest on the final lockup instead of a black screen.
+    document.body.classList.add("static");
+    return;
+  }
+
+  var D = 5.0; // total sting length, seconds. Pure function of tl time below.
+  // Energetic archetype: expo entrances, 15-30% overshoot on the hit,
+  // paper gets a 4% settle, ambient floats on sine.
+  // paused at build: kick() starts the single clean playthrough on load.
+  // (Autoplaying here AND replaying on load is what double-ran the fade.)
+  var tl = gsap.timeline({ paused: true, defaults: { ease: "expo.out" }, onUpdate: showT });
+  gsap.set("#pkoma", { rotation: -7 });
+  gsap.set("#pverse", { rotation: 5 });
+  gsap.set("#sfx", { rotation: -12, transformOrigin: "50% 50%" });
+
+  /* ---------- travel: eyes flow through a manga page, right to left ----
+     open on the right-top panel, glide left, drop to the big panel */
+  /* panel one opens the read with its own slow entrance; the camera
+     waits until it has almost fully arrived before gliding */
+  tl.fromTo("#ma", { opacity: 0, scale: 1.15 }, {
+    opacity: 1, scale: 1, duration: 1.4, ease: "expo.out",
+  }, 0);
+  tl.fromTo("#page", { x: "-38.25vmin", y: "33vmin" }, {
+    x: "38.25vmin", y: "33vmin", duration: 1.0, ease: "sine.inOut",
+  }, 0.5);
+  tl.to("#page", { x: "0vmin", y: "-29vmin", duration: 0.7, ease: "sine.inOut" }, 1.55);
+
+  /* panels reveal one by one as the eyes arrive — never all at first */
+  tl.fromTo("#mb", { opacity: 0 }, { opacity: 1, duration: 0.4 }, 1.2);
+  tl.fromTo("#mc", { opacity: 0 }, { opacity: 1, duration: 0.35 }, 2.0);
+
+  /* slow push-in over the whole sting */
+  tl.fromTo("#stage", { scale: 1 }, { scale: 1.045, duration: D, ease: "none" }, 0);
+
+  /* ---------- impact: page whips away, logo converges, frame kicks ----- */
+  tl.to("#page", { x: "-130vmin", opacity: 0, duration: 0.3, ease: "power4.in" }, 2.3);
+  tl.fromTo("#lockup", { opacity: 0, scale: 1.35 }, {
+    opacity: 1, scale: 1, duration: 0.45, ease: "back.out(2)",
+  }, 2.3);
+  /* decaying camera shake sells the collision instead of a light flash */
+  tl.to("#stage", { x: "1.4vmin", y: "-1vmin", duration: 0.05, ease: "none" }, 2.3);
+  tl.to("#stage", { x: "-1vmin", y: "0.7vmin", duration: 0.05, ease: "none" }, 2.35);
+  tl.to("#stage", { x: "0.5vmin", y: "-0.3vmin", duration: 0.05, ease: "none" }, 2.4);
+  tl.to("#stage", { x: 0, y: 0, duration: 0.08, ease: "power2.out" }, 2.45);
+  tl.fromTo("#pkoma", { x: "-30vmin", y: "-8vmin" }, {
+    x: 0, y: 0, duration: 0.45, ease: "back.out(1.8)",
+  }, 2.3);
+  tl.fromTo("#pverse", { x: "30vmin", y: "8vmin" }, {
+    x: 0, y: 0, duration: 0.45, ease: "back.out(1.8)",
+  }, 2.3);
+  /* DON slams in beside the lockup, holds through the settle, then gone */
+  tl.fromTo("#sfx", { opacity: 0, scale: 2.1 }, {
+    opacity: 1, scale: 1, duration: 0.3, ease: "back.out(1.6)",
+  }, 2.3);
+  tl.to("#sfx", { opacity: 0, scale: 0.94, duration: 0.25, ease: "power2.in" }, 3.2);
+
+  /* ---------- settle: tagline lands ~100ms after the lockup ---------- */
+  tl.fromTo("#tag", { opacity: 0, letterSpacing: "0.6em" }, {
+    opacity: 1, letterSpacing: "0.32em", duration: 0.5,
+  }, 2.6);
+  tl.fromTo("#rule", { width: 0 }, { width: "46vmin", duration: 0.35 }, 2.7);
+
+  /* ---------- resolve: tagline, rule leave; logo rests ---------- */
+  tl.to("#tag, #rule", { opacity: 0, duration: 0.4, ease: "power2.in" }, 3.4);
+
+  /* ---------- hold: the lockup alone, then dip to black for a loop ---------- */
+  tl.to("#lockup", { opacity: 0, duration: 0.25 }, 4.72);
+  tl.add(function () { tl.play(0); });
+
+  /* ---------- transport ---------- */
+  var scrub = document.getElementById("scrub");
+  var tLabel = document.getElementById("t");
+  function showT() {
+    if (!DEBUG) return;
+    tLabel.textContent = tl.time().toFixed(2);
+    if (document.activeElement !== scrub) scrub.value = tl.time();
+  }
+  if (DEBUG) {
+    document.getElementById("debug").classList.add("on");
+    scrub.addEventListener("input", function () { tl.pause(); tl.time(parseFloat(scrub.value)); });
+  }
+  window.addEventListener("keydown", function (e) {
+    if (e.key === "r" || e.key === "R") tl.play(0);
+    else if (e.code === "Space") { e.preventDefault(); tl.paused(!tl.paused()); }
+  });
+  function kick() {
+    if (CLEAN) { tl.pause(0); return; }
+    try {
+      var p = tl.play(0);
+      if (p && p.catch) p.catch(function () { tl.pause(0); });
+    } catch (err) { tl.pause(0); }
+  }
+  if (document.readyState === "complete") kick();
+  else window.addEventListener("load", kick);
+})();
+</script>
+</body>
+</html>

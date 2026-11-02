@@ -375,3 +375,14 @@ overlay sheet (its own Close) instead of squeezing the chat to 55%.
 Render main sections (preview, timeline, inspector, voice, subtitles)
 breathe at 20px, and the Generate kind/ratio/long-edge selects shrink
 and wrap instead of overflowing the 248px sidebar.
+
+Amendment: app intro on load. The ident sting
+(`apps/studio-web/public/ident.html`, 5.0s manga travel → DON →
+lockup loop, previously a standalone page) now plays over every app
+load via `IntroOverlay` (iframe + `/audio/ident-sting.mp3` from t=0,
+auto-dismiss ~5.2s, Skip/Esc, once per page load, skipped under
+reduced motion; a blocked audible autoplay offers a replay-with-sound
+button instead of failing silently). Sound identity switches from the
+KACHI hyoshigi sketch to "Fingerstyle Impact" (Suno instrumental,
+5.6s — opening hit/groove/accent/tail map onto
+enter/travel/settle/resolve). Full sync map in `docs/BRAND.md`.
