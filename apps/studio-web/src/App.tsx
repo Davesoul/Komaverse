@@ -290,7 +290,7 @@ export default function App() {
   }
 
   return (
-    <div style={{ minHeight: "100vh", padding: "0 24px 48px" }}>
+    <div className="kv-shell" style={{ minHeight: "100vh", padding: "0 24px 48px" }}>
       <IntroOverlay />
       <a className="kv-skip" href="#kv-main">
         Skip to content

@@ -959,3 +959,19 @@ color-theory (cel shadow colors, light logic), manga-literacy
   build green. Probe projects removed through the app delete
   endpoint afterwards.
 
+## ADR-36: Phone canvas maximized, intro lockup verified (accepted)
+
+- Fitting 960px into 366px left the canvas at 244px (25%): correct
+  but small. The phone shell now uses 12px side padding (header
+  tracks it) and the paper 16px breathing room, and the fit budget
+  follows the breakpoint (52px phone chrome vs 80px desktop):
+  same 960px frame now draws at 296px (31%) with still zero
+  overflow anywhere on the page.
+- The intro end-card was never measured, only the travel phase:
+  headless probe at lockup time (3.2s) shows lockup/tag/SFX all
+  inside the 390px viewport with Skip reachable - no intro change.
+- Live: headless-Chrome probe (390x844) - page 390 = viewport 390
+  at every scroll position, canvas 296px fully visible, toolbar
+  one scrollable row; `tsc` clean, build green.
+
+

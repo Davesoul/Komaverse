@@ -491,11 +491,13 @@ export default function DrawPage() {
       200,
       document.documentElement.clientHeight * (tall ? 0.94 : 0.7) - pad,
     );
-    // Width budget accounts for the paper's own chrome: 32px breathing
-    // room on each side plus the canvas box padding/border. A 960px
-    // frame on a 360px phone fits exactly instead of spilling 48px
-    // into a horizontal scroll.
-    const widthBudget = Math.max(200, el.clientWidth - 80);
+    // Width budget accounts for the paper's own chrome: breathing room
+    // on each side plus the canvas box padding/border (halved on
+    // phones by .kv-paper/.kv-shell, so the budget follows suit).
+    const narrow =
+      typeof window.matchMedia === "function" &&
+      window.matchMedia("(max-width: 640px)").matches;
+    const widthBudget = Math.max(200, el.clientWidth - (narrow ? 52 : 80));
     const z = Math.min(
       widthBudget / engine.width,
       heightBudget / engine.height,
@@ -2113,15 +2115,16 @@ export default function DrawPage() {
                   }}
                 />
                 <div
+                  className="kv-paper"
                   style={{
                     minWidth: "100%",
                     minHeight: "100%",
                     width: "max-content",
                     boxSizing: "border-box",
-                    // Small breathing room around the paper edge. Dragging
-                    // the paper around stays on its hotkeys (hold Space,
-                    // or the Pan tool via H) — see onPointerDown.
-                    padding: 32,
+                    // Small breathing room around the paper edge (.kv-paper
+                    // halves it on phones so the fit stays maximal).
+                    // Dragging the paper around stays on its hotkeys
+                    // (hold Space, or the Pan tool via H).
                   }}
                 >
                 <canvas

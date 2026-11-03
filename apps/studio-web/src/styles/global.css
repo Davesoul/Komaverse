@@ -404,6 +404,17 @@ a {
   box-shadow: 4px 4px 0 rgba(0, 0, 0, 0.5);
 }
 
+/* Phone paper: halve the breathing room so the fitted canvas stays
+   as large as possible. */
+.kv-paper {
+  padding: 32px;
+}
+@media (max-width: 640px) {
+  .kv-paper {
+    padding: 16px;
+  }
+}
+
 /* Narrow Draw toolbar: one scrolling row instead of three wrapping
    rows, so the canvas keeps its vertical room. */
 @media (max-width: 640px) {
@@ -480,6 +491,15 @@ html {
   .kv-grid > * {
     min-width: 0;
     max-width: 100%;
+  }
+  /* Phone shell: reclaim side padding for the canvas. The header
+     negative margins track the shell padding, so both move together. */
+  .kv-shell {
+    padding: 0 12px 32px !important;
+  }
+  .kv-shell > header {
+    margin: 0 -12px 16px !important;
+    padding: 10px 12px !important;
   }
   .kv-side {
     width: 100% !important;
