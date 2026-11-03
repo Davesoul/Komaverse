@@ -46,6 +46,7 @@ from komaverse.api.scans import (
 )
 from komaverse.config import settings
 from komaverse.db_models import AudioCueRow, Base, UserRow
+from komaverse.renderer import _atempo_chain
 
 
 @pytest.fixture
@@ -321,6 +322,32 @@ def test_cue_lane(factory, user):
     assert exc.value.status_code == 400
 
 
+def test_cue_rate(factory, user):
+    project_id, scene_id = _panel_project(factory, user)
+    with factory() as s:
+        take = upload(s, user, project_id)
+    with factory() as s:
+        cue = add_cue(scene_id, CueCreate(audio_id=take.id, rate=2.0), s, user)
+    assert cue.rate == 2.0
+    with factory() as s:
+        slowed = patch_cue(cue.id, CuePatch(rate=0.5), s, user)
+    assert slowed.rate == 0.5
+    with factory() as s, pytest.raises(HTTPException) as exc:
+        add_cue(scene_id, CueCreate(audio_id=take.id, rate=0.1), s, user)
+    assert exc.value.status_code == 400
+    with factory() as s, pytest.raises(HTTPException) as exc:
+        patch_cue(cue.id, CuePatch(rate=5.0), s, user)
+    assert exc.value.status_code == 400
+
+
+def test_atempo_chain_splits_out_of_range_rates():
+    """ffmpeg atempo accepts 0.5..2.0 per filter; wider cue rates chain."""
+    assert _atempo_chain(1.0) == ["atempo=1.000"]
+    assert _atempo_chain(1.5) == ["atempo=1.500"]
+    assert _atempo_chain(4.0) == ["atempo=2.000", "atempo=2.000"]
+    assert _atempo_chain(0.25) == ["atempo=0.500", "atempo=0.500"]
+
+
 def test_delete_take_blocked_when_cued(factory, user):
     project_id, scene_id = _panel_project(factory, user)
     with factory() as s:
@@ -397,7 +424,9 @@ def test_legacy_cue_without_fades_serializes():
         volume=1.0,
         fade_in=None,
         fade_out=None,
+        rate=None,
     )
     cue = row.to_schema()
     assert cue.fade_in == 0.0
     assert cue.fade_out == 0.0
+    assert cue.rate == 1.0

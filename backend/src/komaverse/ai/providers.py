@@ -710,8 +710,9 @@ def get_chat_config(*, vision: bool = False) -> tuple[str, str, str]:
     """(base_url, api_key, model) for the configured agent chat provider.
 
     AI_PROVIDER selects the brain: "meta" (Meta Model API / Muse Spark),
-    "openrouter", or legacy "cloud" (AI_* settings). Raises ProviderError
-    naming the missing key when unconfigured.
+    "openrouter", "baseten" (Meta open weights via Baseten), or legacy
+    "cloud" (AI_* settings). Raises ProviderError naming the missing key
+    when unconfigured.
     """
     name = provider_for("vision" if vision else "chat")
     if name == "meta":
@@ -733,6 +734,14 @@ def get_chat_config(*, vision: bool = False) -> tuple[str, str, str]:
             settings.openrouter_base_url,
             settings.openrouter_api_key,
             model,
+        )
+    if name == "baseten":
+        if not settings.baseten_api_key:
+            raise ProviderError("baseten chat needs BASETEN_API_KEY")
+        return (
+            settings.baseten_base_url,
+            settings.baseten_api_key,
+            settings.baseten_chat_model,
         )
     if name == "cloud":
         if not settings.ai_api_key or not settings.ai_base_url:
@@ -757,8 +766,8 @@ def get_chat_config(*, vision: bool = False) -> tuple[str, str, str]:
             model,
         )
     raise ProviderError(
-        f'unknown AI_PROVIDER "{name}" (want meta, openrouter, cloud, '
-        "local, comfyui, fake)"
+        f'unknown AI_PROVIDER "{name}" (want meta, openrouter, baseten, '
+        "cloud, local, comfyui, fake)"
     )
 
 
@@ -1152,6 +1161,9 @@ OPENROUTER_VISION_MODELS = (
     {"id": "google/gemini-2.5-flash-lite", "label": "Gemini 2.5 Flash-Lite", "badge": "cheap", "maker": "Google"},
     {"id": "anthropic/claude-haiku-4.5", "label": "Claude Haiku 4.5", "badge": "popular", "maker": "Anthropic"},
 )
+BASETEN_CHAT_MODELS = (
+    {"id": "meta-models/muse-spark-open-1026", "label": "Muse Spark Open (Baseten)", "badge": "open", "maker": "Meta"},
+)
 META_IMAGE_MODELS = (
     {"id": "muse-image-1.0", "label": "Muse Image 1.0", "badge": "spark", "maker": "Meta"},
 )
@@ -1169,6 +1181,7 @@ def list_openrouter_models() -> dict:
         "chat": {
             "meta": [dict(m) for m in META_CHAT_MODELS],
             "openrouter": [dict(m) for m in OPENROUTER_CHAT_MODELS],
+            "baseten": [dict(m) for m in BASETEN_CHAT_MODELS],
         },
         "vision": {
             # Meta vision falls back to the chat model when unset, so the

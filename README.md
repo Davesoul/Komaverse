@@ -30,7 +30,12 @@ started Oct 28, 2026.
 - **Render:** CapCut-style V1/A1/S1 timeline (proportional blocks, second
   ruler, tenths timecode, zoom, drag-reorder, edge-trim with cue `end_sec`,
   undo/redo with Ctrl+Z / Ctrl+Shift+Z like Draw), every delete gated by
-  a confirm pop-up,
+  a confirm pop-up. Clicking a sound cue selects it and opens the sound
+  inspector: volume (±0.1 steppers), fade in/out, speed (0.5/1/1.5/2×
+  presets + custom 0.25–4, previewed live with `playbackRate` and burned
+  into the export with `atempo`), and lane (A1–A8). The ＋ Lane menu adds
+  audio lanes (video overlap and extra subtitle lanes stay disabled until
+  the renderer grows a compositor and multi-track subs),
   per-clip inspector (duration steppers, motion), scenes + clips timeline
   (panels, frames, stills) with audio waveforms on cues and Ctrl+wheel
   zoom + fit-to-width, sidebar grouped by sequence with search,

@@ -95,6 +95,7 @@ export interface AudioCue {
   volume: number;
   fade_in: number;
   fade_out: number;
+  rate: number;
 }
 
 export interface Scene {

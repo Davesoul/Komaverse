@@ -76,6 +76,8 @@ export interface PreviewAudio {
   end: number;
   offset: number;
   volume: number;
+  /** Playback speed; mirrors the export mix (atempo). Defaults to 1. */
+  rate: number;
 }
 
 /** Ken Burns approximation of the server motions (zoom + pan on the still). */
@@ -183,11 +185,13 @@ export function PreviewPlayer({
       // getAttribute: el.src resolves absolute, track.url is app-relative.
       if (el.getAttribute("src") !== track.url) el.setAttribute("src", track.url);
       el.volume = Math.min(Math.max(track.volume, 0), 1);
+      el.playbackRate = track.rate > 0 ? track.rate : 1;
       if (!shouldPlay || at >= track.end) {
         el.pause();
         continue;
       }
-      const want = track.offset + Math.max(0, at - track.start);
+      const rate = track.rate > 0 ? track.rate : 1;
+      const want = track.offset + Math.max(0, at - track.start) * rate;
       if (at < track.start) {
         el.pause();
         try {

@@ -111,6 +111,7 @@ class AgentConfigBody(BaseModel):
     # Values are write-only; reads report set-or-not via keys_set.
     meta_api_key: str | None = None
     openrouter_api_key: str | None = None
+    baseten_api_key: str | None = None
     elevenlabs_api_key: str | None = None
     ai_api_key: str | None = None
 
@@ -288,6 +289,7 @@ def agent_status(
         chat_model = {
             "meta": settings.meta_chat_model,
             "openrouter": settings.openrouter_chat_model,
+            "baseten": settings.baseten_chat_model,
             "cloud": settings.ai_chat_model,
             "local": settings.local_chat_model or None,
         }.get(providers["chat"])

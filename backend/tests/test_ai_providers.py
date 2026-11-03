@@ -121,6 +121,24 @@ def test_chat_config_openrouter(monkeypatch):
     assert "/" in model  # namespaced model id
 
 
+def test_chat_config_baseten(monkeypatch):
+    """Hackathon open-weights bonus: Baseten serves the open Muse Spark."""
+    monkeypatch.setattr(settings, "ai_provider", "baseten")
+    monkeypatch.setattr(settings, "baseten_api_key", "bk-test")
+    base, key, model = get_chat_config()
+    assert base == "https://inference.baseten.co/v1"
+    assert key == "bk-test"
+    assert model == "meta-models/muse-spark-open-1026"
+
+
+def test_chat_config_baseten_missing_key(monkeypatch):
+    monkeypatch.setattr(settings, "ai_provider", "baseten")
+    monkeypatch.setattr(settings, "baseten_api_key", None)
+    with pytest.raises(ProviderError):
+        get_chat_config()
+    assert not chat_configured()
+
+
 def test_chat_config_missing_key(monkeypatch):
     monkeypatch.setattr(settings, "ai_provider", "meta")
     monkeypatch.setattr(settings, "meta_api_key", None)

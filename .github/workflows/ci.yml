@@ -1,0 +1,38 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install torch (CPU) first so ultralytics skips CUDA wheels
+        run: pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu torch
+      - name: Install backend with test deps
+        run: pip install --no-cache-dir "./backend[dev]"
+      - name: Run backend tests
+        run: PYTHONPATH=src python -m pytest tests -q -p no:cacheprovider
+        working-directory: backend
+
+  frontend:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: apps/studio-web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm install --no-audit --no-fund
+      - run: npx tsc --noEmit
+      - run: npm run build

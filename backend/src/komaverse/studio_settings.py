@@ -23,6 +23,7 @@ from komaverse.db_models import StudioSettingRow
 AI_SECRET_KEYS = (
     "meta_api_key",
     "openrouter_api_key",
+    "baseten_api_key",
     "elevenlabs_api_key",
     "ai_api_key",
 )
@@ -39,6 +40,7 @@ AI_OVERRIDE_KEYS = (
     "openrouter_vision_model",
     "openrouter_image_model",
     "openrouter_video_model",
+    "baseten_chat_model",
     "voice_provider",
     "elevenlabs_voice_model",
     "freetts_voice_model",
@@ -54,6 +56,7 @@ AI_OVERRIDE_KEYS = (
 PROVIDER_PREFIX = {
     "meta": "meta_",
     "openrouter": "openrouter_",
+    "baseten": "baseten_",
     "cloud": "ai_",
     "local": "local_",
     "elevenlabs": "elevenlabs_",
@@ -63,7 +66,7 @@ PROVIDER_PREFIX = {
 # Honest per-kind provider menus (mirrors backend capabilities: chat and
 # vision run on LLM providers, image on all image-capable ones, video is
 # OpenRouter-only end to end).
-CHAT_PROVIDERS = ("meta", "openrouter", "cloud", "local")
+CHAT_PROVIDERS = ("meta", "openrouter", "baseten", "cloud", "local")
 VISION_PROVIDERS = ("meta", "openrouter", "cloud", "local")
 IMAGE_PROVIDERS = ("meta", "openrouter", "cloud", "local", "comfyui")
 VOICE_PROVIDERS = ("elevenlabs", "free-tts")

@@ -48,6 +48,7 @@ class CueCreate(BaseModel):
     volume: float = 1.0
     fade_in: float = 0.0
     fade_out: float = 0.0
+    rate: float = 1.0
 
 
 class CuePatch(BaseModel):
@@ -58,6 +59,7 @@ class CuePatch(BaseModel):
     volume: float | None = None
     fade_in: float | None = None
     fade_out: float | None = None
+    rate: float | None = None
 
 
 class TranscriptTurn(BaseModel):
@@ -112,7 +114,7 @@ def _get_take(session: Session, user: UserRow, audio_id: str) -> AudioTakeRow:
 
 def _check_cue_timing(
     start: float, offset: float, end: float | None, lane: int, volume: float,
-    fade_in: float, fade_out: float, duration: float,
+    fade_in: float, fade_out: float, duration: float, rate: float = 1.0,
 ) -> None:
     if start < 0 or start > MAX_TAKE_SEC:
         raise HTTPException(400, f"start_sec out of range: {start}")
@@ -128,6 +130,8 @@ def _check_cue_timing(
         raise HTTPException(400, f"volume must be 0..{MAX_VOLUME}, got {volume}")
     if fade_in < 0 or fade_out < 0:
         raise HTTPException(400, "fades cannot be negative")
+    if not 0.25 <= rate <= 4.0:
+        raise HTTPException(400, f"rate must be 0.25..4.0, got {rate}")
 
 
 @router.post("/projects/{project_id}/audio", response_model=AudioTake, status_code=201)
@@ -383,7 +387,7 @@ def add_cue(
         raise HTTPException(400, "audio belongs to another project")
     _check_cue_timing(
         body.start_sec, body.offset_sec, body.end_sec, body.lane, body.volume,
-        body.fade_in, body.fade_out, audio.duration_sec,
+        body.fade_in, body.fade_out, audio.duration_sec, body.rate,
     )
     row = AudioCueRow(
         scene_id=scene.id,
@@ -395,6 +399,7 @@ def add_cue(
         volume=body.volume,
         fade_in=body.fade_in,
         fade_out=body.fade_out,
+        rate=body.rate,
     )
     session.add(row)
     session.commit()
@@ -420,13 +425,15 @@ def patch_cue(
     volume = body.volume if body.volume is not None else row.volume
     fade_in = body.fade_in if body.fade_in is not None else row.fade_in
     fade_out = body.fade_out if body.fade_out is not None else row.fade_out
+    rate = body.rate if body.rate is not None else (row.rate or 1.0)
     _check_cue_timing(
         start, offset, end, lane, volume, fade_in, fade_out,
-        row.audio.duration_sec,
+        row.audio.duration_sec, rate,
     )
     row.start_sec, row.offset_sec, row.end_sec = start, offset, end
     row.lane = lane
     row.volume, row.fade_in, row.fade_out = volume, fade_in, fade_out
+    row.rate = rate
     session.commit()
     return row.to_schema()
 

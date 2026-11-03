@@ -274,6 +274,7 @@ export default function AgentDock() {
     voice: "",
     meta_api_key: "",
     openrouter_api_key: "",
+    baseten_api_key: "",
     elevenlabs_api_key: "",
     ai_api_key: "",
   });
@@ -1258,7 +1259,7 @@ export default function AgentDock() {
   // Blank model fields are left untouched; Reset clears all overrides.
   // Video is OpenRouter-only end to end, so it takes a model but no provider.
   const KIND_PROVIDERS: Record<string, string[]> = {
-    chat: ["meta", "openrouter", "cloud", "local"],
+    chat: ["meta", "openrouter", "baseten", "cloud", "local"],
     vision: ["meta", "openrouter", "cloud", "local"],
     image: ["meta", "openrouter", "cloud", "local", "comfyui"],
     transcribe: ["meta"],
@@ -1275,6 +1276,7 @@ export default function AgentDock() {
   const ROUTE_VIA: Record<string, string> = {
     meta: "Meta direct",
     openrouter: "via OpenRouter",
+    baseten: "Baseten open weights",
     cloud: "custom endpoint",
     local: "local server",
     comfyui: "ComfyUI",
@@ -1284,6 +1286,7 @@ export default function AgentDock() {
   const BRAIN_PREFIX: Record<string, string> = {
     meta: "meta_",
     openrouter: "openrouter_",
+    baseten: "baseten_",
     cloud: "ai_",
     local: "local_",
     elevenlabs: "elevenlabs_",
@@ -1391,6 +1394,7 @@ export default function AgentDock() {
           voice_model: "",
           meta_api_key: "",
           openrouter_api_key: "",
+          baseten_api_key: "",
           elevenlabs_api_key: "",
           ai_api_key: "",
         }
@@ -1412,6 +1416,7 @@ export default function AgentDock() {
       put("voice_model", brainForm.voice);
       put("meta_api_key", brainForm.meta_api_key);
       put("openrouter_api_key", brainForm.openrouter_api_key);
+      put("baseten_api_key", brainForm.baseten_api_key);
       put("elevenlabs_api_key", brainForm.elevenlabs_api_key);
       put("ai_api_key", brainForm.ai_api_key);
     }
@@ -1421,7 +1426,7 @@ export default function AgentDock() {
       const st = await api.agentConfig(body);
       setAgentInfo(st);
       if (!reset) {
-        setBrainForm((f) => ({ ...f, chat: "", vision: "", image: "", video: "", transcribe: "", voice: "", meta_api_key: "", openrouter_api_key: "", elevenlabs_api_key: "", ai_api_key: "" }));
+        setBrainForm((f) => ({ ...f, chat: "", vision: "", image: "", video: "", transcribe: "", voice: "", meta_api_key: "", openrouter_api_key: "", baseten_api_key: "", elevenlabs_api_key: "", ai_api_key: "" }));
       }
     } catch (e) {
       setBrainError((e as Error).message);
@@ -1728,6 +1733,7 @@ export default function AgentDock() {
               [
                 { field: "meta_api_key", label: "Meta", hint: "Muse brain, vision, image, transcribe" },
                 { field: "openrouter_api_key", label: "OpenRouter", hint: "Chat, vision, image, video" },
+                { field: "baseten_api_key", label: "Baseten", hint: "Open-weight Muse Spark brain" },
                 { field: "elevenlabs_api_key", label: "ElevenLabs", hint: "Voice-over" },
                 { field: "ai_api_key", label: "Cloud AI", hint: "Fallback chat, vision, image" },
               ] as const

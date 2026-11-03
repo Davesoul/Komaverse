@@ -194,6 +194,38 @@ def test_chat_endpoint_carries_cloud_error(factory, user, monkeypatch):
     assert reply.cloud_error and "402" in reply.cloud_error
 
 
+def test_baseten_brain_override_roundtrip(factory, saved_settings):
+    """Hackathon open-weights bonus: Baseten key + chat override persist."""
+    from komaverse.studio_settings import (
+        model_field,
+        provider_for,
+        set_ai_override,
+    )
+
+    with factory() as s:
+        set_ai_override(s, "baseten_api_key", "bk-test")
+        set_ai_override(s, "chat_provider", "baseten")
+        applied = apply_ai_overrides(s)
+    assert applied["baseten_api_key"] == "bk-test"
+    assert applied["chat_provider"] == "baseten"
+    assert settings.baseten_api_key == "bk-test"
+    assert provider_for("chat") == "baseten"
+    assert model_field("baseten", "chat") == "baseten_chat_model"
+
+
+def test_agent_config_accepts_baseten_chat(factory, user, saved_settings):
+    with factory() as s:
+        out = agent_config(
+            AgentConfigBody(
+                chat_provider="baseten",
+                baseten_api_key="bk-test",
+            ),
+            session=s,
+            user=user,
+        )
+    assert out.providers["chat"] == "baseten"
+
+
 def test_apply_ai_overrides_roundtrip(factory, saved_settings):
     with factory() as s:
         from komaverse.studio_settings import set_ai_override
@@ -237,6 +269,10 @@ def test_model_catalog_serves_chat_options(factory, user):
         "google/gemini-2.5-flash-lite",
         "anthropic/claude-haiku-4.5",
     ]
+    assert [m["id"] for m in out["chat"]["baseten"]] == [
+        "meta-models/muse-spark-open-1026",
+    ]
+    assert out["chat"]["baseten"][0]["maker"] == "Meta"
     assert [m["id"] for m in out["meta_image"]] == ["muse-image-1.0"]
     assert out["chat"]["openrouter"][0]["maker"] == "OpenAI"
     assert out["chat"]["meta"][1]["maker"] == "Meta"

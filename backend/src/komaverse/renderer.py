@@ -462,12 +462,26 @@ def transcode_to_wav(data: bytes, suffix: str) -> bytes:
 
 
 
+def _atempo_chain(rate: float) -> list[str]:
+    """Split a speed factor into ffmpeg atempo filters (each 0.5..2.0)."""
+    parts = []
+    r = min(max(rate, 0.25), 4.0)
+    while r > 2.0:
+        parts.append("atempo=2.000")
+        r /= 2.0
+    while r < 0.5:
+        parts.append("atempo=0.500")
+        r *= 2.0
+    parts.append(f"atempo={r:.3f}")
+    return parts
+
+
 def mix_audio_tracks(
     silent: Path, tracks: list[dict], video_dur: float, dest: Path
 ) -> None:
     """Mix timeline tracks onto the silent render (AAC, video stream copied).
 
-    Each track: path, start_sec, offset_sec, volume, fade_in, fade_out,
+    Each track: path, start_sec, offset_sec, volume, fade_in, fade_out, rate,
     end_sec. Video duration rules: audio is padded/trimmed to match.
     Raises RuntimeError with ffmpeg's stderr tail on failure.
     """
@@ -486,6 +500,8 @@ def mix_audio_tracks(
             parts.append(f"aloop=loop=-1:size={size}")
         if track.get("trim_dur"):
             parts.append(f"atrim=0:{track['trim_dur']:.3f}")
+        if track.get("rate", 1.0) != 1.0:
+            parts += _atempo_chain(track["rate"])
         parts += [
             f"adelay={start_ms}|{start_ms}",
             f"volume={track['volume']:.3f}",
@@ -620,6 +636,10 @@ def render_project(
                     continue
                 start = scene_starts[scene.id] + max(cue.start_sec, 0)
                 trim = max(take.duration_sec - max(cue.offset_sec, 0), 0.1)
+                # Cue speed: rate > 1 shortens the cue on the timeline
+                # (rate < 1 stretches it); the fade anchors below reuse end.
+                rate = min(max(getattr(cue, "rate", 1.0) or 1.0, 0.25), 4.0)
+                trim = trim / rate
                 end = min(video_dur, start + trim) if take.duration_sec > 0 else video_dur
                 if cue.end_sec is not None:
                     end = min(end, max(cue.end_sec, start + 0.1))
@@ -631,6 +651,7 @@ def render_project(
                         "volume": min(max(cue.volume, 0), 2),
                         "fade_in": max(cue.fade_in, 0),
                         "fade_out": max(cue.fade_out, 0),
+                        "rate": rate,
                         "end_sec": max(end - max(cue.fade_out, 0), 0),
                     }
                 )

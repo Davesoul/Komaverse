@@ -337,6 +337,7 @@ class AudioCueRow(Base):
     volume: Mapped[float] = mapped_column(default=1.0)
     fade_in: Mapped[float] = mapped_column(default=0)
     fade_out: Mapped[float] = mapped_column(default=0)
+    rate: Mapped[float] = mapped_column(default=1.0)
 
     scene: Mapped[SceneRow] = relationship(back_populates="cues")
     audio: Mapped[AudioTakeRow] = relationship(back_populates="cues")
@@ -354,6 +355,7 @@ class AudioCueRow(Base):
             # Pre-fade rows hold NULL (ALTER backfill): same guard as clips.
             fade_in=self.fade_in if self.fade_in is not None else 0.0,
             fade_out=self.fade_out if self.fade_out is not None else 0.0,
+            rate=self.rate if self.rate is not None else 1.0,
         )
 
 

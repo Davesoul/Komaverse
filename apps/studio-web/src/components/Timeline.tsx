@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Btn, IconBtn } from "./ui";
+import { Btn, IconBtn, SelectInput } from "./ui";
 
 export interface TimelineClipInfo {
   id: string;
@@ -25,6 +25,8 @@ export interface TimelineCueInfo {
   /** Trimmed stop on the timeline; null plays to the take end. */
   endSec: number | null;
   lane: number;
+  /** Playback speed; 2.0 doubles the pace and halves the display length. */
+  rate: number;
   /** Take audio URL for the waveform backdrop; absent hides it. */
   audio?: string;
 }
@@ -38,7 +40,8 @@ function cueLane(cue: TimelineCueInfo): number {
 
 /** Display length mirrors the export mix: take remainder, trim, video end. */
 export function cueDisplayLen(cue: TimelineCueInfo, total: number): number {
-  let len = Math.max(cue.takeDur - Math.max(cue.offset, 0), 0.1);
+  const rate = cue.rate > 0 ? cue.rate : 1;
+  let len = Math.max(cue.takeDur - Math.max(cue.offset, 0), 0.1) / rate;
   if (cue.endSec != null) len = Math.min(len, Math.max(cue.endSec - cue.start, 0.1));
   if (total > 0) len = Math.min(len, Math.max(total - cue.start, 0.2));
   return len;
@@ -249,6 +252,7 @@ export function Timeline({
     cueOff: number;
     cueEnd: number | null;
     takeDur: number;
+    cueRate: number;
     moved: boolean;
     pa: number;
     pb: number;
@@ -287,7 +291,7 @@ export function Timeline({
       g.pb = round1(g.cueOff + cdx);
       setTrim({ kind: "cue", id: g.id, edge: "l", a: g.pa, b: g.pb });
     } else {
-      const natural = g.takeDur - g.cueOff;
+      const natural = (g.takeDur - g.cueOff) / (g.cueRate > 0 ? g.cueRate : 1);
       g.pa = round1(Math.min(Math.max(g.base + dx, 0.2), natural));
       setTrim({ kind: "cue", id: g.id, edge: "r", a: g.pa, b: 0 });
     }
@@ -309,7 +313,7 @@ export function Timeline({
         onTrimCue(g.id, { start_sec: g.pa, offset_sec: g.pb });
       }
     } else {
-      const natural = Math.round((g.takeDur - g.cueOff) * 10) / 10;
+      const natural = Math.round(((g.takeDur - g.cueOff) / (g.cueRate > 0 ? g.cueRate : 1)) * 10) / 10;
       onTrimCue(g.id, g.pa >= natural - 1e-6 ? { end_sec: null } : { end_sec: round1(g.cueStart + g.pa) });
     }
   };
@@ -423,12 +427,21 @@ export function Timeline({
             {fmtTC(playhead)} / {fmtTC(total)} · {frames}f @ {fps}fps
           </span>
         </div>
-        <IconBtn
-          onClick={() => setExtraLanes((n) => Math.min(n + 1, 8))}
-          label="Add an audio lane (A1, A2, …) — drop takes there, drag cues across"
+        <SelectInput
+          value=""
+          onChange={(e) => {
+            if (e.target.value === "audio") setExtraLanes((n) => Math.min(n + 1, 8));
+            e.target.value = "";
+          }}
+          aria-label="Add a timeline lane"
+          title="Audio lanes stack takes in the mix. Overlapping video lanes need a renderer compositor, and extra subtitle lanes need multi-track subs — both are planned, so they stay disabled here."
+          style={{ width: 116 }}
         >
-          ＋
-        </IconBtn>
+          <option value="">＋ Lane…</option>
+          <option value="audio">Audio A{laneCount + 1} — stacks takes</option>
+          <option value="video" disabled>Video — needs compositing</option>
+          <option value="subtitle" disabled>Subtitles — one track per scene</option>
+        </SelectInput>
         <IconBtn
           onClick={() => setPps((p) => Math.max(12, Math.round(p / 1.25)))}
           label="Zoom timeline out"
@@ -634,14 +647,14 @@ export function Timeline({
                       beginTrim(e, {
                         kind: "clip", id: clip.id, edge: "l",
                         startX: e.clientX, base: clip.duration,
-                        cueStart: 0, cueOff: 0, cueEnd: null, takeDur: 0, moved: false, pa: 0, pb: 0,
+                        cueStart: 0, cueOff: 0, cueEnd: null, takeDur: 0, cueRate: 1, moved: false, pa: 0, pb: 0,
                       }),
                     )}
                     {edgeHandle("r", handlesVisible, (e) =>
                       beginTrim(e, {
                         kind: "clip", id: clip.id, edge: "r",
                         startX: e.clientX, base: clip.duration,
-                        cueStart: 0, cueOff: 0, cueEnd: null, takeDur: 0, moved: false, pa: 0, pb: 0,
+                        cueStart: 0, cueOff: 0, cueEnd: null, takeDur: 0, cueRate: 1, moved: false, pa: 0, pb: 0,
                       }),
                     )}
                   </div>
@@ -705,13 +718,15 @@ export function Timeline({
                 if (cue.start >= total && total > 0) return null;
                 const handlesVisible = hoverId === cue.id || trimming !== null;
                 const off = trimming && trimming.edge === "l" ? trimming.b : cue.offset;
+                const selectedCue = cue.id === selectedId;
                 return (
                   <button
                     key={cue.id}
                     type="button"
-                    title={`${cue.name} — A${lane + 1} · starts ${fmtTC(start)}, ${fmtTC(len)} long (take offset ${fmtTC(off)}) — click to preview, drag to move across time and lanes, drag edges to trim`}
+                    title={`${cue.name} — A${lane + 1} · starts ${fmtTC(start)}, ${fmtTC(len)} long (take offset ${fmtTC(off)}) — click to select and preview, drag to move across time and lanes, drag edges to trim`}
                     onClick={() => {
                       if (consumeClickAfterTrim()) return;
+                      onSelect(cue.id);
                       onSeek(Math.min(start, total));
                     }}
                     onPointerDown={(e) => beginMove(e, cue.id, cue.start, cue.endSec, cueLane(cue))}
@@ -731,7 +746,7 @@ export function Timeline({
                       width: w,
                       height: 32,
                       borderRadius: 6,
-                      border: "1px solid #3d5a80",
+                      border: selectedCue ? "2px solid var(--kv-accent)" : "1px solid #3d5a80",
                       background: "linear-gradient(180deg, #22344d, #182638)",
                       color: "#dbe7f5",
                       cursor: moving ? "grabbing" : "grab",
@@ -753,14 +768,14 @@ export function Timeline({
                       beginTrim(e, {
                         kind: "cue", id: cue.id, edge: "l",
                         startX: e.clientX, base: 0,
-                        cueStart: cue.start, cueOff: cue.offset, cueEnd: cue.endSec, takeDur: cue.takeDur, moved: false, pa: 0, pb: 0,
+                        cueStart: cue.start, cueOff: cue.offset, cueEnd: cue.endSec, takeDur: cue.takeDur, cueRate: cue.rate, moved: false, pa: 0, pb: 0,
                       }),
                     )}
                     {edgeHandle("r", handlesVisible, (e) =>
                       beginTrim(e, {
                         kind: "cue", id: cue.id, edge: "r",
                         startX: e.clientX, base: cueDisplayLen(cue, total),
-                        cueStart: cue.start, cueOff: cue.offset, cueEnd: cue.endSec, takeDur: cue.takeDur, moved: false, pa: 0, pb: 0,
+                        cueStart: cue.start, cueOff: cue.offset, cueEnd: cue.endSec, takeDur: cue.takeDur, cueRate: cue.rate, moved: false, pa: 0, pb: 0,
                       }),
                     )}
                   </button>

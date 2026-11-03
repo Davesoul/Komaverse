@@ -492,7 +492,7 @@ export function AudioDeck({
                     {take?.name || "Missing take"}
                   </span>
                   <span className="kv-nums" style={{ color: "var(--kv-muted)" }}>
-                    @{c.start_sec.toFixed(1)}s ×{c.volume.toFixed(1)}
+                    @{c.start_sec.toFixed(1)}s ×{c.volume.toFixed(1)}{(c.rate ?? 1) !== 1 ? ` · ${(c.rate ?? 1)}×` : ""}
                   </span>
                   <IconBtn
                     onClick={() => {

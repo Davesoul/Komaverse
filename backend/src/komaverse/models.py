@@ -133,6 +133,7 @@ class AudioCue(BaseModel):
     volume: float = 1.0  # 0..2 gain
     fade_in: float = 0.0
     fade_out: float = 0.0
+    rate: float = 1.0  # playback speed; 2.0 = twice as fast
 
 
 class SubtitleSegment(BaseModel):

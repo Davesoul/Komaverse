@@ -119,6 +119,19 @@ class Settings(BaseSettings):
     openrouter_referer: str = Field(
         default="https://komaverse.studio", validation_alias="OPENROUTER_REFERER"
     )
+    # Baseten — Meta open-weight chat (Muse Spark Open) for the hackathon
+    # open-weights bonus; OpenAI-compatible inference endpoint, one key.
+    baseten_api_key: str | None = Field(
+        default=None, validation_alias="BASETEN_API_KEY"
+    )
+    baseten_base_url: str = Field(
+        default="https://inference.baseten.co/v1",
+        validation_alias="BASETEN_BASE_URL",
+    )
+    baseten_chat_model: str = Field(
+        default="meta-models/muse-spark-open-1026",
+        validation_alias="BASETEN_CHAT_MODEL",
+    )
     # Local open-weight server (Ollama-compatible) for desktop / LAN /
     # on-device use: the studio talks to it like any OpenAI endpoint.
     # Set the model names to what you pulled locally; no key needed.

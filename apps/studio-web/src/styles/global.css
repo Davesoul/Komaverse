@@ -17,6 +17,29 @@ button, input, select, textarea {
   color: inherit;
 }
 
+/* Bare fields (clip duration, cue numbers, voice box) match the shared
+   TextInput look: browser-default white boxes are unreadable on the dark
+   theme. Typed controls (checkbox, radio, color, range, file, button,
+   hidden) keep their native rendering. */
+input:not([type]),
+input[type="text"],
+input[type="number"],
+textarea {
+  background: var(--kv-inset);
+  color: var(--kv-text);
+  border: 1px solid var(--kv-border-strong);
+  border-radius: var(--kv-radius-sm);
+  padding: 6px 8px;
+}
+input:not([type]):focus-visible,
+input[type="text"]:focus-visible,
+input[type="number"]:focus-visible,
+textarea:focus-visible {
+  outline: 2px solid var(--kv-accent);
+  outline-offset: 1px;
+}
+
+
 a {
   color: var(--kv-accent-text);
 }
@@ -160,7 +183,7 @@ a {
   transform: skewX(-6deg) scale(0.96);
   box-shadow: 2px 2px 0 #000;
 }
-/* Keyboard focus keeps the hard stamp shadow and adds a paper ring �
+/* Keyboard focus keeps the hard stamp shadow and adds a paper ring â€”
    the global :focus-visible rule would otherwise swap the offset
    shadow for a glow and flatten the stamp. Placed after hover so the
    ring survives hovering. */
@@ -192,7 +215,7 @@ a {
 .kv-sfxbtn.punch {
   animation: kv-punch 0.45s var(--kv-ease-out);
 }
-/* Impact frame on the button itself: 2�3 frames of white-hot at the hit,
+/* Impact frame on the button itself: 2–3 frames of white-hot at the hit,
  * then gone. ::after is the idle sheen, so the flash takes ::before. */
 .kv-sfxbtn.punch::before {
   content: "";
@@ -456,7 +479,7 @@ html {
 }
 
 /* Scroll-reveal primitives. Only .kv-reveal-armed (added by JS when IO is
-   available and motion is allowed) starts hidden � content without JS is
+   available and motion is allowed) starts hidden â€” content without JS is
    always visible. */
 .kv-reveal-armed {
   opacity: 0;
@@ -472,7 +495,7 @@ html {
 .kv-reveal-media {
   clip-path: inset(14% 8% 14% 8%);
 }
-/* Visible always means unclipped � even when the armed start state was
+/* Visible always means unclipped â€” even when the armed start state was
    never applied (reduced motion / no IntersectionObserver). */
 .kv-reveal-media.is-visible {
   clip-path: inset(0 0 0 0);
@@ -541,8 +564,8 @@ html {
   }
 }
 
-/* Busy-label pulse: static "Loading�" text next to a Spinner reads dead;
-   this breathes on the label while work runs. Static angles only � no
+/* Busy-label pulse: static "Loading…" text next to a Spinner reads dead;
+   this breathes on the label while work runs. Static angles only â€” no
    motion under prefers-reduced-motion (see the opt-out list below). */
 .kv-busy {
   display: inline-block;
@@ -626,7 +649,7 @@ html {
   padding: 0 5px;
   box-shadow: none;
 }
-/* Media library: polaroid-dynamism � alternating tilt, straightens
+/* Media library: polaroid-dynamism â€” alternating tilt, straightens
  * on hover/focus so the content is always readable at rest. */
 .kv-media-card:nth-child(odd) {
   transform: rotate(-0.6deg);

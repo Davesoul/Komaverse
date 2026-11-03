@@ -314,6 +314,8 @@ export default function RenderPage() {
   const [renamingScene, setRenamingScene] = useState("");
   const [dragId, setDragId] = useState<string | null>(null);
   const [selectedClipId, setSelectedClipId] = useState<string | null>(null);
+  /** Timeline sound cue selected for volume/fade/speed editing. */
+  const [selectedCueId, setSelectedCueId] = useState<string | null>(null);
   /** Timeline undo/redo (Draw parity): snapshots of every scene's clip
    * list, so cross-scene auto-direct restores too. Capped at 50; scene
    * add/remove/duplicate clears the stacks because ids no longer
@@ -427,6 +429,17 @@ export default function RenderPage() {
   const total = clips.reduce((sum, c) => sum + c.duration, 0);
   const cueCount = scenes.reduce((sum, s) => sum + s.cues.length, 0);
   const selectedClip = clips.find((c) => c.id === selectedClipId) ?? clips[0] ?? null;
+  const selectedCue = scene?.cues.find((c) => c.id === selectedCueId) ?? null;
+  /** Timeline clicks route by id: a cue id opens the sound editor, anything else is a clip. */
+  const handleTimelineSelect = (id: string) => {
+    if (scene?.cues.some((c) => c.id === id)) {
+      setSelectedCueId(id);
+      setSelectedClipId(null);
+    } else {
+      setSelectedClipId(id);
+      setSelectedCueId(null);
+    }
+  };
 
   const cueInfos: TimelineCueInfo[] = useMemo(
     () =>
@@ -442,6 +455,7 @@ export default function RenderPage() {
             takeDur: Math.max(take.duration_sec, 0),
             endSec: cue.end_sec ?? null,
             lane: cue.lane ?? 0,
+            rate: cue.rate ?? 1,
             audio: mediaUrl(take.url),
           },
         ];
@@ -457,7 +471,8 @@ export default function RenderPage() {
         if (!take) return [];
         const start = Math.max(cue.start_sec, 0);
         const offset = Math.max(cue.offset_sec, 0);
-        let len = Math.max(take.duration_sec - offset, 0.1);
+        const rate = cue.rate > 0 ? cue.rate : 1;
+        let len = Math.max(take.duration_sec - offset, 0.1) / rate;
         if (cue.end_sec != null) len = Math.min(len, Math.max(cue.end_sec - start, 0.1));
         if (total > 0) len = Math.min(len, Math.max(total - start, 0.2));
         if (len <= 0) return [];
@@ -469,6 +484,7 @@ export default function RenderPage() {
             end: start + len,
             offset,
             volume: cue.volume,
+            rate,
           },
         ];
       }),
@@ -524,14 +540,23 @@ export default function RenderPage() {
 
   const commitCuePatch = async (
     id: string,
-    patch: { start_sec?: number; offset_sec?: number; end_sec?: number | null; lane?: number },
+    patch: {
+      start_sec?: number;
+      offset_sec?: number;
+      end_sec?: number | null;
+      lane?: number;
+      volume?: number;
+      fade_in?: number;
+      fade_out?: number;
+      rate?: number;
+    },
   ) => {
     if (!project || !scene) return;
     try {
       await api.patchCue(id, patch);
       await refresh(project.id, scene.id);
     } catch (e) {
-      setNotice(`Sound trim failed: ${(e as Error).message}`);
+      setNotice(`Sound update failed: ${(e as Error).message}`);
     }
   };
 
@@ -1244,7 +1269,7 @@ export default function RenderPage() {
               </Btn>
               <div style={{ display: "flex", gap: 6 }}>
                 <SelectInput
-                  style={{ flex: 1 }}
+                  style={{ flex: 1, minWidth: 0 }}
                   value={pagePick}
                   onChange={(e) => setPagePick(e.target.value)}
                   aria-label="Page still to add"
@@ -1273,7 +1298,7 @@ export default function RenderPage() {
               </div>
               <div style={{ display: "flex", gap: 6, marginTop: 8 }}>
                 <SelectInput
-                  style={{ flex: 1 }}
+                  style={{ flex: 1, minWidth: 0 }}
                   value={panelPick}
                   onChange={(e) => setPanelPick(e.target.value)}
                   aria-label="Panel to add"
@@ -1306,7 +1331,7 @@ export default function RenderPage() {
               </div>
               <div style={{ display: "flex", gap: 6, marginTop: 8 }}>
                 <SelectInput
-                  style={{ flex: 1 }}
+                  style={{ flex: 1, minWidth: 0 }}
                   value={videoPick}
                   onChange={(e) => setVideoPick(e.target.value)}
                   aria-label="Finished video to add"
@@ -2015,10 +2040,10 @@ export default function RenderPage() {
                     total={total}
                     playhead={playhead}
                     fps={Number(fps) || 12}
-                    selectedId={selectedClip?.id ?? null}
+                    selectedId={selectedCueId ?? selectedClip?.id ?? null}
                     dragId={dragId}
                     onSeek={(t) => setSeek({ time: t, nonce: Date.now() })}
-                    onSelect={(id) => setSelectedClipId(id)}
+                    onSelect={handleTimelineSelect}
                     onDragStart={setDragId}
                     onDrop={(id) => void dropClip(id)}
                     onDragEnd={() => setDragId(null)}
@@ -2040,7 +2065,7 @@ export default function RenderPage() {
               />
             )}
 
-            {scene && selectedClip && (
+            {scene && selectedClip && !selectedCue && (
               <div
                 style={{
                   marginBottom: 20,
@@ -2303,6 +2328,141 @@ export default function RenderPage() {
                 </div>
               </div>
             )}
+
+            {scene && selectedCue && (() => {
+              const take = takes.find((t) => t.id === selectedCue.audio_id);
+              const rate = selectedCue.rate ?? 1;
+              const cueLen = take
+                ? Math.max(take.duration_sec - Math.max(selectedCue.offset_sec, 0), 0.1) / (rate > 0 ? rate : 1)
+                : 0;
+              return (
+                <div
+                  style={{
+                    marginBottom: 20,
+                    border: "1px solid var(--kv-border)",
+                    borderRadius: 8,
+                    padding: 12,
+                    background: "var(--kv-surface)",
+                  }}
+                >
+                  <div style={{ display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
+                    <div style={{ minWidth: 0 }}>
+                      <div style={{ fontWeight: 700 }}>
+                        ♪ {take?.name || "Missing take"}
+                      </div>
+                      <div className="kv-nums" style={{ fontSize: 12, color: "var(--kv-muted)" }}>
+                        starts {fmtTC(Math.max(selectedCue.start_sec, 0))} ·{" "}
+                        {cueLen.toFixed(1)}s long · A{(selectedCue.lane ?? 0) + 1} ·{" "}
+                        {rate}× speed
+                      </div>
+                    </div>
+                    <div style={{ display: "flex", gap: 6, alignItems: "center", marginLeft: "auto", flexWrap: "wrap" }}>
+                      <span style={{ fontSize: 12, color: "var(--kv-muted)" }}>Volume</span>
+                      <Btn
+                        small
+                        title="Quieter by 0.1"
+                        onClick={() =>
+                          void commitCuePatch(selectedCue.id, {
+                            volume: Math.round(Math.max(0, selectedCue.volume - 0.1) * 10) / 10,
+                          })
+                        }
+                      >
+                        −
+                      </Btn>
+                      <SecInput
+                        value={selectedCue.volume}
+                        label="Cue volume"
+                        title="Cue gain 0–2 (preview caps at 1; the export honors the full range)"
+                        onCommit={(v) => void commitCuePatch(selectedCue.id, { volume: v })}
+                      />
+                      <Btn
+                        small
+                        title="Louder by 0.1"
+                        onClick={() =>
+                          void commitCuePatch(selectedCue.id, {
+                            volume: Math.round(Math.min(2, selectedCue.volume + 0.1) * 10) / 10,
+                          })
+                        }
+                      >
+                        +
+                      </Btn>
+                    </div>
+                  </div>
+                  <div style={{ display: "flex", gap: 6, alignItems: "center", marginTop: 10, flexWrap: "wrap" }}>
+                    <span style={{ fontSize: 12, color: "var(--kv-muted)" }}>Speed</span>
+                    {[0.5, 1, 1.5, 2].map((r) => (
+                      <Btn
+                        key={r}
+                        small
+                        active={rate === r}
+                        title={r === 1 ? "Normal speed" : `${r}× speed (export re-times with atempo)`}
+                        onClick={() => void commitCuePatch(selectedCue.id, { rate: r })}
+                      >
+                        {r}×
+                      </Btn>
+                    ))}
+                    <SecInput
+                      value={rate}
+                      label="Cue speed"
+                      title="Custom speed 0.25–4 (export re-times with atempo)"
+                      onCommit={(v) => void commitCuePatch(selectedCue.id, { rate: v })}
+                    />
+                  </div>
+                  <div style={{ display: "flex", gap: 6, alignItems: "center", marginTop: 10, flexWrap: "wrap" }}>
+                    <span style={{ fontSize: 12, color: "var(--kv-muted)" }}>Lane</span>
+                    <SelectInput
+                      value={selectedCue.lane ?? 0}
+                      onChange={(e) => void commitCuePatch(selectedCue.id, { lane: Number(e.target.value) })}
+                      aria-label="Cue audio lane"
+                      title="Which A-lane this cue plays on (export mixes every lane)"
+                    >
+                      {Array.from({ length: 8 }).map((_, i) => (
+                        <option key={i} value={i}>A{i + 1}</option>
+                      ))}
+                    </SelectInput>
+                    <span style={{ fontSize: 12, color: "var(--kv-muted)", marginLeft: 8 }}>Fade</span>
+                    <SecInput
+                      value={selectedCue.fade_in}
+                      label="Cue fade in seconds"
+                      title="Fade in, in seconds (0 = off)"
+                      onCommit={(v) => void commitCuePatch(selectedCue.id, { fade_in: v })}
+                    />
+                    <SecInput
+                      value={selectedCue.fade_out}
+                      label="Cue fade out seconds"
+                      title="Fade out, in seconds (0 = off)"
+                      onCommit={(v) => void commitCuePatch(selectedCue.id, { fade_out: v })}
+                    />
+                    <span style={{ fontSize: 11, color: "var(--kv-faint)" }}>
+                      Volume, fades, and speed render in the MP4 export.
+                    </span>
+                    <span style={{ marginLeft: "auto", display: "flex", gap: 6 }}>
+                      <Btn small onClick={() => setSelectedCueId(null)}>
+                        Done
+                      </Btn>
+                      <Btn
+                        small
+                        danger
+                        onClick={async () => {
+                          if (!project || !scene) return;
+                          if (!window.confirm(`Remove this cue from the timeline? The take stays in the library. This can't be undone.`)) return;
+                          try {
+                            await api.deleteCue(selectedCue.id);
+                            setSelectedCueId(null);
+                            setNotice("Cue removed — the take stays in the library.");
+                            await refresh(project.id, scene.id);
+                          } catch (e) {
+                            setNotice(`Delete failed: ${(e as Error).message}`);
+                          }
+                        }}
+                      >
+                        Delete
+                      </Btn>
+                    </span>
+                  </div>
+                </div>
+              );
+            })()}
 
             {project && (
               <div style={{ marginBottom: 20 }}>

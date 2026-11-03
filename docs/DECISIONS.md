@@ -718,3 +718,47 @@ color-theory (cel shadow colors, light logic), manga-literacy
 - Live: backend skills 22 green (incl. the repo-root resolution
   test), agent suites 100 green, `npx tsc --noEmit` clean,
   `npm run build` green.
+
+## ADR-27: Cue playback speed end to end (accepted)
+
+- Sound cues now carry `rate` (0.25–4.0, default 1.0): `AudioCue`
+  schema, `AudioCueRow` column (+ `ALTER TABLE audio_cues ADD COLUMN
+  rate` backfill guard, NULL reads as 1.0), `CueCreate`/`CuePatch`
+  fields, `_check_cue_timing` range check. Pre-rate rows keep working
+  because every read defaults missing/NULL rates to 1.0.
+- The export mix rescales the cue window by `1/rate` before the end
+  clamps (so fade-out anchors track the sped audio) and chains ffmpeg
+  `atempo` filters after `atrim` — split into 0.5–2.0-safe pieces by
+  `_atempo_chain` (4.0 → 2.0+2.0, 0.25 → 0.5+0.5). Rate 1.0 emits no
+  filter, so existing exports are bit-identical.
+- Live: `test_cue_rate` (CRUD + 400s), `test_atempo_chain_…` splits,
+  legacy-NULL-rate serialization, full backend 413 green.
+
+## ADR-28: Cue selection, sound inspector, honest lane menu, dark fields (accepted)
+
+- Timeline sound blocks were seek-only: clicking a cue now also
+  selects it (`onSelect(cue.id)`), highlights it with the accent ring,
+  and opens a sound inspector in RenderPage (routed by id in
+  `handleTimelineSelect`, which clears the clip selection so the two
+  panels never overlap). The inspector edits volume (±0.1 steppers +
+  commit-on-quiet field, 0–2 server-clamped), speed (0.5/1/1.5/2×
+  presets + custom 0.25–4 field), lane (A1–A8 select), and fade
+  in/out, with a confirm-gated Delete and a Done close. Lengths,
+  trims, and the live preview all divide by rate, and the preview
+  sets `playbackRate` with rate-aware seek math.
+- The ＋ lane button is now a lane-type menu: Audio adds a lane
+  (A{next}, still capped at 8); Video and Subtitles are present but
+  disabled with reasons — overlapping video needs a renderer
+  compositor (ffmpeg xstack/PiP per lane) and extra subtitle lanes
+  need multi-track subs, neither of which the backend has. Shipping
+  dead lanes would be worse than naming the gap; this keeps the menu
+  honest until the compositor lands.
+- Bare `<input>`/`<textarea>` elements (clip Duration/SecInput,
+  voice-over box) rendered browser-default white on the dark theme.
+  `global.css` now gives untyped/text/number inputs and textareas the
+  shared inset/border/radius treatment (typed controls — checkbox,
+  radio, color, range, file — keep native rendering). Also normalized
+  that file from cp1252 to UTF-8 (stray 0x85/0x96/0x97 bytes broke
+  UTF-8 tooling).
+- Live: `npx tsc --noEmit` clean, `npm run build` green, full backend
+  413 green.

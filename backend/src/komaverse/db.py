@@ -75,6 +75,7 @@ def init_db() -> None:
     for ddl in (
         "ALTER TABLE audio_cues ADD COLUMN end_sec FLOAT",
         "ALTER TABLE audio_cues ADD COLUMN lane INTEGER",
+        "ALTER TABLE audio_cues ADD COLUMN rate FLOAT",
         "ALTER TABLE export_reports ADD COLUMN subtitles_vtt_url VARCHAR(500)",
         "ALTER TABLE jobs ADD COLUMN model VARCHAR(200)",
         "ALTER TABLE jobs ADD COLUMN seed INTEGER",

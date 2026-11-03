@@ -8,7 +8,7 @@ import { PIXEL, createStage } from "../lib/models3d";
  * zone beside them — never on top. One small stage, slow turntable,
  * renders only while visible; models load when the section nears the
  * viewport so first paint costs nothing. Drag to turn. Any failure
- * removes it quietly. */
+ * (no WebGL, blocked GPU) falls back to labeled tiles. */
 const LINEUP = [
   { src: "/models/pin.fbx", skin: "pin" },
   { src: "/models/holder.fbx", skin: "holder" },
@@ -248,6 +248,31 @@ export default function InstrumentModels() {
     };
   }, [live]);
 
-  if (gone) return null;
+  if (gone)
+    return (
+      <div
+        className="lv-dock-models"
+        aria-hidden="true"
+        style={{ display: "flex", gap: 12, alignItems: "stretch", justifyContent: "center" }}
+      >
+        {["Pin", "Holder", "Stylo"].map((n) => (
+          <div
+            key={n}
+            style={{
+              flex: 1,
+              border: "1px solid var(--kv-border)",
+              borderRadius: 8,
+              padding: "18px 8px",
+              textAlign: "center",
+              fontSize: 13,
+              color: "var(--kv-muted)",
+              background: "var(--kv-inset)",
+            }}
+          >
+            {n}
+          </div>
+        ))}
+      </div>
+    );
   return <div ref={hostRef} className="lv-dock-models" aria-hidden="true" />;
 }
