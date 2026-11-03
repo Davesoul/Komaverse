@@ -647,7 +647,7 @@ def chat_complete_with_usage(
     headers = {"Authorization": f"Bearer {api_key}"}
     if extra_headers:
         headers.update(extra_headers)
-    body: dict = {"model": model, "messages": messages, "temperature": 0.2}
+    body: dict = {"model": model, "messages": messages, "temperature": 0.2, "max_tokens": settings.chat_max_tokens}
     if tools:
         body["tools"] = tools
         body["tool_choice"] = "auto"
@@ -672,6 +672,12 @@ def chat_complete_with_usage(
         ) from exc
     if not isinstance(message, dict):
         raise ProviderError("chat returned an unreadable response")
+    try:
+        _finish = payload["choices"][0].get("finish_reason")
+    except (KeyError, IndexError, TypeError, AttributeError):
+        _finish = None
+    if _finish:
+        message["finish_reason"] = _finish
     return message, _normalize_usage(payload.get("usage"))
 
 
@@ -1223,6 +1229,30 @@ def _image_bytes_from_result(data: dict) -> bytes:
     raise ProviderError("image response carried no b64_json or url")
 
 
+#: Canonical aspect buckets the OpenRouter image endpoint accepts. Anything
+#: else renders 1:1, so the caller derives the bucket from the requested
+#: pixels instead of asking the model for a ratio the API would ignore.
+_ASPECTS = {
+    (16, 9): "16:9",
+    (9, 16): "9:16",
+    (4, 3): "4:3",
+    (3, 4): "3:4",
+    (3, 2): "3:2",
+    (2, 3): "2:3",
+    (1, 1): "1:1",
+}
+
+
+def _aspect_ratio(width: int, height: int) -> str:
+    """Canonical aspect bucket for pixels; unknown ratios fall back to 1:1."""
+    try:
+        w, h = max(int(width), 1), max(int(height), 1)
+    except (TypeError, ValueError):
+        return "1:1"
+    g = math.gcd(w, h)
+    return _ASPECTS.get((w // g, h // g), "1:1")
+
+
 class OpenRouterProvider:
     """OpenRouter gateway: chat models, image models, async video models."""
 
@@ -1258,7 +1288,7 @@ class OpenRouterProvider:
             "model": model,
             "prompt": prompt,
             "resolution": resolution,
-            "aspect_ratio": "1:1",
+            "aspect_ratio": _aspect_ratio(width, height),
         }
         if seed is not None:
             payload["seed"] = seed
@@ -1446,6 +1476,7 @@ def chat_complete_stream(
         "model": model,
         "messages": messages,
         "temperature": 0.2,
+        "max_tokens": settings.chat_max_tokens,
         "stream": True,
         "stream_options": {"include_usage": True},
     }
@@ -1467,6 +1498,7 @@ def chat_complete_stream(
         if res.status_code >= 400:
             raise ProviderError(f"chat failed ({res.status_code})")
         content = ""
+        finish_reason = None
         tool_calls: dict[int, dict] = {}
         usage = {"input": 0, "output": 0, "total": 0}
         for line in res.iter_lines():
@@ -1482,6 +1514,8 @@ def chat_complete_stream(
             if not isinstance(chunk, dict):
                 continue
             for choice in chunk.get("choices") or []:
+                if choice.get("finish_reason"):
+                    finish_reason = choice["finish_reason"]
                 delta = choice.get("delta") or {}
                 piece = delta.get("content")
                 if isinstance(piece, list):
@@ -1514,6 +1548,8 @@ def chat_complete_stream(
             for idx, slot in sorted(tool_calls.items())
         ]
         message = {"role": "assistant", "content": content or None}
+        if finish_reason:
+            message["finish_reason"] = finish_reason
         if calls:
             message["tool_calls"] = calls
         yield ("message", (message, usage))

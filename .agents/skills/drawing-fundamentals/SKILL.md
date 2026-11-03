@@ -25,9 +25,13 @@ at the construction stage than after rendering.
   the form (complete the ellipse) then keep the good segment.
 - Vary weight with intent: thicker outside silhouettes, thinner inside
   detail, tapered ends on speed strokes.
-- In this studio the G-pen presets map to this directly: G-pen for
+- In this studio the pen presets map to this directly: G-pen for
   silhouette and hair masses, mapping pen for faces and hands, brush
   pen for cloth and effects. Match the preset to the pass.
+- Pencil owns construction and soft values: light HB or blue-lead
+  layout lines under the ink (kept on the construction layer as the
+  QC record, never erased first), and pencil hatching for gentle
+  gradients where a hard cel shadow would be too harsh.
 
 ## Perspective that holds
 

@@ -14,7 +14,9 @@ export interface PreviewClip {
   filter?: string;
 }
 
-/** A timeline video clip: muted playback synced to play/pause and seeks. */
+/** A timeline video clip: audible playback synced to play/pause and seeks.
+ * The element mounts only for the current clip, so its audio can play.
+ * Autoplay policy may refuse sound: then the picture keeps moving muted. */
 function VideoPreviewClip({
   src,
   playing,
@@ -29,6 +31,13 @@ function VideoPreviewClip({
   label: string;
 }) {
   const ref = useRef<HTMLVideoElement>(null);
+  const tryPlay = (el: HTMLVideoElement) => {
+    el.muted = false;
+    el.play().catch(() => {
+      el.muted = true;
+      el.play().catch(() => {});
+    });
+  };
   useEffect(() => {
     const el = ref.current;
     if (!el) return;
@@ -37,20 +46,20 @@ function VideoPreviewClip({
     } catch {
       // Metadata not loaded yet; playback starts from the top.
     }
-    if (playing) el.play().catch(() => {});
+    if (playing) tryPlay(el);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [src, seekNonce]);
   useEffect(() => {
     const el = ref.current;
     if (!el) return;
-    if (playing) el.play().catch(() => {});
+    if (playing) tryPlay(el);
     else el.pause();
   }, [playing]);
   return (
     <video
       ref={ref}
       src={src}
-      muted
+      loop
       playsInline
       preload="auto"
       aria-label={label}

@@ -5,7 +5,7 @@ import IntroOverlay from "./components/IntroOverlay";
 import AgentDock from "./components/AgentDock";
 import SystemCard from "./components/SystemCard";
 import UsageCard from "./components/UsageCard";
-import { Btn, Card, Kanji, PrimaryBtn, SelectInput, Spinner, TextInput } from "./components/ui";
+import { Btn, Card, Kanji, LoadingLine, PrimaryBtn, SelectInput, TextInput, Toasts } from "./components/ui";
 import { getCurrentProject, setCurrentProject } from "./lib/studio";
 import { prefersReducedMotion } from "./components/Reveal";
 import LandingPage from "./pages/LandingPage";
@@ -233,7 +233,7 @@ export default function App() {
   if (user === undefined) {
     return (
       <div style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", gap: 8 }}>
-        <Spinner /> Loading…
+        <LoadingLine label="Loading…" />
       </div>
     );
   }
@@ -531,7 +531,7 @@ export default function App() {
           <Suspense
             fallback={
               <div style={{ display: "flex", gap: 8, padding: 32 }}>
-                <Spinner /> Loading editor…
+                <LoadingLine label="Loading editor…" />
               </div>
             }
           >
@@ -549,6 +549,7 @@ export default function App() {
       </main>
       <AgentDock />
       <ModelDownloadCard active={user !== null} />
+      <Toasts />
     </div>
   );
 }

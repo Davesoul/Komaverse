@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { api, type UsageSummary } from "../api";
-import { Card, Spinner } from "./ui";
+import { Card, LoadingLine } from "./ui";
 
 const PERIODS = [
   { label: "7 days", days: 7 },
@@ -108,7 +108,7 @@ export default function UsageCard() {
 
       {loading ? (
         <div style={{ display: "flex", gap: 8, alignItems: "center", padding: 12 }}>
-          <Spinner /> <span style={{ fontSize: 13 }}>Loading usage…</span>
+          <LoadingLine label="Loading usage…" />
         </div>
       ) : error || !data ? (
         <p style={{ fontSize: 13, color: "var(--kv-muted)", margin: "4px 0 0" }}>

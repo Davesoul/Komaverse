@@ -9,10 +9,11 @@ import {
   Notice,
   PrimaryBtn,
   SectionTitle,
+  LoadingLine,
   SelectInput,
-  Spinner,
   StatusBar,
   TextInput,
+  toast,
 } from "../components/ui";
 
 type Mode = "select" | "reshape" | "draw";
@@ -510,12 +511,12 @@ export default function ScanPage() {
     setBusy("Sending panels…");
     try {
       const target = await api.autoDirect(project.id, { seconds: 2 });
-      setNotice(
+      toast(
         `Sent ${target.clips.length} clip${target.clips.length === 1 ? "" : "s"} into '${target.name}' — opening Render.`,
       );
       gotoTab("render");
     } catch (e) {
-      setNotice(`Couldn't send panels: ${(e as Error).message}`);
+      toast(`Couldn't send panels: ${(e as Error).message}`, "error");
     } finally {
       setBusy("");
     }
@@ -831,13 +832,7 @@ export default function ScanPage() {
             {(busy || notice) && (
               <div style={{ marginBottom: 12 }}>
                 <Notice tone={busy ? "info" : tone}>
-                  {busy ? (
-                    <>
-                      <Spinner /> {busy}
-                    </>
-                  ) : (
-                    notice
-                  )}
+                  {busy ? <LoadingLine label={busy} /> : notice}
                 </Notice>
               </div>
             )}

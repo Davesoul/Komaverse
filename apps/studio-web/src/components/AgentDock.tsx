@@ -10,7 +10,7 @@ import {
 } from "../api";
 import { getCurrentProject, getDrawFrame } from "../lib/studio";
 import { probeDuration } from "../lib/audio/peaks";
-import { Btn, PrimaryBtn, SelectInput, Spinner, TextInput } from "./ui";
+import { Btn, BusyDots, LoadingLine, MicMeter, PrimaryBtn, SelectInput, Skeleton, Spinner, StageText, TextInput } from "./ui";
 import { prefersReducedMotion } from "./Reveal";
 
 interface Msg {
@@ -73,7 +73,12 @@ const GREETING: Msg = {
 
 /** Completion card for a finished background job: status, thumbnail or
 player when there is a result URL, and no dead placeholder text. */
-function JobCard({ job }: { job: NonNullable<Msg["job"]> }) {
+function JobCard({ job, onZoom }: { job: NonNullable<Msg["job"]>; onZoom?: (url: string) => void }) {
+  const full: string | null = job.url
+    ? job.url.startsWith("/")
+      ? mediaUrl(job.url)
+      : job.url
+    : null;
   return (
     <div>
       <div style={{ fontWeight: 700, marginBottom: 4 }}>
@@ -87,12 +92,27 @@ function JobCard({ job }: { job: NonNullable<Msg["job"]> }) {
         <span style={{ color: "var(--kv-muted)" }}>
           Finished — find it in the Media tab.
         </span>
-      ) : /\.(png|jpe?g|gif|webp)(\?|$)/i.test(job.url) ? (
-        <img
-          src={job.url.startsWith("/") ? mediaUrl(job.url) : job.url}
-          alt={`${job.kind} result`}
-          style={{ maxWidth: "100%", borderRadius: 4 }}
-        />
+      ) : /\.(png|jpe?g|gif|webp)(\?|$)/i.test(job.url) && full ? (
+        <button
+          type="button"
+          onClick={() => onZoom?.(full)}
+          title="Open full size"
+          aria-label="Open result full size"
+          style={{
+            display: "block",
+            width: "100%",
+            padding: 0,
+            border: "none",
+            background: "none",
+            cursor: onZoom ? "zoom-in" : "default",
+          }}
+        >
+          <img
+            src={full}
+            alt={`${job.kind} result`}
+            style={{ maxWidth: "100%", borderRadius: 4, display: "block" }}
+          />
+        </button>
       ) : /\.mp4(\?|$)/i.test(job.url) ? (
         <video
           src={job.url.startsWith("/") ? mediaUrl(job.url) : job.url}
@@ -153,8 +173,75 @@ function linked(text: string) {
   );
 }
 
+/** Tools-and-skills trace: open while streaming, collapsed when done. */
+function ActionsTrace({
+  actions,
+  streaming,
+  running,
+}: {
+  actions: NonNullable<Msg["actions"]>;
+  streaming?: boolean;
+  running?: string[];
+}) {
+  const [open, setOpen] = useState(!!streaming);
+  useEffect(() => {
+    if (!streaming) setOpen(false);
+  }, [streaming]);
+  return (
+    <div style={{ marginTop: 6 }}>
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        aria-expanded={open}
+        style={{
+          background: "none",
+          border: "none",
+          padding: 0,
+          cursor: "pointer",
+          fontFamily: "var(--kv-mono)",
+          fontSize: 11,
+          color: "var(--kv-muted)",
+        }}
+      >
+        {open ? "\u25BE" : "\u25B8"} Tools and skills used ({actions.length})
+      </button>
+      {open && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 4, marginTop: 4 }}>
+          {actions.map((a, j) => (
+            <div
+              key={j}
+              style={{
+                fontFamily: "var(--kv-mono)",
+                fontSize: 11,
+                color: "var(--kv-muted)",
+                display: "flex",
+                alignItems: "center",
+                gap: 4,
+              }}
+            >
+              {running?.includes(a.tool) ? <Spinner delayMs={0} /> : null}
+              <span>
+                ▸ {a.tool}: {linked(a.summary)}
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function AgentDock() {
   const [open, setOpen] = useState(false);
+  const [lightbox, setLightbox] = useState<string | null>(null);
+  const [expanded, setExpanded] = useState(() => {
+    try {
+      return localStorage.getItem("komaverse.agentExpanded") === "1";
+    } catch {
+      return false;
+    }
+  });
+  const [runningTools, setRunningTools] = useState<string[]>([]);
   const [messages, setMessages] = useState<Msg[]>(() => {
     try {
       const raw = localStorage.getItem(LOG_KEY);
@@ -357,6 +444,11 @@ export default function AgentDock() {
             id: j.id,
             label: j.prompt ? j.prompt.slice(0, 42) : `Generation ${j.id}`,
             sub: j.status,
+            thumb: j.result_url
+              ? j.result_url.startsWith("/")
+                ? mediaUrl(j.result_url)
+                : j.result_url
+              : undefined,
           }),
         );
       const sortedPages = [...(proj?.pages ?? [])].sort((a, b) => b.index - a.index);
@@ -388,6 +480,7 @@ export default function AgentDock() {
           id: f.id,
           label: f.name || `Frame ${f.index + 1}`,
           sub: `${f.width}×${f.height} · ${f.layers.length} layers`,
+          thumb: `${apiBase()}/api/v1/frames/${f.id}/thumbnail?px=96`,
         });
       mentionCache.current = { project: projectId, items, at: Date.now() };
       setMention((m) => (m ? { ...m, items, loading: false } : m));
@@ -724,6 +817,7 @@ export default function AgentDock() {
     chunks: Blob[];
     timer: number;
   } | null>(null);
+  const [voiceStream, setVoiceStream] = useState<MediaStream | null>(null);
 
   const insertAtCaret = (text: string) => {
     const el = inputRef.current;
@@ -743,6 +837,7 @@ export default function AgentDock() {
   const stopVoice = (transcribe: boolean) => {
     const v = voiceRef.current;
     voiceRef.current = null;
+    setVoiceStream(null);
     if (v) {
       window.clearTimeout(v.timer);
       if (transcribe && v.rec.state !== "inactive") {
@@ -826,6 +921,7 @@ export default function AgentDock() {
     };
     voiceRef.current = { stream, rec, chunks, timer: window.setTimeout(() => stopVoice(true), 120000) };
     rec.start();
+    setVoiceStream(stream);
     setVoice({ recording: true, busy: false, error: null });
   };
 
@@ -851,6 +947,7 @@ export default function AgentDock() {
   // Shared post-turn work for stream and fallback replies: follow job ids,
   // refresh tabs touched by mutating tools, and refresh the credit balance.
   const finalizeTurn = (out: TurnOut, messageId?: string) => {
+    setRunningTools([]);
     if (messageId) {
       setMessages((prev) =>
         prev.map((m) =>
@@ -1019,12 +1116,14 @@ export default function AgentDock() {
             pushChip(String(ev.tool ?? "tool"), String(ev.summary ?? ""));
           } else if (ev.type === "tool_start") {
             const tool = String(ev.tool ?? "tool");
+            setRunningTools((prev) => (prev.includes(tool) ? prev : [...prev, tool]));
             const label = TOOL_WORKING[tool] ?? `${tool} — working…`;
             if (!pending.has(tool)) pending.set(tool, []);
             pending.get(tool)!.push(label);
             pushChip(tool, label);
           } else if (ev.type === "tool_result") {
             const tool = String(ev.tool ?? "tool");
+            setRunningTools((prev) => prev.filter((t) => t !== tool));
             takeChip(tool, String(ev.summary ?? ""));
             for (const jid of ev.job_ids ?? []) {
               try {
@@ -1338,6 +1437,14 @@ export default function AgentDock() {
       behavior: prefersReducedMotion() ? "auto" : "smooth",
     });
   }, [messages, open]);
+  useEffect(() => {
+    if (!lightbox) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setLightbox(null);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [lightbox]);
 
   if (!open) {
     return (
@@ -1374,10 +1481,11 @@ export default function AgentDock() {
         bottom: 24,
         right: 24,
         zIndex: 40,
-        width: 360,
+        width: expanded ? "min(720px, calc(100vw - 48px))" : 360,
         maxWidth: "calc(100vw - 48px)",
-        height: 480,
+        height: expanded ? "min(80vh, calc(100vh - 120px))" : 480,
         maxHeight: "calc(100vh - 120px)",
+        transition: "width 0.25s ease-out, height 0.25s ease-out",
         display: "flex",
         flexDirection: "column",
         background: "var(--kv-surface)",
@@ -1429,6 +1537,25 @@ export default function AgentDock() {
           </span>
         )}
         <span style={{ marginLeft: "auto", display: "flex", gap: 6 }}>
+          <Btn
+            small
+            active={expanded}
+            onClick={() => {
+              setExpanded((v) => {
+                const next = !v;
+                try {
+                  localStorage.setItem("komaverse.agentExpanded", next ? "1" : "0");
+                } catch {
+                  /* private mode — session only */
+                }
+                return next;
+              });
+            }}
+            aria-label={expanded ? "Dock agent panel" : "Expand agent panel"}
+            title={expanded ? "Dock to the side panel" : "Expand to a wide panel"}
+          >
+            {expanded ? "Dock" : "Expand"}
+          </Btn>
           <Btn small active={showBrain} onClick={openBrain} aria-label="Brain settings" title="Switch provider and models">
             Brain
           </Btn>
@@ -1440,6 +1567,51 @@ export default function AgentDock() {
           </Btn>
         </span>
       </div>
+      {lightbox && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-label="Result preview"
+          onClick={() => setLightbox(null)}
+          style={{
+            position: "absolute",
+            inset: 0,
+            zIndex: 5,
+            background: "rgba(0, 0, 0, 0.85)",
+            display: "flex",
+            flexDirection: "column",
+            alignItems: "center",
+            justifyContent: "center",
+            padding: 16,
+            gap: 10,
+          }}
+        >
+          <img
+            src={lightbox}
+            alt="Generation result, full size"
+            style={{
+              maxWidth: "100%",
+              maxHeight: "calc(100% - 52px)",
+              objectFit: "contain",
+              borderRadius: 4,
+            }}
+          />
+          <div style={{ display: "flex", gap: 8 }}>
+            <a
+              href={lightbox}
+              target="_blank"
+              rel="noreferrer"
+              onClick={(e) => e.stopPropagation()}
+              style={{ fontSize: 12, color: "var(--kv-accent-ink)", background: "var(--kv-accent)", borderRadius: 6, padding: "6px 12px", textDecoration: "none" }}
+            >
+              Open full size
+            </a>
+            <Btn small onClick={() => setLightbox(null)}>
+              Close
+            </Btn>
+          </div>
+        </div>
+      )}
 
       {showBrain && (
         <div
@@ -1613,10 +1785,19 @@ export default function AgentDock() {
               overflowWrap: "anywhere",
             }}
           >
-            {m.job ? <JobCard job={m.job} /> : (
+            {m.job ? <JobCard job={m.job} onZoom={setLightbox} /> : (
               <>
                 {m.streaming && !m.text && !(m.actions?.length) ? (
-                  <Spinner />
+                  <span style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
+                    <LoadingLine
+                      stages={[
+                        "Reading the thread…",
+                        "Weighing references…",
+                        "Composing the answer…",
+                      ]}
+                    />
+                    <Skeleton width={120} height={12} />
+                  </span>
                 ) : (
                   linked(m.text)
                 )}
@@ -1634,20 +1815,7 @@ export default function AgentDock() {
                   </div>
                 )}
                 {m.actions && m.actions.length > 0 && (
-                  <div style={{ marginTop: 6, display: "flex", flexDirection: "column", gap: 4 }}>
-                    {m.actions.map((a, j) => (
-                      <div
-                        key={j}
-                        style={{
-                          fontFamily: "var(--kv-mono)",
-                          fontSize: 11,
-                          color: "var(--kv-muted)",
-                        }}
-                      >
-                        ▸ {a.tool}: {linked(a.summary)}
-                      </div>
-                    ))}
-                  </div>
+                  <ActionsTrace actions={m.actions} streaming={m.streaming} running={runningTools} />
                 )}
               </>
             )}
@@ -1677,12 +1845,24 @@ export default function AgentDock() {
                   gap: 8,
                 }}
               >
-                <span>
-                  Working on {j.kind} [job {id}] — {pct}%
+                <span style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
+                  <BusyDots />
+                  <span>
+                    Working on {j.kind} [job {id}] — {pct}%
+                  </span>
                 </span>
                 <Btn small danger onClick={() => cancelJob(id)} title="Stop this job">
                   Cancel
                 </Btn>
+              </div>
+              <div style={{ marginTop: 2, fontSize: 11, color: "var(--kv-muted)" }}>
+                <StageText
+                  stages={
+                    j.kind === "video"
+                      ? ["Storyboarding…", "Rendering motion…", "Encoding frames…"]
+                      : ["Dreaming pixels…", "Inking lines…", "Applying style…"]
+                  }
+                />
               </div>
               <div
                 role="progressbar"
@@ -1694,6 +1874,8 @@ export default function AgentDock() {
                   borderRadius: 3,
                   background: "var(--kv-border)",
                   marginTop: 6,
+                  position: "relative",
+                  overflow: "hidden",
                 }}
               >
                 <div
@@ -1702,15 +1884,20 @@ export default function AgentDock() {
                     height: "100%",
                     borderRadius: 3,
                     background: "var(--kv-accent)",
+                    transition: "width 0.5s ease",
+                    position: "relative",
+                    overflow: "hidden",
                   }}
-                />
+                >
+                  <div className="kv-bar-stripes" aria-hidden="true" />
+                </div>
               </div>
             </div>
           );
         })}
         {busy && (
           <div style={{ fontSize: 13, color: "var(--kv-muted)" }}>
-            <Spinner /> Working…
+            <LoadingLine stages={["Working…", "Crunching frames…", "Mixing ink…"]} />
           </div>
         )}
         <div ref={bottomRef} />
@@ -1862,17 +2049,36 @@ export default function AgentDock() {
                               }}
                             >
                               <span style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                                {it.thumb && (
-                                  <img
-                                    crossOrigin="use-credentials"
-                                    src={it.thumb}
-                                    alt=""
-                                    width={28}
-                                    height={28}
-                                    loading="lazy"
-                                    style={{ objectFit: "cover", borderRadius: 4, display: "block", flexShrink: 0 }}
-                                  />
-                                )}
+                                {it.thumb &&
+                                  (/\.mp4(\?|$)/i.test(it.thumb) ? (
+                                    <video
+                                      crossOrigin="use-credentials"
+                                      src={it.thumb}
+                                      muted
+                                      playsInline
+                                      preload="metadata"
+                                      aria-label={`${it.label} video preview`}
+                                      style={{
+                                        width: 28,
+                                        height: 28,
+                                        objectFit: "cover",
+                                        borderRadius: 4,
+                                        display: "block",
+                                        flexShrink: 0,
+                                        background: "var(--kv-inset)",
+                                      }}
+                                    />
+                                  ) : (
+                                    <img
+                                      crossOrigin="use-credentials"
+                                      src={it.thumb}
+                                      alt=""
+                                      width={28}
+                                      height={28}
+                                      loading="lazy"
+                                      style={{ objectFit: "cover", borderRadius: 4, display: "block", flexShrink: 0 }}
+                                    />
+                                  ))}
                                 <span style={{ minWidth: 0 }}>
                                   <span style={{ fontFamily: "var(--kv-mono)" }}>@{it.kind}:{it.id}</span>
                                   <span style={{ color: "var(--kv-muted)" }}> — {it.label}</span>
@@ -1980,9 +2186,9 @@ export default function AgentDock() {
               color: "var(--kv-muted)",
             }}
           >
-            {(voice.recording || voice.busy) && <Spinner />}
+            {voice.recording && <MicMeter stream={voiceStream} />}
             {voice.recording && <span>Listening… tap Mic to stop.</span>}
-            {voice.busy && <span>Transcribing…</span>}
+            {voice.busy && <LoadingLine label="Transcribing…" />}
             {voice.error && <span>{voice.error}</span>}
           </div>
         )}

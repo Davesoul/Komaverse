@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { api, mediaUrl, type AudioTake, type Scene } from "../api";
 import { probeDuration } from "../lib/audio/peaks";
-import { Btn, IconBtn, SectionTitle, SelectInput, TextInput } from "./ui";
+import { Btn, BusyDots, IconBtn, SectionTitle, SelectInput, TextInput } from "./ui";
 import { Waveform } from "./Waveform";
 
 function pickMime(): string {
@@ -382,7 +382,14 @@ export function AudioDeck({
         />
         <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
           <Btn small disabled={genBusy || !genText.trim()} onClick={() => void generateVoice()}>
-            {genBusy ? "Generating…" : "Generate"}
+            {genBusy ? (
+              <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+                <BusyDots size={5} />
+                Generating…
+              </span>
+            ) : (
+              "Generate"
+            )}
           </Btn>
           <label style={{ display: "flex", gap: 4, alignItems: "center", fontSize: 12, color: "var(--kv-muted)" }}>
             <input

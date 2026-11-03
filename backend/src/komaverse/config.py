@@ -46,6 +46,7 @@ class Settings(BaseSettings):
     ai_api_key: str | None = Field(default=None, validation_alias="AI_API_KEY")
     ai_image_model: str = Field(default="image", validation_alias="AI_IMAGE_MODEL")
     ai_chat_model: str = Field(default="gpt-4o-mini", validation_alias="AI_CHAT_MODEL")
+    chat_max_tokens: int = Field(default=4096, validation_alias="CHAT_MAX_TOKENS")
     ai_vision_model: str | None = Field(
         default=None, validation_alias="AI_VISION_MODEL"
     )

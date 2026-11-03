@@ -86,6 +86,7 @@ def init_db() -> None:
         "ALTER TABLE jobs ADD COLUMN entities_json TEXT",
         "ALTER TABLE jobs ADD COLUMN enhance BOOLEAN",
         "ALTER TABLE jobs ADD COLUMN reference_frame_id VARCHAR(12)",
+        "ALTER TABLE jobs ADD COLUMN created_at DATETIME",
         "ALTER TABLE frames ADD COLUMN sequence_id VARCHAR(12)",
         "ALTER TABLE clips ADD COLUMN transition VARCHAR(32)",
         "ALTER TABLE clips ADD COLUMN transition_duration FLOAT",

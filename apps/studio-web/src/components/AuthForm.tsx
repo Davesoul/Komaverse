@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { api, type User } from "../api";
-import { Btn, Card, Notice, PrimaryBtn, Spinner, TextInput } from "./ui";
+import { Btn, Card, LoadingLine, Notice, PrimaryBtn, TextInput } from "./ui";
 
 export default function AuthForm({
   mode,
@@ -103,7 +103,7 @@ export default function AuthForm({
         <PrimaryBtn type="submit" disabled={busy || !email || !password}>
           {busy ? (
             <span style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
-              <Spinner delayMs={0} /> Please wait…
+              <LoadingLine label="Please wait…" />
             </span>
           ) : mode === "login" ? (
             "Sign in"

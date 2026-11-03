@@ -55,33 +55,41 @@ export default function Backdrop() {
     return () => clearInterval(timer);
   }, []);
 
+  // Park a reel on its first frame while it is still hidden: the 1.1s
+  // fade must reveal frame 0, never a stale paused frame that then
+  // jumps back. Seeking a paused video only decodes one frame, so every
+  // hidden reel rests at 0 — the activation rewind is then a no-op.
+  const rewindReel = (v: HTMLVideoElement) => {
+    try {
+      if (v.readyState > 0) {
+        if (v.currentTime !== 0) v.currentTime = 0;
+      } else
+        v.addEventListener(
+          "loadedmetadata",
+          () => {
+            try {
+              v.currentTime = 0;
+            } catch {
+              /* metadata unavailable, play from wherever */
+            }
+          },
+          { once: true },
+        );
+    } catch {
+      /* seek unsupported, play from wherever */
+    }
+  };
+
   useEffect(() => {
     bgRefs.current.forEach((v, i) => {
       if (!v) return;
       if (i !== activeIdx) {
         v.pause();
+        rewindReel(v);
         return;
       }
-      // Every reel starts from its own first frame on its turn: rewind,
-      // then play. A resumed mid-stream position reads as the reel
-      // "already being in the middle".
-      try {
-        if (v.readyState > 0) v.currentTime = 0;
-        else
-          v.addEventListener(
-            "loadedmetadata",
-            () => {
-              try {
-                v.currentTime = 0;
-              } catch {
-                /* metadata unavailable, play from wherever */
-              }
-            },
-            { once: true },
-          );
-      } catch {
-        /* seek unsupported, play from wherever */
-      }
+      // Fallback: normally already at 0 from the pre-rewind above.
+      rewindReel(v);
       v.play().catch(() => {});
     });
     // Warm the next reel while the current one plays, so rotation never

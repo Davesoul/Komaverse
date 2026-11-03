@@ -25,11 +25,13 @@ import {
   Notice,
   PrimaryBtn,
   SectionTitle,
+  BusyDots,
+  LoadingLine,
   SelectInput,
   SfxBtn,
   Skeleton,
-  Spinner,
   StatusBar,
+  toast,
   TextInput,
 } from "../components/ui";
 import { AudioDeck } from "../components/AudioDeck";
@@ -767,13 +769,13 @@ export default function RenderPage() {
       await refresh(project.id, target.id);
       const added =
         target.id === before ? target.clips.length - beforeCount : target.clips.length;
-      setNotice(
+      toast(
         added === 0
           ? `Every panel is already on '${target.name}'.`
           : `Auto-directed ${added} clip${added > 1 ? "s" : ""} into '${target.name}'.`,
       );
     } catch (e) {
-      setNotice(`Couldn't add panels: ${(e as Error).message}`);
+      toast(`Couldn't add panels: ${(e as Error).message}`, "error");
     } finally {
       setBusy("");
     }
@@ -1029,10 +1031,14 @@ export default function RenderPage() {
   const addResultToTimeline = async () => {
     if (!project || !scene || frames.length === 0) return;
     pushClipHistory();
-    const newest = [...frames].sort((a, b) => a.index - b.index).pop()!;
-    await api.addClip(scene.id, { kind: "frame", source_id: newest.id, duration: 2 });
-    await refresh(project.id, scene.id);
-    setNotice(`Added ${newest.name || "frame"} to the timeline.`);
+    try {
+      const newest = [...frames].sort((a, b) => a.index - b.index).pop()!;
+      await api.addClip(scene.id, { kind: "frame", source_id: newest.id, duration: 2 });
+      await refresh(project.id, scene.id);
+      toast(`Added ${newest.name || "frame"} to the timeline.`);
+    } catch (e) {
+      toast(`Add failed: ${(e as Error).message}`, "error");
+    }
   };
 
   const tone = /fail|offline|timed out|can't|couldn't|blocked/i.test(notice) ? "warn" : "info";
@@ -1225,8 +1231,13 @@ export default function RenderPage() {
                 onClick={async () => {
                   if (!project) return;
                   pushClipHistory();
-                  await api.addClip(scene.id, { kind: "frame", source_id: framePick, duration: 2 });
-                  await refresh(project.id, scene.id);
+                  try {
+                    await api.addClip(scene.id, { kind: "frame", source_id: framePick, duration: 2 });
+                    await refresh(project.id, scene.id);
+                    toast("Frame clip added to the timeline.");
+                  } catch (e) {
+                    toast(`Add failed: ${(e as Error).message}`, "error");
+                  }
                 }}
               >
                 Add frame clip
@@ -1248,8 +1259,13 @@ export default function RenderPage() {
                   onClick={async () => {
                     if (!project) return;
                     pushClipHistory();
-                    await api.addClip(scene.id, { kind: "media", source_id: pagePick, duration: 2 });
-                    await refresh(project.id, scene.id);
+                    try {
+                      await api.addClip(scene.id, { kind: "media", source_id: pagePick, duration: 2 });
+                      await refresh(project.id, scene.id);
+                      toast("Page still added to the timeline.");
+                    } catch (e) {
+                      toast(`Add failed: ${(e as Error).message}`, "error");
+                    }
                   }}
                 >
                   Add
@@ -1276,8 +1292,13 @@ export default function RenderPage() {
                   onClick={async () => {
                     if (!project) return;
                     pushClipHistory();
-                    await api.addClip(scene.id, { kind: "panel", source_id: panelPick, duration: 2 });
-                    await refresh(project.id, scene.id);
+                    try {
+                      await api.addClip(scene.id, { kind: "panel", source_id: panelPick, duration: 2 });
+                      await refresh(project.id, scene.id);
+                      toast("Panel clip added to the timeline.");
+                    } catch (e) {
+                      toast(`Add failed: ${(e as Error).message}`, "error");
+                    }
                   }}
                 >
                   Add
@@ -1302,13 +1323,18 @@ export default function RenderPage() {
                   onClick={async () => {
                     if (!project) return;
                     pushClipHistory();
-                    const picked = doneVideos.find((j) => j.id === videoPick);
-                    await api.addClip(scene.id, {
-                      kind: "video",
-                      source_id: videoPick,
-                      duration: picked && picked.seconds > 0 ? picked.seconds : 2,
-                    });
-                    await refresh(project.id, scene.id);
+                    try {
+                      const picked = doneVideos.find((j) => j.id === videoPick);
+                      await api.addClip(scene.id, {
+                        kind: "video",
+                        source_id: videoPick,
+                        duration: picked && picked.seconds > 0 ? picked.seconds : 2,
+                      });
+                      await refresh(project.id, scene.id);
+                      toast("Video clip added to the timeline — exports keep its audio.");
+                    } catch (e) {
+                      toast(`Add failed: ${(e as Error).message}`, "error");
+                    }
                   }}
                 >
                   Add
@@ -1327,8 +1353,13 @@ export default function RenderPage() {
                       setTextPick("");
                       pushClipHistory();
                       void (async () => {
-                        await api.addClip(scene.id, { kind: "text", source_id: "", text: v, duration: 2 });
-                        await refresh(project.id, scene.id);
+                        try {
+                          await api.addClip(scene.id, { kind: "text", source_id: "", text: v, duration: 2 });
+                          await refresh(project.id, scene.id);
+                          toast("Title card added to the timeline.");
+                        } catch (err) {
+                          toast(`Add failed: ${(err as Error).message}`, "error");
+                        }
                       })();
                     }
                   }}
@@ -1340,8 +1371,13 @@ export default function RenderPage() {
                     const v = textPick;
                     setTextPick("");
                     pushClipHistory();
-                    await api.addClip(scene.id, { kind: "text", source_id: "", text: v, duration: 2 });
-                    await refresh(project.id, scene.id);
+                    try {
+                      await api.addClip(scene.id, { kind: "text", source_id: "", text: v, duration: 2 });
+                      await refresh(project.id, scene.id);
+                      toast("Title card added to the timeline.");
+                    } catch (e) {
+                      toast(`Add failed: ${(e as Error).message}`, "error");
+                    }
                   }}
                 >
                   Add text
@@ -1717,8 +1753,8 @@ export default function RenderPage() {
               </PrimaryBtn>
               {genJob && genJob.status !== "done" && genJob.status !== "failed" && (
                 <>
-                  <span style={{ fontSize: 13, color: "var(--kv-muted)" }}>
-                    <Spinner />{" "}
+                  <span className="kv-busy" style={{ fontSize: 13, color: "var(--kv-muted)", display: "inline-flex", alignItems: "center", gap: 8 }}>
+                    <BusyDots />
                     {genKind === "video"
                       ? `Rendering video… ${fmtElapsed(genElapsed)} elapsed (usually 2–8 min)`
                       : `Rendering image… ${fmtElapsed(genElapsed)} elapsed`}
@@ -1855,7 +1891,7 @@ export default function RenderPage() {
 
             {exporting && (
               <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 12 }}>
-                <Spinner />
+                <BusyDots />
                 <div
                   style={{
                     flex: 1,
@@ -1876,8 +1912,13 @@ export default function RenderPage() {
                       width: `${Math.round(exporting.progress * 100)}%`,
                       height: "100%",
                       background: "var(--kv-accent)",
+                      transition: "width 0.5s ease",
+                      position: "relative",
+                      overflow: "hidden",
                     }}
-                  />
+                  >
+                    <div className="kv-bar-stripes" aria-hidden="true" />
+                  </div>
                 </div>
                 <span className="kv-nums" style={{ fontSize: 13 }}>
                   {Math.round(exporting.progress * 100)}%
@@ -1888,13 +1929,7 @@ export default function RenderPage() {
             {(busy || notice) && (
               <div style={{ marginBottom: 12 }}>
                 <Notice tone={busy ? "info" : tone}>
-                  {busy ? (
-                    <>
-                      <Spinner /> {busy}
-                    </>
-                  ) : (
-                    notice
-                  )}
+                  {busy ? <LoadingLine label={busy} /> : notice}
                 </Notice>
               </div>
             )}

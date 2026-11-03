@@ -62,6 +62,34 @@ def factory(tmp_path, monkeypatch, skill_root):
     return sessionmaker(engine, expire_on_commit=False)
 
 
+def test_agent_skill_names_resolve_in_repo(monkeypatch):
+    """Every skill the agent prompt names must be readable in this checkout.
+
+    Regression: the prompt named anime-animation-production while the
+    directory was anime-animation, so read_skill failed at runtime and
+    no hermetic test noticed (they use a fixture skills dir).
+    """
+    import komaverse.agent as agent_mod
+
+    monkeypatch.delenv("KOMAVERSE_SKILLS_DIR", raising=False)
+    from komaverse.skills import list_skills, read_skill, skills_dir
+
+    root = skills_dir()
+    if root is None:
+        pytest.skip("no repo skills checkout")
+    names = {s["name"] for s in list_skills()}
+    prompt = agent_mod._SYSTEM
+    for ref in ("anime-animation-production", "drawing-fundamentals"):
+        assert ref in prompt, f"agent prompt should name {ref}"
+        assert ref in names, f"skill {ref} missing from {root}"
+        assert len(read_skill(ref)) > 500
+    anime = read_skill("anime-animation-production")
+    assert "cel-shaded" in anime and "Shot planning" in anime
+    drawing = read_skill("drawing-fundamentals")
+    assert "G-pen" in drawing and "anime proportions" in drawing
+    assert "Pencil owns construction" in drawing
+
+
 def test_list_skills_names_and_descriptions(skill_root):
     found = list_skills(skill_root)
     assert [s["name"] for s in found] == [
@@ -99,7 +127,8 @@ def test_read_skill_rejects(skill_root):
     with pytest.raises(SkillError):
         read_skill("anime-animation-production", section="nope", base=skill_root)
     with pytest.raises(SkillError):
-        read_skill("anime-animation-production")  # no repo skills in tests
+        # A name absent from every skills root still rejects.
+        read_skill("no-such-skill")
 
 
 def test_genre_tags_cover_skill_genres():

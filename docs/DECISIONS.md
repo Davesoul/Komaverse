@@ -528,8 +528,193 @@ color-theory (cel shadow colors, light logic), manga-literacy
   `ident.html` keeps the seamless loop for screen-recording. No visual
   change to the ident itself.
 - Backdrop reels all auto-played at mount and resumed mid-stream on
-  rotation, so a reel's turn often began in its middle. The active reel
-  is now rewound to its first frame on every activation (guarded for
-  not-yet-loaded metadata) while the 4.5s crossfade cadence is
-  unchanged. Verified: three consecutive activations start at
-  0.24-0.46s and advance in step.
+  rotation, so a reel's turn often began in its middle. Every hidden
+  reel now rests pre-rewound at frame 0 (seek while paused decodes a
+  single frame; guarded for not-yet-loaded metadata), so the 1.1s fade
+  reveals frame 0 and the activation rewind is a no-op fallback; the
+  4.5s crossfade cadence is unchanged. A same-tick seek-then-show
+  caused a visible stale-frame flash before the seek completed, which
+  is why the rewind moved ahead of the switch instead of onto it.
+  Verified: 14s at 100ms sampling shows zero backward jumps, flips
+  land on 0-0.07s, zero main-thread gaps over 80ms (max 30ms), and the
+  heaviest reel (3 Mbps) plays its steady-state window with 0 dropped
+  frames.
+
+## ADR-20: Agent remembers what it just generated (accepted)
+
+- Deictic follow-ups ("use this character to generate a video") used to
+  hand the model only the open frame, so the just-made artifact was
+  invisible and the model fell back to the current frame. `_resolve_turn`
+  now attaches the newest finished image generation in the project
+  (`@gen:<id>`, first in refs) whenever the message shows reference
+  intent but names no explicit token. Additive: the frame stays in
+  scope; the generation leads. `jobs` gains `created_at` (ALTER
+  backfill, same pattern as ADR-5) because ids are random hex.
+- Placeholder leak fixed: the cancel_job description taught the model a
+  literal `[job id]`, which it echoed; both the SSE `job_ids` and the
+  dock follow-up polled `/ai/jobs/id` (404). The description no longer
+  shows a citable placeholder, and `_cloud_loop` only forwards ids of
+  real, owned jobs. The model now gets the real id from the turn
+  itself, so it stops inventing one.
+- Truncation is surfaced: chat requests set an explicit `max_tokens`
+  (`CHAT_MAX_TOKENS`, default 4096) and a `length` finish returns a
+  "say continue" note instead of stopping silently.
+- Widget: generated images open in a full-size lightbox (Esc/backdrop
+  close), the panel expands to 720px/80vh (persisted), the Tools and
+  skills trace collapses when the turn lands, in-flight tools spin,
+  streaming shows a skeleton line, progress fills ease. App-wide,
+  static busy labels breathe via `.kv-busy` (reduced-motion safe).
+
+## ADR-21: Frame is knowledge, not pixels; ask when the ref is missing (accepted)
+
+- Research (Higgsfield Soul ID [primary: higgsfield.ai character guide],
+  InVideo, Character App, CinemaDrop, AI Films) converges on one model:
+  consistency comes from persistent, ID-cited references attached to
+  every generation (character sheets, style blocks, `@character:id`),
+  not from re-describing or from ambient context. A trained/stored
+  identity beats per-shot reference matching, and style is a locked
+  block (palette, lens, seed), not a per-prompt invention.
+- Mapped onto Komaverse: `@gen:` ids + named entities are the
+  persistent identities; the latest finished generation (24h window,
+  `jobs.created_at`) auto-attaches on deictic follow-ups; its context
+  line now carries `[locked style/genre/seed]` so follow-ups inherit
+  the look unless overridden. Seed lock and multi-angle sheets stay
+  future work (JobRow already stores seed).
+- The open frame stopped being reference material: no `@frame`
+  injection into the message (the model echoed it into prompts), no
+  auto-attach. It stays knowledge via the scope line. It attaches only
+  when asked: typed/picked/named token, or frame-directed phrasing
+  (trace/redraw/paint-over/"on the current frame"...). Your verbatim
+  case — `using this fighter from @gen:…` with an open frame and no
+  frame words — now resolves to `[gen]` alone.
+- Reference intent with no resolvable referent (deictic pronoun, no
+  token/chip/frame-op/recent gen) returns one clarifying question
+  before any tool runs, instead of burning a generation on the wrong
+  pixels. Plain generations without deictics proceed untouched.
+
+## ADR-22: Ask about unclear parameters before generating (accepted)
+
+- Per explicit user choice: block-and-ask (not generate-and-note),
+  scoped to ratio/orientation, duration, and style. The agent asks when
+  the dimension is mentioned without a usable value ("make it wide",
+  "a short video", "change the style") and stays silent otherwise
+  ("generate a sunset", "16:9", "5 second clip").
+- Two layers. Pre-loop (deterministic, zero tool cost): generation
+  intent + mentioned-without-value dimension returns one clarifying
+  question with concrete options before any tool runs. Tool-level
+  backstop: create_image/create_video refuse vague prompts with an
+  ask-and-wait instruction to the model, before credits or job rows.
+- Bare nouns never trigger ("a portrait", "town square" stay silent;
+  only explicit framing like "make it wide" or "which ratio" asks).
+  A locked style resolves "same style" silently; a changed or missing
+  style asks. Live: vague prompts get the question with no tools
+  burned; a clear prompt sailed through to a finished render.
+- Higgsfield/InVideo research (ADR-21) supports the shape: lock the
+  look via persistent references, interrogate only what is genuinely
+  missing.
+
+## ADR-23: Always ask cost-relevant params; provider-aware (accepted)
+
+- Supersedes ADR-22's "bare stays silent" clause per explicit user
+  override: cost-affecting blanks are always confirmed, not only
+  mentioned-without-value ones. "Generate a sunset" now asks instead
+  of rendering a silent square.
+- Always-ask dimensions: images owe format (16:9 / 9:16 / 1:1) and
+  quality (Draft 512px / Standard 768px / High 1024px); videos owe
+  duration and framing (landscape 16:9 / portrait 9:16). A usable
+  value in the text skips its question ("16:9", "5 second", "high
+  quality", "draft", "4k"); orientation hints flavor the question
+  ("you said 'wide'") and steer the 'go' default.
+- "Go" defaults equal today's silent behavior (1:1 square, High
+  quality, 4 seconds, default framing), so answering "go" reproduces
+  what the agent used to do. Answers are model-mediated: the model
+  reads the thread (question + reply) and passes the resolved
+  width/height/seconds; tool descriptions teach the mapping
+  (16:9→1280x720, quality→longest side, duration→seconds).
+- Provider capability matrix, resolved per turn via provider_for:
+  Meta image is prompt-only (no ratio/resolution knobs), so it skips
+  the format/quality questions entirely; OpenRouter honors explicit
+  aspect_ratio + resolution buckets + duration. Video is
+  OpenRouter-only and takes no size param — framing stays a
+  prompt-level hint, and the question says so.
+- Plumbing fix the gate depended on: OpenRouter.generate_image
+  hardcoded aspect_ratio "1:1", so "make it wide" (1280x720) still
+  rendered square. Pixels now derive the canonical bucket
+  (16:9, 9:16, 4:3, 3:4, 3:2, 2:3, 1:1 via gcd; anything else falls
+  back to 1:1 instead of erroring). Resolution buckets from longest
+  side already existed, so quality tiers map to real pixels.
+- Reference preservation: the param gate runs after deictic
+  resolution, and the early return drops message/refs — so resolved
+  references ride the question ("Using @gen:<id> — which duration…?
+  Keep @gen:<id> in your reply so I reuse it"). Asking no longer
+  loses the character the user pointed at.
+- Live: full backend suite 405 green (agent-memory 26, agent 74).
+- Interplay fixes found while proving it: canvas paint ops never
+  enter the gate; "in the style of @panel:X" counts as a supplied
+  style (the pixels are the value); tool-level intent checks read
+  the raw text because token scrubbing removes the references that
+  carry values.
+
+## ADR-24: Living loaders and an honest send icon (accepted)
+
+- The play-triangle send button is gone everywhere in the Media tab:
+  page, gen-image, and gen-video cards now use a send-down glyph with
+  a "Send to timeline" tooltip, so it cannot read as playback. Video
+  thumbnails carry the play badge instead (centered badge over the
+  muted preview), which is the only place playback is offered.
+- Loaders share one kit (ui.tsx: BusyDots, StageText, LoadingLine;
+  global.css: kv-dots, kv-stage, kv-bar-stripes): a three-dot cascade
+  as the primary pulse, a cycling stage line as the micro-story, and
+  animated stripes inside determinate progress bars. All three are
+  silenced under prefers-reduced-motion alongside the existing rules.
+- Applied everywhere a wait exists: agent streaming placeholder and
+  working footer (thinking/working stage sets), running job cards
+  (dots + kind-specific stages + striped bar), pending library gens
+  (status-aware stages + striped bar), Render generation progress
+  (dots keep the elapsed timer), export bar (stripes), scan/media/
+  draw/render notices, app boot, auth, usage card, voice generate and
+  draw save buttons.
+- Live: `npx tsc --noEmit` clean and `npm run build` green.
+
+## ADR-25: Bottom-left send toasts; exports keep video audio (accepted)
+
+- Every send to a sequence or timeline now fires a bottom-left toast
+  (ui.tsx `toast()` + `<Toasts/>`, mounted in App, auto-dismiss 4.5s,
+  dismissible, error/warn tones). Previously only some Render paths
+  notified at all (frame/page/panel/video/text picks were silent);
+  all of them toast success and failure now, as do the Media, Draw,
+  and Scan send paths. Inline page notices stay for non-send events.
+- Video audio was dropped in two places, both fixed. In-app preview
+  played video clips muted with only cue audio mixed in; the
+  per-clip player now plays sound (mounted only for the current
+  clip, looping with it, muted fallback when autoplay policy
+  refuses). Export re-rendered video pixels into a silent file and
+  muxed cue tracks only; render_project now also muxes each video
+  clip's native segment (trimmed to its emitted span, looped past
+  the source length, clip fades applied), skipping AI-silent files
+  without warnings. `audio_cues` still counts cue tracks only.
+- Live: backend 406 green incl. new
+  test_export_keeps_video_clip_audio (fails without the fix:
+  looping audible clip + silent clip export with an audio stream);
+  `npx tsc --noEmit` clean and `npm run build` green.
+
+## ADR-26: Live voice meter; agent craft skills actually resolve (accepted)
+
+- The AI-widget voice row was a static spinner: recording now shows a
+  live mic level meter (ui.tsx `MicMeter`, analyser-driven bars, idle
+  fallback, static under prefers-reduced-motion) next to
+  "Listening…", and transcription shows the cycling LoadingLine.
+- The agent's anime skill was unreadable: the prompt, tool text, and
+  tests all named anime-animation-production while the directory was
+  anime-animation, so read_skill failed at runtime and no hermetic
+  test noticed. The directory is renamed to match; the prompt now
+  also points drawing advice, line art, and anime/cartoon style
+  questions at drawing-fundamentals (construction, pen and pencil
+  line work, anime proportions, screentone, layer discipline). A
+  repo-root test guards every skill name the prompt cites. Pencil
+  follow-up: no skill named pencil at all, so drawing-fundamentals
+  gained a pencil-owns-construction passage (HB/blue-lead layout,
+  pencil hatching for soft values); test-pinned.
+- Live: backend skills 22 green (incl. the repo-root resolution
+  test), agent suites 100 green, `npx tsc --noEmit` clean,
+  `npm run build` green.

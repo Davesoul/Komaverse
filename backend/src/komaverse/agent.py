@@ -19,6 +19,7 @@ import logging
 import math
 import re
 import threading
+from datetime import datetime, timedelta, timezone
 
 import httpx
 from fastapi import HTTPException
@@ -173,9 +174,19 @@ def resolve_refs(
                     raise _Missing()
                 get_project(row.project_id, session, user) if row.project_id else None
                 prompt = (row.prompt or "")[:200]
+                lock = ", ".join(
+                    f"{label}: {value}"
+                    for label, value in (
+                        ("style", row.style),
+                        ("genre", row.genre),
+                        ("seed", row.seed),
+                    )
+                    if value is not None and value != "none"
+                )
                 lines.append(
                     f"@gen:{rid} = AI generation ({row.status})"
                     + (f": '{prompt}'" if prompt else "")
+                    + (f" [locked {lock}]" if lock else "")
                 )
             elif kind == "media":
                 row = session.get(PageRow, rid)
@@ -277,6 +288,117 @@ def _parse_ratio(text: str) -> tuple[int, int] | None:
     if "1:1" in t or "square format" in t:
         return (1024, 1024)
     return None
+
+
+#: Orientation framing that names no usable format. Bare nouns stay out on
+#: purpose: "a portrait of X" or "town square" must not interrogate the
+#: user — only explicit framing ("make it wide", "which ratio") asks.
+ORIENTATION_RE = re.compile(
+    r"\b(wide|widescreen|ultrawide|vertical|horizontal|panorama|panoramic)\b"
+    r"|\b(portrait|landscape)\s+(orientation|mode|format)\b"
+    r"|\baspect\s+ratio\b|\bratio\b|\bresolution\b"
+    r"|\b(what|which)\s+(size|format)\b",
+    re.IGNORECASE,
+)
+#: Quality words that answer the resolution question (image only). Bare
+#: "high" stays out on purpose: "a high mountain" names no quality tier,
+#: only explicit quality talk ("high quality", "draft", "4k") counts.
+QUALITY_RE = re.compile(
+    r"\b(draft|standard|hd|uhd|4k|8k)\b"
+    r"|\b(high|low)\s*[- ]\s*(quality|res|resolution)\b"
+    r"|\b(high|low)\s+(quality|res|resolution)\b"
+    r"|\b(512|768|1024|2048)\s*px\b",
+    re.IGNORECASE,
+)
+#: Framing hints that steer the wide/portrait default for "go" answers.
+_WIDE_HINT_RE = re.compile(r"wide|horizontal|landscape|panorama", re.IGNORECASE)
+_TALL_HINT_RE = re.compile(r"tall|vertical|portrait", re.IGNORECASE)
+#: Duration words without a number (video only - images have no length).
+DURATION_RE = re.compile(
+    r"\b(short|shorter|long|longer|brief|quick|duration|seconds?|minutes?|extended|condensed)\b",
+    re.IGNORECASE,
+)
+#: Style talk: "in the style of X" carries its value, the rest may not.
+STYLE_TALK_RE = re.compile(
+    r"\bstyles?\b|\bstylish\b|\bstyliz(?:ed|ing)\b|\bstylis(?:ed|ing)\b",
+    re.IGNORECASE,
+)
+STYLE_VALUE_RE = re.compile(
+    r"style\s+of\s+\w|style\s*:\s*\w|styliz(?:ed|ing)\s+(as|like|in)\s+\w"
+    # A reference token after "of" carries the value: the panel/frame
+    # pixels are the style source, attached as a reference downstream.
+    r"|style\s+of\s+@(?:frame|panel|gen|media):",
+    re.IGNORECASE,
+)
+STYLE_CHANGE_RE = re.compile(
+    r"\b(different|new|another|other|change|changing)\b", re.IGNORECASE
+)
+NUMBER_RE = re.compile(r"\d+")
+
+
+def _missing_orientation(prompt, width, height) -> str | None:
+    """Orientation word with no usable size: the matched word or None."""
+    if width is not None or height is not None:
+        return None
+    if _parse_ratio(prompt or "") is not None:
+        return None
+    m = ORIENTATION_RE.search(prompt or "")
+    return m.group(0) if m else None
+
+
+def _missing_duration(prompt, seconds, default_seconds: float = 4.0) -> str | None:
+    """Duration word with no usable length: the matched word or None."""
+    m = DURATION_RE.search(prompt or "")
+    if not m:
+        return None
+    if NUMBER_RE.search(prompt or ""):
+        return None
+    if seconds != default_seconds:
+        return None
+    return m.group(0)
+
+
+def _locked_style(session, user, project_id):
+    """(style, genre) of the newest finished image generation, if recent."""
+    row = _latest_done_image_row(session, user, project_id)
+    if row is None:
+        return None
+    if not row.style or row.style == "none":
+        return None
+    return (row.style, row.genre if row.genre not in (None, "none") else "")
+
+
+def _missing_style(prompt, style, genre, locked) -> str | None:
+    """Style talk with no usable style: the matched word or None.
+
+    A locked style resolves "same style" silently; an explicit change
+    ("change the style") or no lock at all asks.
+    """
+    m = STYLE_TALK_RE.search(prompt or "")
+    if not m:
+        return None
+    if (style and style != "none") or (genre and genre != "none"):
+        return None
+    if STYLE_VALUE_RE.search(prompt or ""):
+        return None
+    if locked and not STYLE_CHANGE_RE.search(prompt or ""):
+        return None
+    return m.group(0)
+
+
+def _ask_before_generating(tool: str, missing: list[tuple[str, str, str]]) -> str:
+    """Blocking question for underspecified generations (user-confirmed).
+
+    Lists every missing dimension with its suggestion in one round trip,
+    then makes the model wait for the answer instead of guessing.
+    """
+    bits = "; ".join(f"{what} ({detail} — suggest {choices})" for what, detail, choices in missing)
+    n = "one detail" if len(missing) == 1 else f"{len(missing)} details"
+    return (
+        f"Before generating I need {n}: {bits}. "
+        "Ask the user and wait for their reply. "
+        f"Do not call {tool} again until they answer."
+    )
 
 
 def _composition_hint(text: str) -> str:
@@ -829,15 +951,68 @@ REFERENCE_INTENT_RE = re.compile(
 def wants_reference(text: str | None) -> bool:
     """True when the text asks to reuse a frame/panel/scan/generation.
 
-    Bare @-mentions carry no intent: the turn scopes the open frame by
-    injecting its token, and the model echoes tokens into prompts, so
-    only phrasal intent (or an explicitly picked reference) attaches one.
+    Bare @-mentions carry no intent: the open frame rides the turn as a
+    scope line (knowledge, never pixels), so only phrasal intent (or an
+    explicitly picked reference) attaches one.
     """
     return bool(REFERENCE_INTENT_RE.search(text or ""))
 
 
+FRAME_DIRECTED_RE = re.compile(
+    r"((this|that|the|current|open)\s+frames?\b"
+    r"|\btrace\b|\bredraw\b|\bpaint\s+over\b|\bdraw\s+(on|onto|over)\b"
+    r"|\b(edit|change|fix|continue|paint|draw)\s+(this|it|that|the)\b"
+    r"|\bon\s+(it|this|that|the\s+frames?)\b)",
+    re.IGNORECASE,
+)
+
+
 def clean_prompt_text(prompt: str) -> str:
     return REF_TOKEN_RE.sub("", prompt or "").strip(" :")
+
+#: How far back a finished generation still counts as "just made" for
+#: deictic resolution ("use this character"). Older work needs an
+#: explicit @gen: mention; only it bypasses the window.
+RECENT_GEN_HOURS = 24
+
+
+def _latest_done_image_job(session, user, project_id) -> str | None:
+    """Id of the newest finished image generation in this project.
+
+    Deictic follow-ups ("use this character", "make it a video") name no
+    id; the open frame is already in scope, so this gives the turn the
+    artifact the conversation just produced. Returns None when there is
+    nothing finished to point at.
+    """
+    row = _latest_done_image_row(session, user, project_id)
+    return row.id if row is not None else None
+
+
+def _latest_done_image_row(session, user, project_id):
+    """Newest finished image generation row in this project, if recent."""
+    try:
+        cutoff = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(
+            hours=RECENT_GEN_HOURS
+        )
+        return (
+            session.execute(
+                select(JobRow)
+                .where(
+                    JobRow.user_id == user.id,
+                    JobRow.project_id == project_id,
+                    JobRow.kind == "image",
+                    JobRow.status == "done",
+                    JobRow.created_at.is_not(None),
+                    JobRow.created_at >= cutoff,
+                )
+                .order_by(JobRow.created_at.desc())
+                .limit(1)
+            )
+            .scalars()
+            .first()
+        )
+    except Exception:
+        return None
 
 
 def gather_reference_snapshots(session, user, project_id, text, references=None, entity_ids=None):
@@ -907,9 +1082,10 @@ def gather_reference_snapshots(session, user, project_id, text, references=None,
 def _generation_references(raw: str, references=None, fallback_references=None):
     """Merge explicit references with @-tokens from raw text.
 
-    Only @frame: tokens are ever scope-injected into turns, so only
-    they need phrasal reuse intent (the model echoes the open-frame
-    token into prompts unasked). panel/media/gen tokens are never
+    No tokens are ever scope-injected: the open frame rides the turn
+    as a scope line, so only phrasal reuse intent (the model may still
+    cite a token it saw) attaches frame tokens from raw text.
+    panel/media/gen tokens are never
     injected: their presence means the user typed or picked them, so
     they always attach. When the text shows intent but names no id,
     turn-level references (picked chips, the open frame on an intent
@@ -956,8 +1132,29 @@ def tool_generate(
     prompt = clean_prompt_text(raw)
     if not prompt:
         return "Tell me what to generate - e.g. \"generate a moonlit robot\"."
+    locked = _locked_style(session, user, project_id)
+    # Intent checks read the raw text: token scrubbing above removes the
+    # @-references that can carry the value ("in the style of @panel:X").
+    missing = []
+    orient = _missing_orientation(raw, width, height)
+    if orient:
+        missing.append((
+            "aspect ratio",
+            f"the request says '{orient}' but no usable format",
+            "16:9 landscape, 9:16 portrait, or 1:1 square",
+        ))
+    if _missing_style(raw, style, genre, locked):
+        missing.append((
+            "style",
+            "the request names no style",
+            "a style, e.g. shonen manga, photoreal, watercolor",
+        ))
+    if missing:
+        return _ask_before_generating("create_image", missing)
     refs = _generation_references(raw, references, fallback_references)
     snaps, notes = gather_reference_snapshots(session, user, project_id, prompt, refs, entity_ids)
+    if locked and STYLE_TALK_RE.search(prompt or "") and style == "none" and genre == "none":
+        notes.append(f"keeping locked style '{locked[0]}' — name another style to change it")
     try:
         genre_suffix(genre or "none")
     except ValueError as exc:
@@ -1053,8 +1250,29 @@ def tool_create_video(
     prompt = clean_prompt_text(raw)
     if not prompt:
         return "Tell me what to render - e.g. \"generate a video of a robot walking\"."
+    locked = _locked_style(session, user, project_id)
+    # Intent checks read the raw text (see create_image): scrubbing
+    # removes the @-references that can carry the value.
+    missing = []
+    dur = _missing_duration(raw, seconds, 4.0)
+    if dur:
+        missing.append((
+            "duration",
+            f"the request says '{dur}' but no length",
+            "a number of seconds, e.g. 2, 4, or 8",
+        ))
+    if _missing_style(raw, "none", genre, locked):
+        missing.append((
+            "style",
+            "the request names no style",
+            "a style, e.g. anime, cinematic, photorealistic",
+        ))
+    if missing:
+        return _ask_before_generating("create_video", missing)
     refs = _generation_references(raw, references, fallback_references)
     snaps, notes = gather_reference_snapshots(session, user, project_id, prompt, refs, entity_ids)
+    if locked and STYLE_TALK_RE.search(prompt or "") and genre == "none":
+        notes.append(f"keeping locked style '{locked[0]}' — name another style to change it")
     try:
         genre_suffix(genre or "none")
     except ValueError as exc:
@@ -2977,7 +3195,10 @@ _SYSTEM = (
     "For anime-styled generation or direction, read the "
     "anime-animation-production skill (list_skills/read_skill) for genre "
     "tags, shot grammar, and QC: pass a genre to create_image/"
-    "create_video so prompts carry the craft."
+    "create_video so prompts carry the craft. For drawing advice, line "
+    "art, or anime/cartoon style questions, read the "
+    "drawing-fundamentals skill (construction, pen and pencil line "
+    "work, anime proportions, screentone, layer discipline)."
     "Research online with web_search, then read hits with web_fetch; "
     "list_tools shows every tool, list_skills shows every skill."
 )
@@ -3204,8 +3425,8 @@ _TOOLS_SCHEMA = [
                     "reference_frame_id": {"type": "string"},
                     "references": {"type": "array", "description": "[{kind, id}] for user-mentioned refs to reuse (frame|panel|media|gen). Omit otherwise."},
                     "entity_ids": {"type": "array", "description": "Named entity ids to keep on-model. Omit otherwise."},
-                    "width": {"type": "number"},
-                    "height": {"type": "number"},
+                    "width": {"type": "number", "description": "Pixels; honor the thread's format answer (16:9→1280x720, 9:16→720x1280, 1:1→1024x1024)."},
+                    "height": {"type": "number", "description": "Pixels; honor the thread's quality answer (draft→512, standard→768, high→1024 longest side)."},
                     "attach_frame": {"type": "boolean", "description": "True only when the user explicitly asks for a draw frame. Omit otherwise."},
                 },
                 "required": ["prompt"],
@@ -3225,8 +3446,8 @@ _TOOLS_SCHEMA = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "prompt": {"type": "string", "description": "Clean scene text, no @-mentions."},
-                    "seconds": {"type": "number"},
+                    "prompt": {"type": "string", "description": "Clean scene text, no @-mentions. Fold the thread's framing answer into the scene words ('wide 16:9 framing' or 'vertical 9:16 framing')."},
+                    "seconds": {"type": "number", "description": "Honor the thread's duration answer in seconds."},
                     "model": {"type": "string"},
                     "genre": {"type": "string"},
                     "references": {"type": "array", "description": "[{kind, id}] for user-mentioned refs to reuse. Omit otherwise."},
@@ -3511,7 +3732,7 @@ _TOOLS_SCHEMA = [
         "function": {
             "name": "cancel_job",
             "description": (
-                "Stop a queued or running image/video/export job ([job id]). "
+                "Stop a queued or running image/video/export job by its id. "
                 "Queued work never runs; running work is discarded."
             ),
             "parameters": {
@@ -3831,6 +4052,21 @@ def _exec_cloud_tool(
     return result
 
 
+def _job_visible(session, user, job_id) -> bool:
+    """True when the id names a real job of this user.
+
+    Guards the follow-up pollers (and the dock) against placeholder
+    tokens like [job id] that the model sometimes echoes from tool
+    descriptions instead of a real id: only existing, owned jobs are
+    ever polled.
+    """
+    try:
+        row = session.get(JobRow, job_id)
+    except Exception:
+        return False
+    return row is not None and row.user_id == user.id
+
+
 def _cloud_loop(
     step, message, project_id, session, user, job_factory,
     ref_context="", history=None, open_frame=None, turn_references=None,
@@ -3868,8 +4104,16 @@ def _cloud_loop(
             yield {"type": "token", "text": text}
         total_tokens += usage.get("total", 0)
         calls = msg.get("tool_calls") or []
+        # finish_reason rides the message dict from the providers (stream
+        # and batch); strip it before the message re-enters history.
+        finish_reason = msg.pop("finish_reason", None) if isinstance(msg, dict) else None
         if not calls:
             reply_text = msg.get("content") or "Done."
+            if finish_reason == "length":
+                reply_text += (
+                    "\n\n[The model hit its response limit \u2014 say 'continue' "
+                    "and I'll pick up where I left off.]"
+                )
             record_usage(session, user.id, "chat", model, total_tokens or (len(message) + len(reply_text)) // 4)
             yield {"type": "result", "reply": reply_text, "actions": actions}
             return
@@ -3888,11 +4132,12 @@ def _cloud_loop(
             )
             summary = result[:200]
             actions.append({"tool": name, "summary": summary})
+            found_ids = re.findall(r"\[job ([A-Za-z0-9_-]+)\]", result)
             yield {
                 "type": "tool_result",
                 "tool": name,
                 "summary": summary,
-                "job_ids": re.findall(r"\[job ([A-Za-z0-9_-]+)\]", result),
+                "job_ids": [jid for jid in found_ids if _job_visible(session, user, jid)],
             }
             messages.append(
                 {
@@ -3968,6 +4213,13 @@ def _resolve_turn(message, project_id, session, user, current_frame_id, refs):
             }}
         schema = get_project(target, session, user)
     open_frame: str | None = None
+    current = None
+    frame_named_id: str | None = None
+    # Tokens/refs the user actually typed or picked. The open frame is
+    # knowledge (the scope line below), never an implicit token: deictic
+    # "this/that" resolves against these, never against injected scope.
+    typed_tokens = REF_TOKEN_RE.findall(message or "")
+    picked_refs = list(refs or [])
     if current_frame_id:
         frames = _project_frames(session, user, target)
         current = next((f for f in frames if f.id == current_frame_id), None)
@@ -3978,29 +4230,212 @@ def _resolve_turn(message, project_id, session, user, current_frame_id, refs):
                 "when the request names no other frame."
             )
         if "@frame:" not in message:
-            # Notion of current frame: scope the turn to the open frame
-            # unless the message names another one. The id must belong to
-            # this project, so a forged id degrades to disambiguation.
+            # A frame the user names outright resolves to its token. The
+            # open frame itself is never injected: it stays knowledge via
+            # the scope line, so the model cannot echo a phantom frame
+            # into generation prompts.
             named = [
                 f for f in frames
                 if f.name and len(f.name) > 2 and f.name.lower() in message.lower()
             ]
-            if not named and current is not None:
-                message = f"{message} @frame:{current_frame_id}"
-    if (
+            if len(named) == 1:
+                frame_named_id = named[0].id
+                message = f"{message} @frame:{frame_named_id}"
+    typed_has_frame = any(kind == "frame" for kind, _ in typed_tokens)
+    picked_has_frame = any(
+        (r.get("kind") if isinstance(r, dict) else r.kind) == "frame"
+        for r in picked_refs
+    )
+    frame_ok = typed_has_frame or picked_has_frame or frame_named_id is not None
+    if not frame_ok and (
         current_frame_id
-        and wants_reference(message)
-        and not any(
-            (r.get("kind") if isinstance(r, dict) else r.kind) == "frame"
-            for r in refs or []
-        )
+        and current is not None
+        and FRAME_DIRECTED_RE.search(message or "")
     ):
-        # The open frame becomes an explicit reference only when the
-        # request asks to reuse one; bare mentions stay scope-only so
-        # generations never inherit a phantom reference frame.
+        # The open frame becomes reference pixels only when the request
+        # names it (typed, picked, or named outright) or operates on it
+        # (trace, redraw, paint over, "on the current frame"...). Mere
+        # knowledge of the frame never attaches it, so generations about
+        # anything else stay clean.
         refs = [*(refs or []), {"kind": "frame", "id": current_frame_id}]
+        frame_ok = True
+    if frame_named_id is not None and not any(
+        (r.get("kind") if isinstance(r, dict) else r.kind) == "frame"
+        and (r.get("id") if isinstance(r, dict) else r.id) == frame_named_id
+        for r in refs or []
+    ):
+        refs = [*(refs or []), {"kind": "frame", "id": frame_named_id}]
+        frame_ok = True
+    gen_ok = (
+        any(kind == "gen" for kind, _ in typed_tokens)
+        or any(
+            (r.get("kind") if isinstance(r, dict) else r.kind) == "gen"
+            for r in picked_refs
+        )
+    )
+    for kind, rid in typed_tokens:
+        if not any(
+            (r.get("kind") if isinstance(r, dict) else r.kind) == kind
+            and (r.get("id") if isinstance(r, dict) else r.id) == rid
+            for r in refs or []
+        ):
+            refs = [*(refs or []), {"kind": kind, "id": rid}]
+    if (
+        target
+        and wants_reference(message)
+        and not typed_tokens
+        and not picked_refs
+    ):
+        # "use this character" after generating one: with no id in play
+        # the turn would hand the model nothing it can cite, so it falls
+        # back to the frame. Attach the latest finished image generation
+        # in this project; the snapshot lookup re-checks ownership and
+        # scope before any pixel is used.
+        last_gen = _latest_done_image_job(session, user, target)
+        if last_gen is not None:
+            message = f"{message} @gen:{last_gen}"
+            refs = [{"kind": "gen", "id": last_gen}, *(refs or [])]
+            gen_ok = True
+    if (
+        target
+        and wants_reference(message)
+        and not typed_tokens
+        and not picked_refs
+        and not frame_ok
+        and not gen_ok
+        and re.search(r"\b(this|that|it|them)\b", message or "", re.IGNORECASE)
+    ):
+        # Reference intent with no resolvable referent: asking one short
+        # question beats burning a generation on the wrong pixels.
+        frame_bit = (
+            f"the open frame '{current.name or 'Untitled'}'"
+            if current is not None
+            else "the open frame"
+        )
+        return {"early": {
+            "reply": (
+                f"Which reference should I use — {frame_bit}, or a specific "
+                "one? Paste it inline like @gen:<id> (type @ to list studio "
+                "references), or name the frame, and I'll generate from that."
+            ),
+            "project_id": target,
+            "project_name": schema.name,
+            "actions": [],
+            "brain": "demo",
+        }}
+    if target:
+        gen_kind = _generation_kind(message)
+        # Canvas paint ops ("draw a red circle") route to manage_layers,
+        # not to media generation — never interrogate those.
+        if gen_kind and not _wants_draw_shape((message or "").lower()):
+            # Cost-relevant dimensions are always confirmed when blank:
+            # format + quality for images, duration + framing for video.
+            # A usable value in the text skips its question; "go" takes
+            # the stated defaults (today's silent behavior), so the
+            # answer turn needs no new machinery — the model reads the
+            # thread and passes the resolved width/height/seconds.
+            missing = []
+            go: list[str] = []
+            if gen_kind == "image":
+                if provider_for("image") != "meta":
+                    if _parse_ratio(message or "") is None:
+                        orient = _missing_orientation(message, None, None)
+                        bit = (
+                            "aspect ratio — 16:9 landscape, "
+                            "9:16 portrait, or 1:1 square"
+                        )
+                        if orient:
+                            bit += f" (you said '{orient}')"
+                        missing.append(bit)
+                        if orient and _WIDE_HINT_RE.search(orient):
+                            go.append("16:9 landscape")
+                        elif orient and _TALL_HINT_RE.search(orient):
+                            go.append("9:16 portrait")
+                        elif _WIDE_HINT_RE.search(message or ""):
+                            go.append("16:9 landscape")
+                        elif _TALL_HINT_RE.search(message or ""):
+                            go.append("9:16 portrait")
+                        else:
+                            go.append("1:1 square")
+                    if not QUALITY_RE.search(message or ""):
+                        missing.append(
+                            "quality — Draft (512px, fastest), "
+                            "Standard (768px), or High (1024px)"
+                        )
+                        go.append("High quality")
+            else:
+                if parse_seconds(message or "") is None:
+                    dur = _missing_duration(message, 4.0)
+                    bit = "duration in seconds (e.g. 2, 4, or 8)"
+                    if dur:
+                        bit += f" (you said '{dur}')"
+                    missing.append(bit)
+                    go.append("4 seconds")
+                if not _composition_hint(message or ""):
+                    missing.append("framing — landscape 16:9 or portrait 9:16")
+                    go.append("default framing")
+            locked = _locked_style(session, user, target)
+            if _missing_style(message, "none", "none", locked):
+                missing.append(
+                    "art style (e.g. shonen manga, photoreal, watercolor)"
+                )
+            if missing:
+                # References resolved above ride the question: the early
+                # return drops message/refs, so without their names in the
+                # reply the next turn could not cite them back.
+                using: list[str] = []
+                for r in refs or []:
+                    kind = r.get("kind") if isinstance(r, dict) else getattr(r, "kind", None)
+                    rid = r.get("id") if isinstance(r, dict) else getattr(r, "id", None)
+                    if kind == "gen" and rid:
+                        using.append(f"@gen:{rid}")
+                    elif kind == "frame" and rid:
+                        using.append("the open frame")
+                tiny = len(message.split()) <= 4
+                lead = "What should I generate, and which " if tiny else "Which "
+                if using:
+                    lead = f"Using {', '.join(using)} — {lead[0].lower()}{lead[1:]}"
+                if go:
+                    tail = (
+                        "Answer with the specifics, or say 'go' for "
+                        f"{', '.join(go)} and I'll generate it."
+                    )
+                else:
+                    tail = "Answer with the specifics and I'll generate it."
+                gen_ids = [u for u in using if u.startswith("@gen:")]
+                if gen_ids:
+                    tail += (
+                        f" Keep {', '.join(gen_ids)} in your reply "
+                        "so I reuse it."
+                    )
+                return {"early": {
+                    "reply": f"{lead}{' and which '.join(missing)}? {tail}",
+                    "project_id": target,
+                    "project_name": schema.name,
+                    "actions": [],
+                    "brain": "demo",
+                }}
     ref_context = resolve_refs(refs, session, user) if refs else ""
     return {"message": message, "target": target, "refs": refs, "open_frame": open_frame, "ref_context": ref_context}
+
+
+def _generation_kind(message: str | None) -> str | None:
+    """Image/video generation intent, or None.
+
+    Conservative on purpose: draw/project/timeline ops are not
+    generations, and the parameter-dimension check is the real guard —
+    this only picks which dimensions to test.
+    """
+    lowered = (message or "").lower()
+    if "video" in lowered and any(
+        k in lowered for k in ("generate", "create", "make me", "draw me")
+    ):
+        return "video"
+    if re.search(r"\b(generate|generating|create|creating|make|making|draw|paint)\b", lowered) and not re.search(
+        r"\b(project|clip|subtitle|cue|frame|layer|sequence|timeline)\b", lowered
+    ):
+        return "image"
+    return None
 
 def run_agent_turn_stream(
     message, project_id, session, user, job_factory=None, clip_seconds=2.0,

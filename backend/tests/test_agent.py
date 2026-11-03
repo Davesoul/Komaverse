@@ -267,7 +267,7 @@ def test_agent_sees_finished_job(factory, user):
     from komaverse import agent as agent_mod
 
     pid = seed_project(factory, user)
-    out = turn(factory, user, "generate a moonlit robot", pid, job_factory=factory)
+    out = turn(factory, user, "generate a 16:9 high quality moonlit robot", pid, job_factory=factory)
     m = re.search(r"\[job ([A-Za-z0-9_-]+)\]", out["actions"][0]["summary"])
     assert m, "image summary must carry the job id"
     with factory() as s:
@@ -1083,7 +1083,9 @@ def test_cloud_bare_message_attaches_no_reference(factory, user, monkeypatch):
         out = agent_mod.run_agent_turn("hi", pid, s, user, current_frame_id=fid)
     assert out["actions"] == []
     user_msg = seen["messages"][-1]["content"]
-    assert f"@frame:{fid}" in user_msg
+    # ADR-21: the open frame rides as a scope label, never as an
+    # injected @frame: token - so no reference block is built either.
+    assert f"[frame {fid}]" in user_msg
     assert "Open draw frame:" in user_msg
     assert "Referenced:" not in user_msg
 
@@ -1182,7 +1184,7 @@ def job_id_of(summary):
 
 def test_agent_generate_fake(factory, user):
     pid = seed_project(factory, user)
-    out = turn(factory, user, "generate a moonlit robot", pid, job_factory=factory)
+    out = turn(factory, user, "generate a 16:9 high quality moonlit robot", pid, job_factory=factory)
     assert out["actions"] and out["actions"][0]["tool"] == "create_image"
     assert ".png" in out["reply"]
     from komaverse.api.animate import list_frames
@@ -1220,7 +1222,7 @@ def test_agent_generate_with_panel_reference(factory, user):
     panel_id = detected.panels[0].id
     out = turn(
         factory, user,
-        f"generate a warrior in the style of @panel:{panel_id}",
+        f"generate a 16:9 high quality warrior in the style of @panel:{panel_id}",
         pid, job_factory=factory,
     )
     assert out["actions"] and out["actions"][0]["tool"] == "create_image"
@@ -1251,7 +1253,7 @@ def test_agent_generate_names_entity(factory, user):
             pid, EntityCreate(kind="character", name="Mika"), s, user
         )
     out = turn(
-        factory, user, "generate Mika in the rain",
+        factory, user, "generate Mika in the rain, 16:9 high quality",
         pid, job_factory=factory,
     )
     snaps = job_entities(factory, job_id_of(out["actions"][0]["summary"]))
@@ -1260,10 +1262,10 @@ def test_agent_generate_names_entity(factory, user):
 
 def test_agent_generate_from_finished_generation(factory, user):
     pid = seed_project(factory, user)
-    first = turn(factory, user, "generate a moonlit robot", pid, job_factory=factory)
+    first = turn(factory, user, "generate a 16:9 high quality moonlit robot", pid, job_factory=factory)
     gid = job_id_of(first["actions"][0]["summary"])
     out = turn(
-        factory, user, f"generate a darker variant of @gen:{gid}",
+        factory, user, f"generate a 16:9 high quality darker variant of @gen:{gid}",
         pid, job_factory=factory,
     )
     snaps = job_entities(factory, job_id_of(out["actions"][0]["summary"]))
@@ -1272,7 +1274,7 @@ def test_agent_generate_from_finished_generation(factory, user):
 
 def test_agent_video_routes_to_async_job(factory, user):
     pid = seed_project(factory, user)
-    out = turn(factory, user, "generate a video of a robot", pid, job_factory=factory)
+    out = turn(factory, user, "generate a 4 second 16:9 video of a robot", pid, job_factory=factory)
     assert out["actions"] and out["actions"][0]["tool"] == "create_video"
 
 
@@ -1281,7 +1283,7 @@ def test_agent_generate_and_add_it(factory, user):
 
     pid = seed_project(factory, user)
     out = turn(
-        factory, user, "generate a moonlit robot and add it", pid,
+        factory, user, "generate a 16:9 high quality moonlit robot and add it", pid,
         job_factory=factory,
     )
     tools = [a["tool"] for a in out["actions"]]
@@ -1330,7 +1332,7 @@ def test_agent_generate_ignores_echoed_frame_token(factory, user):
     pid = seed_draw(factory, user)
     fid = draw_frame_id(factory, user, pid, "Canvas")
     out = turn(
-        factory, user, "generate a moonlit landscape", pid,
+        factory, user, "generate a 16:9 high quality moonlit landscape", pid,
         job_factory=factory, current_frame_id=fid,
     )
     assert out["actions"] and out["actions"][0]["tool"] == "create_image"
@@ -1419,7 +1421,7 @@ def test_cloud_generation_ignores_echoed_token(factory, user, monkeypatch):
     monkeypatch.setattr(agent_mod, "chat_complete_with_usage", fake_complete)
     with factory() as s:
         out = agent_mod.run_agent_turn(
-            "generate a beautiful anime landscape", pid, s, user,
+            "generate a 16:9 high quality beautiful anime landscape", pid, s, user,
             job_factory=factory, current_frame_id=fid,
         )
     assert out["actions"] and out["actions"][0]["tool"] == "create_image"

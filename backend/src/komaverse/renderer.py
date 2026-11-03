@@ -478,8 +478,15 @@ def mix_audio_tracks(
     chains = []
     for i, track in enumerate(tracks):
         start_ms = max(int(round(track["start_sec"] * 1000)), 0)
-        parts = [
-            "aresample=48000",
+        # Trim first (video clips butt-joint; cues already end themselves),
+        # then delay into place: trimming after the delay would eat audio.
+        parts = ["aresample=48000"]
+        if track.get("loop_sec"):
+            size = max(int(round(48000 * track["loop_sec"])), 1)
+            parts.append(f"aloop=loop=-1:size={size}")
+        if track.get("trim_dur"):
+            parts.append(f"atrim=0:{track['trim_dur']:.3f}")
+        parts += [
             f"adelay={start_ms}|{start_ms}",
             f"volume={track['volume']:.3f}",
         ]
@@ -627,6 +634,36 @@ def render_project(
                         "end_sec": max(end - max(cue.fade_out, 0), 0),
                     }
                 )
+        cue_count = len(tracks)
+        # Native audio of video clips: frames are re-rendered from pixels,
+        # so without this the export goes silent wherever a video plays.
+        # AI generations have no audio stream and are skipped silently;
+        # looping clips loop their audio to match the looping picture.
+        pos_frames = 0
+        for idx, (clip, src, n) in enumerate(planned):
+            start = pos_frames / fps
+            k_out = overlap[idx + 1] if idx + 1 < len(overlap) else 0
+            pos_frames += n - k_out
+            if not isinstance(src, tuple):
+                continue
+            _, vpath, vdur = src
+            cdur = (n - k_out) / fps
+            if cdur <= 0 or not audio_has_stream(vpath):
+                continue
+            fade_out = max(clip.fade_out or 0.0, 0.0)
+            tracks.append(
+                {
+                    "path": vpath,
+                    "start_sec": start,
+                    "offset_sec": 0.0,
+                    "volume": 1.0,
+                    "fade_in": max(clip.fade_in or 0.0, 0.0),
+                    "fade_out": fade_out,
+                    "end_sec": max(start + cdur - fade_out, start + 0.1),
+                    "loop_sec": vdur if cdur > vdur else None,
+                    "trim_dur": cdur,
+                }
+            )
 
     # Subtitles: merge every scene track onto the export timeline. The VTT
     # sidecar always ships for the in-app player; the libass burn is
@@ -801,7 +838,7 @@ def render_project(
     if tracks:
         try:
             mix_audio_tracks(silent, tracks, video_dur, dest)
-            audio_cues = len(tracks)
+            audio_cues = cue_count if include_audio else 0
         except RuntimeError as exc:
             warnings.append(f"audio mux failed ({exc}); exported silent")
             silent.replace(dest)

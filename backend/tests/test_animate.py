@@ -1002,3 +1002,76 @@ def test_export_with_transition_and_fades(factory, user):
     assert report.clips_rendered == 2
     video_path = settings.media_dir / (done.result_url or "").removeprefix("/media/")
     assert video_path.exists() and video_path.stat().st_size > 1000
+
+
+def _video_file(dest, seconds: float = 2.0, with_audio: bool = True) -> None:
+    """Tiny lavfi clip on disk: testsrc picture, optional sine audio."""
+    import subprocess
+
+    import imageio_ffmpeg
+
+    exe = imageio_ffmpeg.get_ffmpeg_exe()
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    cmd = [
+        exe, "-y",
+        "-f", "lavfi", "-i", f"testsrc=duration={seconds}:size=160x120:rate=10",
+    ]
+    if with_audio:
+        cmd += ["-f", "lavfi", "-i", f"sine=frequency=440:duration={seconds}"]
+    cmd += ["-c:v", "libx264", "-pix_fmt", "yuv420p"]
+    if with_audio:
+        cmd += ["-c:a", "aac", "-shortest"]
+    cmd += [str(dest)]
+    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+    assert proc.returncode == 0, proc.stderr[-500:]
+
+
+def test_export_keeps_video_clip_audio(factory, user):
+    """Video clips render silent pixels, so their native audio is muxed.
+
+    A clip with an audio stream keeps it (looped past the source length);
+    an AI-style silent clip exports fine without adding a track.
+    """
+    from komaverse.db_models import JobRow
+    from komaverse.renderer import audio_has_stream
+
+    with factory() as s:
+        project = create_project(ProjectCreate(name="VAudio"), s, user)
+        vdir = settings.media_dir / "testvid"
+        noisy = vdir / "noisy.mp4"
+        quiet = vdir / "quiet.mp4"
+        _video_file(noisy, with_audio=True)
+        _video_file(quiet, with_audio=False)
+        assert audio_has_stream(noisy)
+        assert not audio_has_stream(quiet)
+        s.add(JobRow(
+            id="noisyjob1", user_id=user.id, project_id=project.id,
+            kind="video", status="done", prompt="noisy",
+            result_url="/media/testvid/noisy.mp4",
+        ))
+        s.add(JobRow(
+            id="quietjob1", user_id=user.id, project_id=project.id,
+            kind="video", status="done", prompt="quiet",
+            result_url="/media/testvid/quiet.mp4",
+        ))
+        s.commit()
+        scenes = list_scenes(project.id, s, user)
+        # 3s clip over a 2s source exercises the audio loop; the silent
+        # AI-style clip must not break the mux.
+        add_clip(
+            scenes[0].id,
+            ClipCreate(kind="video", source_id="noisyjob1", duration=3.0),
+            s, user,
+        )
+        add_clip(
+            scenes[0].id,
+            ClipCreate(kind="video", source_id="quietjob1", duration=1.0),
+            s, user,
+        )
+    with factory() as s:
+        out = render_project(project.id, s, fps=5, width=160, height=120)
+    assert out["url"].endswith(".mp4")
+    assert out["clips"] == 2
+    assert audio_has_stream(
+        settings.media_dir / out["url"].removeprefix("/media/")
+    )

@@ -469,6 +469,7 @@ class JobRow(Base):
     progress: Mapped[float] = mapped_column(default=0)
     result_url: Mapped[str | None] = mapped_column(String(500), default=None)
     error: Mapped[str | None] = mapped_column(Text, default=None)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, index=True)
 
     def to_schema(self) -> schemas.Job:
         return schemas.Job(

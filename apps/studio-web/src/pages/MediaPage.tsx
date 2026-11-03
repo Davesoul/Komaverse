@@ -19,11 +19,12 @@ import {
   EmptyState,
   IconBtn,
   Notice,
+  LoadingLine,
   SectionTitle,
   SelectInput,
-  Spinner,
   StatusBar,
   TextInput,
+  toast,
 } from "../components/ui";
 
 const fmtBytes = (n: number) =>
@@ -564,7 +565,7 @@ export default function MediaPage() {
     try {
       const scenes = await api.listScenes(project.id);
       if (scenes.length === 0) {
-        setNotice("No timelines yet — create one in Render first.");
+        toast("No timelines yet — create one in Render first.", "warn");
         return;
       }
       const stored = getCurrentScene(project.id);
@@ -573,9 +574,9 @@ export default function MediaPage() {
         { kind: "video", source_id: job.id, duration: job.seconds > 0 ? job.seconds : 2 },
       ]);
       await refresh(project.id);
-      setNotice(`Added to "${target.name}" — open it in Render.`);
+      toast(`Video added to "${target.name}" — open it in Render.`);
     } catch (e) {
-      setNotice(`Add failed: ${(e as Error).message}`);
+      toast(`Add failed: ${(e as Error).message}`, "error");
     } finally {
       setBusy("");
     }
@@ -586,16 +587,16 @@ export default function MediaPage() {
     const stored = getCurrentSequence(project.id);
     const target = sequences.find((s) => s.id === stored) ?? sequences[0];
     if (!target) {
-      setNotice("Create a sequence first — then explode the video into it.");
+      toast("Create a sequence first — then explode the video into it.", "warn");
       return;
     }
     setBusy("Extracting frames…");
     try {
       const made = await api.videoToFrames(job.id, { sequence_id: target.id, max_frames: 12 });
       await refresh(project.id);
-      setNotice(`${made.length} frames added to "${target.name}" — open it in Draw.`);
+      toast(`${made.length} frames added to "${target.name}" — open it in Draw.`);
     } catch (e) {
-      setNotice(`Extract failed: ${(e as Error).message}`);
+      toast(`Extract failed: ${(e as Error).message}`, "error");
     } finally {
       setBusy("");
     }
@@ -761,13 +762,7 @@ export default function MediaPage() {
       {(busy || notice) && (
         <div style={{ marginBottom: 12 }}>
           <Notice tone={busy ? "info" : tone}>
-            {busy ? (
-              <>
-                <Spinner /> {busy}
-              </>
-            ) : (
-              notice
-            )}
+            {busy ? <LoadingLine label={busy} /> : notice}
           </Notice>
         </div>
       )}
@@ -914,23 +909,23 @@ export default function MediaPage() {
                           ✎
                         </IconBtn>
                         <IconBtn
-                          label="Send to Render: add this page as a still on the current timeline"
+                          label="Send to timeline: add this page as a still on the current timeline"
                           onClick={async () => {
                             if (!project) return;
                             try {
                               const scene = await resolveScene();
                               if (!scene) {
-                                setNotice("No timeline yet — create one on the Render tab first.");
+                                toast("No timeline yet — create one on the Render tab first.", "warn");
                                 return;
                               }
                               await api.addClip(scene.id, { kind: "media", source_id: pg.id, duration: 2 });
-                              setNotice(`Sent to "${scene.name}" — open Render to cut.`);
+                              toast(`Page sent to "${scene.name}" — open Render to cut.`);
                             } catch (e) {
-                              setNotice(`Send failed: ${(e as Error).message}`);
+                              toast(`Send failed: ${(e as Error).message}`, "error");
                             }
                           }}
                         >
-                          ▶
+                          ⤵
                         </IconBtn>
                         <IconBtn danger onClick={() => doDeletePage(pg, i)} label="Delete page and its scan file">
                           ×
@@ -1034,6 +1029,7 @@ export default function MediaPage() {
                           border: "none",
                           background: "none",
                           cursor: "zoom-in",
+                          position: "relative",
                         }}
                       >
                         <video
@@ -1043,6 +1039,29 @@ export default function MediaPage() {
                           preload="metadata"
                           style={{ width: "100%", aspectRatio: "16 / 9", objectFit: "cover", display: "block" }}
                         />
+                        <span
+                          aria-hidden="true"
+                          style={{
+                            position: "absolute",
+                            left: "50%",
+                            top: "50%",
+                            transform: "translate(-50%, -50%)",
+                            width: 40,
+                            height: 40,
+                            borderRadius: "50%",
+                            background: "rgba(0, 0, 0, 0.55)",
+                            border: "1.5px solid #fff",
+                            color: "#fff",
+                            fontSize: 15,
+                            display: "inline-flex",
+                            alignItems: "center",
+                            justifyContent: "center",
+                            pointerEvents: "none",
+                            paddingLeft: 2,
+                          }}
+                        >
+                          ▶
+                        </span>
                       </button>
                     ) : j.status === "done" && j.result_url ? (
                       <button
@@ -1066,7 +1085,7 @@ export default function MediaPage() {
                           style={{ width: "100%", aspectRatio: "1 / 1", objectFit: "cover", display: "block" }}
                         />
                       </button>
-                    ) : (
+                    ) : j.status === "failed" ? (
                       <div
                         style={{
                           width: "100%",
@@ -1076,12 +1095,66 @@ export default function MediaPage() {
                           alignItems: "center",
                           justifyContent: "center",
                           fontSize: 12,
-                          color: "var(--kv-muted)",
+                          color: "var(--kv-danger)",
                           padding: 8,
                           textAlign: "center",
                         }}
                       >
-                        {j.status === "failed" ? (j.error ?? "failed") : `${j.status} ${Math.round(j.progress * 100)}%`}
+                        {j.error ?? "failed"}
+                      </div>
+                    ) : (
+                      <div
+                        role="status"
+                        style={{
+                          width: "100%",
+                          aspectRatio: "1 / 1",
+                          background: "var(--kv-inset)",
+                          display: "flex",
+                          flexDirection: "column",
+                          alignItems: "stretch",
+                          justifyContent: "center",
+                          gap: 8,
+                          padding: 12,
+                        }}
+                      >
+                        <LoadingLine
+                          stages={[
+                            j.status === "queued"
+                              ? "Waiting in the queue…"
+                              : j.kind === "video"
+                                ? "Rendering motion…"
+                                : "Dreaming pixels…",
+                            "Working the queue…",
+                            "Still on it…",
+                          ]}
+                        />
+                        <div
+                          role="progressbar"
+                          aria-valuenow={Math.round(j.progress * 100)}
+                          aria-valuemin={0}
+                          aria-valuemax={100}
+                          style={{
+                            height: 6,
+                            borderRadius: 3,
+                            background: "var(--kv-border)",
+                            position: "relative",
+                            overflow: "hidden",
+                          }}
+                        >
+                          <div
+                            style={{
+                              width: `${Math.max(0, Math.min(100, Math.round(j.progress * 100)))}%`,
+                              height: "100%",
+                              borderRadius: 3,
+                              background: "var(--kv-accent)",
+                              transition: "width 0.5s ease",
+                              position: "relative",
+                              overflow: "hidden",
+                            }}
+                          >
+                            <div className="kv-bar-stripes" aria-hidden="true" />
+                          </div>
+                        </div>
                       </div>
                     )}
                     <div style={{ padding: 8, fontSize: 12 }}>
@@ -1124,27 +1197,27 @@ export default function MediaPage() {
                           </IconBtn>
                           <IconBtn
                             disabled={busy !== ""}
-                            label="Send to Render: frame it and add the frame to the current timeline"
+                            label="Send to timeline: frame it and add the frame to the current timeline"
                             onClick={async () => {
                               if (!project) return;
                               setBusy("Sending…");
                               try {
                                 const scene = await resolveScene();
                                 if (!scene) {
-                                  setNotice("No timeline yet — create one on the Render tab first.");
+                                  toast("No timeline yet — create one on the Render tab first.", "warn");
                                   return;
                                 }
                                 const f = await frameGen(j);
                                 await api.addClip(scene.id, { kind: "frame", source_id: f.id, duration: 2 });
-                                setNotice(`Sent to "${scene.name}" — open Render to cut.`);
+                                toast(`Generation sent to "${scene.name}" — open Render to cut.`);
                               } catch (e) {
-                                setNotice(`Send failed: ${(e as Error).message}`);
+                                toast(`Send failed: ${(e as Error).message}`, "error");
                               } finally {
                                 setBusy("");
                               }
                             }}
                           >
-                            ▶
+                            ⤵
                           </IconBtn>
                           <IconBtn
                             disabled={busy !== ""}
@@ -1192,7 +1265,7 @@ export default function MediaPage() {
                       {j.status === "done" && j.kind === "video" && (
                         <div style={{ marginTop: 6, display: "flex", gap: 6, flexWrap: "wrap" }}>
                           <IconBtn onClick={() => void doAddVideoToTimeline(j)} label="Send to the current timeline as a clip">
-                            ▶
+                            ⤵
                           </IconBtn>
                           <IconBtn onClick={() => void doVideoToFrames(j)} label="Explode into draw frames in the current sequence">
                             ▦

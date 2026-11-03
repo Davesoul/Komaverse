@@ -2,16 +2,18 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, mediaUrl, type DrawFrame, type Page, type Project, type Sequence } from "../api";
 import {
   Btn,
+  BusyDots,
   ChapterHeader,
   EmptyState,
   IconBtn,
+  LoadingLine,
   Notice,
   PrimaryBtn,
   SectionTitle,
   SelectInput,
-  Spinner,
   StatusBar,
   TextInput,
+  toast,
 } from "../components/ui";
 import {
   BLEND_MODES,
@@ -1160,13 +1162,13 @@ export default function DrawPage() {
     try {
       const scene = await resolveScene();
       if (!scene) {
-        setNotice("No timeline yet — create one on the Render tab first.");
+        toast("No timeline yet — create one on the Render tab first.", "warn");
         return;
       }
       await api.addClip(scene.id, { kind: "frame", source_id: id, duration: 2 });
-      setNotice(`Sent "${f.name || "frame"}" to "${scene.name}" — open Render to cut.`);
+      toast(`Sent "${f.name || "frame"}" to "${scene.name}" — open Render to cut.`);
     } catch (e) {
-      setNotice(`Send failed: ${(e as Error).message}`);
+      toast(`Send failed: ${(e as Error).message}`, "error");
     }
   };
 
@@ -1175,16 +1177,16 @@ export default function DrawPage() {
     try {
       const scene = await resolveScene();
       if (!scene) {
-        setNotice("No timeline yet — create one on the Render tab first.");
+        toast("No timeline yet — create one on the Render tab first.", "warn");
         return;
       }
       await api.addClipsBatch(
         scene.id,
         seqFrames.map((f) => ({ kind: "frame", source_id: f.id, duration: 2 })),
       );
-      setNotice(`Sent ${seqFrames.length} frames to "${scene.name}" — open Render to cut.`);
+      toast(`Sent ${seqFrames.length} frames to "${scene.name}" — open Render to cut.`);
     } catch (e) {
-      setNotice(`Send failed: ${(e as Error).message}`);
+      toast(`Send failed: ${(e as Error).message}`, "error");
     }
   };
 
@@ -1462,7 +1464,12 @@ export default function DrawPage() {
               <IconBtn label="Undo (Ctrl+Z)" disabled={undoDepth === 0} onClick={doUndo}>↩</IconBtn>
               <IconBtn label="Redo (Ctrl+Shift+Z)" disabled={redoDepth === 0} onClick={doRedo}>↪</IconBtn>
               <PrimaryBtn small onClick={() => save(false)} disabled={busy}>
-                {busy ? "Saving…" : dirty ? "● Save" : "Save"}
+                {busy ? (
+                  <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+                    <BusyDots size={5} />
+                    Saving…
+                  </span>
+                ) : dirty ? "● Save" : "Save"}
               </PrimaryBtn>
               <IconBtn label="Download the composite as PNG" onClick={downloadPNG}>⤓</IconBtn>
             </div>
@@ -1869,7 +1876,7 @@ export default function DrawPage() {
           <EmptyState title="No project selected" hint="Pick a project, then open or create a frame to draw." />
         ) : !framesReady || (!frame && seqFrames.length > 0) ? (
           <EmptyState title="Loading frames…" hint="Opening your last frame.">
-            <Spinner />
+            <BusyDots />
           </EmptyState>
         ) : !frame ? (
           <EmptyState title="No frames yet" hint="Frames are drawings you can drop onto the timeline as clips.">
@@ -1880,7 +1887,11 @@ export default function DrawPage() {
             {notice && (
               <div style={{ marginBottom: 12 }}>
                 <Notice tone={tone}>
-                  {busy && <Spinner />} {notice}
+                  {busy ? (
+                    <LoadingLine label={notice || "Working…"} />
+                  ) : (
+                    <span className="kv-busy">{notice}</span>
+                  )}
                 </Notice>
               </div>
             )}
@@ -1922,7 +1933,12 @@ export default function DrawPage() {
                   <IconBtn label="Undo (Ctrl+Z)" disabled={undoDepth === 0} onClick={doUndo}>↩</IconBtn>
                   <IconBtn label="Redo (Ctrl+Shift+Z)" disabled={redoDepth === 0} onClick={doRedo}>↪</IconBtn>
                   <PrimaryBtn small onClick={() => save(false)} disabled={busy}>
-                    {busy ? "Saving…" : dirty ? "● Save" : "✓"}
+                    {busy ? (
+                      <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+                        <BusyDots size={5} />
+                        Saving…
+                      </span>
+                    ) : dirty ? "● Save" : "✓"}
                   </PrimaryBtn>
                   <IconBtn label="Zoom out" onClick={() => { const nz = clamp(zoomRef.current / 1.25, 0.1, 8); zoomRef.current = nz; setZoom(nz); }}>−</IconBtn>
                   <IconBtn label="Fit to view" onClick={() => fitZoom(true)}>⤢</IconBtn>

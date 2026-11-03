@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type {
   ButtonHTMLAttributes,
   CSSProperties,
@@ -297,6 +297,149 @@ export function Skeleton({
   );
 }
 
+/** Three-dot cascade: the primary pulse of every living loader. */
+export function BusyDots({ size = 6 }: { size?: number }) {
+  return (
+    <span
+      className="kv-dots"
+      aria-hidden="true"
+      style={{ ["--kv-dot" as string]: `${size}px` } as CSSProperties}
+    >
+      <i />
+      <i />
+      <i />
+    </span>
+  );
+}
+
+/** Cycling stage label: tells the micro-story of a long operation. */
+export function StageText({
+  stages,
+  intervalMs = 2200,
+}: {
+  stages: string[];
+  intervalMs?: number;
+}) {
+  const [idx, setIdx] = useState(0);
+  useEffect(() => {
+    if (!stages || stages.length < 2) return;
+    const t = setInterval(() => setIdx((i) => (i + 1) % stages.length), intervalMs);
+    return () => clearInterval(t);
+  }, [stages, intervalMs]);
+  if (!stages || stages.length === 0) return null;
+  return (
+    <span key={idx} className="kv-stage">
+      {stages[idx % stages.length]}
+    </span>
+  );
+}
+
+/** Live microphone level meter: bars driven by the recording stream.
+ * Falls back to idle bars when the analyser is unavailable; static
+ * under prefers-reduced-motion. */
+export function MicMeter({
+  stream,
+  bars = 12,
+}: {
+  stream: MediaStream | null;
+  bars?: number;
+}) {
+  const barRefs = useRef<Array<HTMLSpanElement | null>>([]);
+  useEffect(() => {
+    if (!stream) return;
+    if (
+      typeof window !== "undefined" &&
+      window.matchMedia("(prefers-reduced-motion: reduce)").matches
+    )
+      return;
+    const AC =
+      window.AudioContext ??
+      (window as unknown as { webkitAudioContext?: typeof AudioContext })
+        .webkitAudioContext;
+    if (!AC) return;
+    let ctx: AudioContext | null = null;
+    let raf = 0;
+    try {
+      ctx = new AC();
+      const src = ctx.createMediaStreamSource(stream);
+      const analyser = ctx.createAnalyser();
+      analyser.fftSize = 64;
+      src.connect(analyser);
+      const data = new Uint8Array(analyser.frequencyBinCount);
+      const tick = () => {
+        analyser.getByteFrequencyData(data);
+        const n = barRefs.current.length;
+        for (let i = 0; i < n; i++) {
+          const el = barRefs.current[i];
+          if (!el) continue;
+          const v =
+            data[Math.floor((i / Math.max(n - 1, 1)) * (data.length - 1))] / 255;
+          el.style.transform = `scaleY(${Math.max(0.12, v).toFixed(2)})`;
+        }
+        raf = requestAnimationFrame(tick);
+      };
+      void ctx.resume().catch(() => {});
+      raf = requestAnimationFrame(tick);
+    } catch {
+      // Analyser unavailable: bars stay idle.
+    }
+    return () => {
+      cancelAnimationFrame(raf);
+      if (ctx) void ctx.close().catch(() => {});
+    };
+  }, [stream]);
+  return (
+    <span
+      aria-hidden="true"
+      style={{
+        display: "inline-flex",
+        alignItems: "flex-end",
+        gap: 2,
+        height: 14,
+      }}
+    >
+      {Array.from({ length: bars }, (_, i) => (
+        <span
+          key={i}
+          ref={(el) => {
+            barRefs.current[i] = el;
+          }}
+          style={{
+            width: 3,
+            height: "100%",
+            borderRadius: 2,
+            background: "var(--kv-accent)",
+            transform: "scaleY(0.12)",
+            transformOrigin: "bottom",
+          }}
+        />
+      ))}
+    </span>
+  );
+}
+
+/** Drop-in living loader: dots + label (static or cycling stages). */
+export function LoadingLine({
+  label,
+  stages,
+  size,
+}: {
+  label?: string;
+  stages?: string[];
+  size?: number;
+}) {
+  return (
+    <span style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
+      <BusyDots size={size} />
+      {stages ? (
+        <StageText stages={stages} />
+      ) : (
+        <span className="kv-busy">{label}</span>
+      )}
+    </span>
+  );
+}
+
 export function ChapterHeader({
   no,
   title,
@@ -521,6 +664,93 @@ export function ImpactFlash({ burstKey }: { burstKey: number }) {
   )
     return null;
   return <div key={burstKey} className="kv-impact" aria-hidden />;
+}
+
+type ToastTone = "info" | "warn" | "error";
+type ToastItem = { id: number; tone: ToastTone; text: string };
+let toastSeq = 0;
+const toastListeners = new Set<(t: ToastItem) => void>();
+
+/** Fire-and-forget bottom-left notification (send confirmations, etc.). */
+export function toast(text: string, tone: ToastTone = "info") {
+  const item = { id: ++toastSeq, tone, text };
+  toastListeners.forEach((fn) => fn(item));
+}
+
+/** Fixed bottom-left toast stack. Mount once in App. */
+export function Toasts() {
+  const [items, setItems] = useState<ToastItem[]>([]);
+  useEffect(() => {
+    const fn = (t: ToastItem) => {
+      setItems((prev) => [...prev.slice(-2), t]);
+      window.setTimeout(() => {
+        setItems((prev) => prev.filter((x) => x.id !== t.id));
+      }, 4500);
+    };
+    toastListeners.add(fn);
+    return () => {
+      toastListeners.delete(fn);
+    };
+  }, []);
+  if (items.length === 0) return null;
+  const border = (tone: ToastTone) =>
+    tone === "error"
+      ? "var(--kv-danger)"
+      : tone === "warn"
+        ? "var(--kv-warn-border)"
+        : "var(--kv-border-strong)";
+  return (
+    <div
+      role="status"
+      aria-live="polite"
+      style={{
+        position: "fixed",
+        left: 16,
+        bottom: 16,
+        zIndex: 60,
+        display: "flex",
+        flexDirection: "column",
+        gap: 8,
+        maxWidth: "min(360px, 90vw)",
+      }}
+    >
+      {items.map((t) => (
+        <div
+          key={t.id}
+          className="kv-notice-in"
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 8,
+            fontSize: 13,
+            background: "var(--kv-surface)",
+            border: `1px solid ${border(t.tone)}`,
+            borderRadius: "var(--kv-radius-sm)",
+            padding: "8px 12px",
+            boxShadow: "var(--kv-shadow-hard)",
+          }}
+        >
+          <span style={{ flex: 1 }}>{t.text}</span>
+          <button
+            type="button"
+            aria-label="Dismiss notification"
+            onClick={() => setItems((prev) => prev.filter((x) => x.id !== t.id))}
+            style={{
+              border: "none",
+              background: "none",
+              cursor: "pointer",
+              color: "var(--kv-muted)",
+              fontSize: 14,
+              lineHeight: 1,
+              padding: 2,
+            }}
+          >
+            ×
+          </button>
+        </div>
+      ))}
+    </div>
+  );
 }
 
 export function StatusBar({ items }: { items: string[] }) {
