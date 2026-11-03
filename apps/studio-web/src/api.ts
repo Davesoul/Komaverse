@@ -469,6 +469,18 @@ export const api = {
       body: form,
     });
   },
+  /** Import a layered/animation file as draw frames: .ora keeps the full
+   * layer stack, .gif/.apng/.png become one frame per cel. */
+  importLayered: (projectId: string, file: File, opts?: { sequence_id?: string; name?: string }) => {
+    const form = new FormData();
+    form.append("file", file);
+    if (opts?.sequence_id) form.append("sequence_id", opts.sequence_id);
+    if (opts?.name) form.append("name", opts.name);
+    return req<DrawFrame[]>(`/api/v1/projects/${projectId}/frames/import-layered`, {
+      method: "POST",
+      body: form,
+    });
+  },
   detect: (pageId: string, detector: string, direction = "rtl", confirm = false) =>
     req<DetectResult>(`/api/v1/pages/${pageId}/detect`, {
       method: "POST",

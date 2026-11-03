@@ -428,6 +428,7 @@ export default function MediaPage() {
   const imgInputRef = useRef<HTMLInputElement>(null);
   const vidInputRef = useRef<HTMLInputElement>(null);
   const audInputRef = useRef<HTMLInputElement>(null);
+  const layInputRef = useRef<HTMLInputElement>(null);
 
   const probeAudioDuration = (file: File): Promise<number> =>
     new Promise((resolve) => {
@@ -467,6 +468,31 @@ export default function MediaPage() {
       const job = await api.uploadVideo(project.id, file);
       await refresh(project.id);
       setNotice(`Imported "${job.prompt || file.name}" — add it to a timeline or the Draw studio.`);
+    } catch (e) {
+      setNotice(`Import failed: ${(e as Error).message}`);
+    } finally {
+      setBusy("");
+    }
+  };
+
+  const doImportLayered = async (file: File) => {
+    if (!project) return;
+    setBusy("Importing layered file…");
+    try {
+      const frames = await api.importLayered(project.id, file);
+      await refresh(project.id);
+      if (frames.length === 0) {
+        setNotice(`Imported "${file.name}" — nothing to open.`);
+        return;
+      }
+      const layers = frames.reduce((n, f) => n + f.layers.length, 0);
+      const detail = frames.length > 1
+        ? `${frames.length} frames`
+        : `${layers} layer${layers === 1 ? "" : "s"}`;
+      setCurrentSequence(project.id, frames[0].sequence_id);
+      setDrawFrame(project.id, frames[0].id);
+      gotoTab("draw");
+      setNotice(`Imported "${file.name}" as ${detail} — opened in Draw.`);
     } catch (e) {
       setNotice(`Import failed: ${(e as Error).message}`);
     } finally {
@@ -779,6 +805,9 @@ export default function MediaPage() {
           <Btn small onClick={() => audInputRef.current?.click()} title="Import an audio file as a voice take">
             Audio
           </Btn>
+          <Btn small onClick={() => layInputRef.current?.click()} title="Import a layered Krita/GIMP file (.ora) or animation (.gif/.apng) as draw frames">
+            Layers
+          </Btn>
           <input
             ref={imgInputRef}
             type="file"
@@ -810,6 +839,17 @@ export default function MediaPage() {
               const f = e.target.files?.[0];
               e.target.value = "";
               if (f) void doImportAudio(f);
+            }}
+          />
+          <input
+            ref={layInputRef}
+            type="file"
+            accept=".ora,.gif,.apng,.png,image/gif,image/apng,image/png"
+            hidden
+            onChange={(e) => {
+              const f = e.target.files?.[0];
+              e.target.value = "";
+              if (f) void doImportLayered(f);
             }}
           />
         </div>

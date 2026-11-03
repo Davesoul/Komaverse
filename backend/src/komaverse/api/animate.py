@@ -11,7 +11,7 @@ import re
 from pathlib import Path
 
 import cv2
-from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, Response, UploadFile
+from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, Response, UploadFile
 from fastapi.responses import FileResponse
 from PIL import Image
 from pydantic import BaseModel
@@ -1359,6 +1359,115 @@ def frame_from_media(
     return frame_from_media_source(
         session, user, project_id, body.source, body.name, body.sequence_id
     )
+
+
+@router.post(
+    "/projects/{project_id}/frames/import-layered",
+    response_model=list[DrawFrame],
+    status_code=201,
+)
+def import_layered_frames(
+    project_id: str,
+    file: UploadFile = File(...),
+    sequence_id: str | None = Form(None),
+    name: str | None = Form(None),
+    session: Session = Depends(get_session),
+    user: UserRow = Depends(get_current_user),
+):
+    """Import a layered/animation file as draw frames with intact layers.
+
+    .ora (Krita/GIMP/MyPaint export) becomes one frame carrying the
+    full layer stack — names, opacity, visibility, blend modes, and
+    offsets. .gif/.apng/.png become one frame per cel. A fresh
+    "Import <name>" sequence holds the frames unless sequence_id
+    names one.
+    """
+    from komaverse.layered_import import (
+        LayeredImportError,
+        parse_ora,
+        split_animation,
+    )
+
+    project = own_project(session, user, project_id)
+    fname = (file.filename or "").lower()
+    try:
+        data = storage.read_upload_capped(
+            file.file, settings.upload_max_mb * 1024 * 1024
+        )
+    except storage.UploadTooLargeError:
+        raise HTTPException(413, "file too large") from None
+    if not data:
+        raise HTTPException(400, "empty file")
+    if fname.endswith(".ora"):
+        try:
+            doc = parse_ora(data)
+        except LayeredImportError as exc:
+            raise HTTPException(400, str(exc)) from None
+        cels: list[tuple[str, list[tuple[str, int, bool, str, bytes]]]] = [
+            (
+                (name or fname.rsplit(".", 1)[0] or "Import"),
+                [(ly.name, ly.opacity, ly.visible, ly.blend_mode, ly.png) for ly in doc.layers],
+            )
+        ]
+        width, height = doc.width, doc.height
+    elif fname.endswith((".gif", ".apng", ".png")):
+        try:
+            width, height, pngs = split_animation(data)
+        except LayeredImportError as exc:
+            raise HTTPException(400, str(exc)) from None
+        stem = (name or fname.rsplit(".", 1)[0] or "Import")
+        cels = [
+            (f"{stem} {i + 1}", [("cel", 100, True, "normal", png)])
+            for i, png in enumerate(pngs)
+        ]
+    else:
+        raise HTTPException(400, "file must be .ora, .gif, .apng, or .png")
+    if sequence_id:
+        seq = _resolve_sequence(session, user, project.id, sequence_id)
+    else:
+        seqs = list(_sequence_rows(session, project.id))
+        seq = seqs[0] if len(seqs) == 1 else None
+        if seq is None:
+            stem = (name or fname.rsplit(".", 1)[0] or "Import")[:200]
+            seq = SequenceRow(
+                project_id=project.id,
+                name=f"Import {stem}",
+                index=len(seqs),
+            )
+            session.add(seq)
+            session.flush()
+    out: list[DrawFrame] = []
+    for frame_name, layers in cels:
+        row = FrameRow(
+            project_id=project.id,
+            sequence_id=seq.id,
+            name=frame_name[:200],
+            index=_next_frame_index(session, seq.id),
+            width=width,
+            height=height,
+        )
+        session.add(row)
+        session.flush()
+        for order, (lname, opacity, visible, blend, png) in enumerate(layers):
+            if blend not in BLEND_MODES:
+                blend = "normal"
+            session.add(
+                LayerRow(
+                    frame_id=row.id,
+                    name=lname[:200],
+                    opacity=opacity,
+                    visible=visible,
+                    locked=False,
+                    blend_mode=blend,
+                    layer_order=order,
+                    data_url=f"data:image/png;base64,{base64.b64encode(png).decode()}",
+                )
+            )
+        session.flush()
+        fresh = session.get(FrameRow, row.id)
+        out.append(fresh.to_schema() if fresh is not None else row.to_schema())
+    session.commit()
+    return out
 
 
 @router.post("/projects/{project_id}/videos/upload", response_model=Job, status_code=201)

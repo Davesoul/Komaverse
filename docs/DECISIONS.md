@@ -959,6 +959,36 @@ color-theory (cel shadow colors, light logic), manga-literacy
   build green. Probe projects removed through the app delete
   endpoint afterwards.
 
+## ADR-37: Layered/animation import - ORA, GIF, APNG (accepted)
+
+- New `POST /api/v1/projects/{id}/frames/import-layered`: .ora
+  (the Krita/GIMP/MyPaint interchange format) becomes one frame
+  carrying the full layer stack - names, opacity, visibility,
+  blend modes (mapped to the studio set, unknown falls back to
+  normal), and per-layer x/y offsets composited onto full-canvas
+  sheets since layers have no offset field. .gif/.apng/.png
+  become one cel frame each (capped at 48). Everything lands in a
+  fresh "Import <name>" sequence unless told otherwise.
+- Parsing lives in `layered_import.py` (pure functions, no server
+  needed to test): 64-layer and 4096px caps, bad zips and bad
+  stack.xml rejected as 400s, .kra correctly refused (flattened
+  .kra is a later step - see below).
+- Media tab gains a Layers button (.ora/.gif/.apng/.png) that
+  imports, selects the sequence, and opens Draw on the first
+  frame with the stack intact.
+- Why not .kra directly: a .kra always embeds mergedimage.png
+  (flattened import is easy and coming next) but layered .kra
+  needs Krita's own storage format; ORA export from Krita is one
+  click and lossless for layers, so ORA is the layered path.
+- Live: 6 new tests (stack order/names/opacity/visibility/blend,
+  offset compositing, GIF order, endpoint roundtrip, bad-ext
+  400) plus a live-server E2E (register/project/multipart POSTs
+  against a scratch backend: ORA layers, GIF cels, .kra 400,
+  cascade delete) - 22 green with the consistency file, `tsc`
+  clean, build green. NOTE: the dev backend on :8001 must be
+  restarted to serve the new route (no --reload there).
+
+
 ## ADR-36: Phone canvas maximized, intro lockup verified (accepted)
 
 - Fitting 960px into 366px left the canvas at 244px (25%): correct
