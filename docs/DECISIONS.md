@@ -935,3 +935,27 @@ color-theory (cel shadow colors, light logic), manga-literacy
   marks it manual and is never yanked.
 - Live: `npx tsc --noEmit` clean, `npm run build` green
   (no backend change this round).
+
+## ADR-35: Real 390px verification - grid stretch, one-row toolbar (accepted)
+
+- The canvas still overflowed on phones after the fit fixes, so
+  this round was verified with headless Chrome at 390x844 instead
+  of by reading code. The probe found the layout viewport blown to
+  1050px: in the <=920px column layout, `align-items: flex-start`
+  (no stretch) lets the canvas column hug its 960px content, and
+  the fit then measured the blown width and sustained it. The
+  media query now stretches column children and caps them at 100%
+  - page back to exactly 390, canvas fitted at 25%, zero overflow.
+  Same shared grid, so Scan/Render/Media inherit the fix.
+- The wrapped 3-row toolbar left a 146px gap; under 640px the
+  floatbar is one scrolling row again (gap back to 66px).
+- Also fixed on the way: the toolbar-gap effect measured before
+  the frame mounted and stuck at 76 (now re-runs per frame).
+- The intro needed no change: the portrait body-scale keeps the
+  whole page inside 390px with Skip reachable.
+- Live: headless-Chrome probe (390x844, fresh user + frame via
+  the app API) - intro fits, Draw page 390 = viewport 390,
+  canvas inside its scroller, toolbar one row; `tsc` clean,
+  build green. Probe projects removed through the app delete
+  endpoint afterwards.
+
