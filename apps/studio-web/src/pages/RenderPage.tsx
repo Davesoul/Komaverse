@@ -657,6 +657,7 @@ export default function RenderPage() {
           duration: c.duration,
           motion: c.motion,
           transition: c.transition,
+          transition_duration: c.transition_duration,
           filter: cssFilterFor(c.filter),
         })),
     [clips, project, frames, videoJobs, artNonce],
@@ -2433,7 +2434,7 @@ export default function RenderPage() {
                       void commitClipPatch(selectedClip.id, { transition: e.target.value })
                     }
                     aria-label="Clip transition"
-                    title="How this clip blends in from the previous one (export only)"
+                    title="How this clip blends in from the previous one (preview + export; none = hard cut)"
                   >
                     {TRANSITIONS.map((t) => (
                       <option key={t} value={t}>{t}</option>
@@ -2461,7 +2462,7 @@ export default function RenderPage() {
                     onCommit={(v) => void commitClipPatch(selectedClip.id, { fade_out: v })}
                   />
                   <span style={{ fontSize: 11, color: "var(--kv-faint)" }}>
-                    Blends and fades render in the MP4 export.
+                    Blends and fades play in the preview and render in the MP4 export.
                   </span>
                   <span style={{ marginLeft: "auto", display: "flex", gap: 6 }}>
                     {selectedClip.kind !== "text" && (

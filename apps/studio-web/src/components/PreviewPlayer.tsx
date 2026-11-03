@@ -12,6 +12,20 @@ export interface PreviewClip {
   motion: string;
   /** CSS filter preview of the export color grade ("" = none). */
   filter?: string;
+  /** Blend into this clip ("none" = hard cut, the default). */
+  transition?: string;
+  transition_duration?: number;
+}
+
+/** Transitions the preview dissolves for. Anything else cuts hard —
+ * the fade is opt-in per clip, never a default. */
+const FADE_TRANSITIONS = new Set(["crossfade", "fade-black", "fade-white"]);
+
+/** Dissolve length in ms, or 0 for a hard cut. */
+function fadeMsFor(clip: PreviewClip): number {
+  if (!clip.transition || !FADE_TRANSITIONS.has(clip.transition)) return 0;
+  const d = Number(clip.transition_duration ?? 0.5);
+  return Math.min(Math.max(Number.isFinite(d) ? d : 0.5, 0.1), 2) * 1000;
 }
 
 /** A fullscreen overlay cutaway (V2+ lane) active on [start, end). */
@@ -217,15 +231,35 @@ export function PreviewPlayer({
     return cur;
   })();
 
-  /** Crossfade cover: the incoming clip fades in over the frozen
-   * outgoing one, so butt-jointed clips never flash the black stage
-   * while React remounts the layer. */
+  const [reduceMotion, setReduceMotion] = useState(
+    () =>
+      typeof window.matchMedia === "function" &&
+      window.matchMedia("(prefers-reduced-motion: reduce)").matches,
+  );
+  // Explicit user override: one click forces camera moves even when the
+  // OS asks for reduced motion. Export ignores both and always animates.
+  // Declared up here so the dissolve cover below hard-cuts for motionOff.
+  const [forceMotion, setForceMotion] = useState(false);
+  const motionOff = reduceMotion && !forceMotion;
+  useEffect(() => {
+    if (typeof window.matchMedia !== "function") return;
+    const mq = window.matchMedia("(prefers-reduced-motion: reduce)");
+    const onChange = () => setReduceMotion(mq.matches);
+    mq.addEventListener("change", onChange);
+    return () => mq.removeEventListener("change", onChange);
+  }, []);
+
+  /** Opt-in dissolve cover: when the incoming clip carries a fade
+   * transition, it fades in over the frozen outgoing one so the joint
+   * never flashes the black stage while React remounts the layer.
+   * "none" (the default) and motion moves cut hard — no fade. */
   const [baseId, setBaseId] = useState<string | null>(null);
   const [cover, setCover] = useState<{
     clip: PreviewClip;
     at: number;
     shown: boolean;
     gen: number;
+    ms: number;
   } | null>(null);
   const liveRef = useRef<string | null>(null);
   const coverGen = useRef(0);
@@ -236,7 +270,7 @@ export function PreviewPlayer({
     },
     [],
   );
-  const showCover = (gen: number) => {
+  const showCover = (gen: number, ms: number) => {
     if (gen !== coverGen.current) return;
     setCover((c) => (c && c.gen === gen && !c.shown ? { ...c, shown: true } : c));
     const promote = window.setTimeout(() => {
@@ -245,7 +279,7 @@ export function PreviewPlayer({
         if (c && c.gen === gen) setBaseId(c.clip.id);
         return null;
       });
-    }, 240);
+    }, Math.max(240, ms));
     coverTimers.current.push(promote);
   };
   const base = (baseId ? clips.find((c) => c.id === baseId) : undefined) ?? current ?? clips[0]!;
@@ -259,14 +293,23 @@ export function PreviewPlayer({
     if (liveRef.current === current.id) return;
     liveRef.current = current.id;
     const gen = ++coverGen.current;
+    // Hard cut unless the incoming clip opts into a fade: reduced
+    // motion always cuts, and so does every non-fade transition.
+    const ms = motionOff ? 0 : fadeMsFor(current);
+    if (ms <= 0) {
+      setCover(null);
+      setBaseId(current.id);
+      return;
+    }
     setBaseId((b) => b ?? current.id);
     setCover({
       clip: current,
       at: Math.max(0, timeRef.current - startOf(current.id)),
       shown: false,
       gen,
+      ms,
     });
-    const fallback = window.setTimeout(() => showCover(gen), 600);
+    const fallback = window.setTimeout(() => showCover(gen, ms), ms + 600);
     coverTimers.current.push(fallback);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [current]);
@@ -332,23 +375,6 @@ export function PreviewPlayer({
       }
     }
   };
-  const [reduceMotion, setReduceMotion] = useState(
-    () =>
-      typeof window.matchMedia === "function" &&
-      window.matchMedia("(prefers-reduced-motion: reduce)").matches,
-  );
-  // Explicit user override: one click forces camera moves even when the
-  // OS asks for reduced motion. Export ignores both and always animates.
-  const [forceMotion, setForceMotion] = useState(false);
-  const motionOff = reduceMotion && !forceMotion;
-  useEffect(() => {
-    if (typeof window.matchMedia !== "function") return;
-    const mq = window.matchMedia("(prefers-reduced-motion: reduce)");
-    const onChange = () => setReduceMotion(mq.matches);
-    mq.addEventListener("change", onChange);
-    return () => mq.removeEventListener("change", onChange);
-  }, []);
-
   useEffect(() => {
     stopAllAudio();
     setTime(0);
@@ -505,9 +531,9 @@ export function PreviewPlayer({
             style={{
               position: "absolute",
               inset: 0,
-              background: "#000",
+              background: cover.clip.transition === "fade-white" ? "#fff" : "#000",
               opacity: cover.shown ? 1 : 0,
-              transition: "opacity 220ms ease-out",
+              transition: `opacity ${cover.ms}ms ease-out`,
               pointerEvents: "none",
             }}
           >
@@ -518,14 +544,14 @@ export function PreviewPlayer({
                 offset={cover.at}
                 seekNonce={seek?.nonce ?? 0}
                 label={cover.clip.label}
-                onReady={() => showCover(cover.gen)}
+                onReady={() => showCover(cover.gen, cover.ms)}
               />
             ) : (
               <img
                 crossOrigin="use-credentials"
                 src={cover.clip.image}
                 alt={cover.clip.label}
-                onLoad={() => showCover(cover.gen)}
+                onLoad={() => showCover(cover.gen, cover.ms)}
                 style={{
                   width: "100%",
                   height: "100%",

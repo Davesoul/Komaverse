@@ -295,7 +295,7 @@ export default function AgentDock() {
   > | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const panelRef = useRef<HTMLDivElement>(null);
-  const inputRef = useRef<HTMLInputElement>(null);
+  const inputRef = useRef<HTMLTextAreaElement>(null);
   const abortRef = useRef<AbortController | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
   const [attaching, setAttaching] = useState(false);
@@ -642,8 +642,21 @@ export default function AgentDock() {
         return;
       }
     }
-    if (e.key === "Enter") send(input);
+    // Plain Enter sends; Shift+Enter adds a newline (the composer
+    // is a textarea so long prompts stay readable while typing).
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      send(input);
+    }
   };
+
+  // Auto-grow the composer with the text, up to a cap — then it scrolls.
+  useEffect(() => {
+    const el = inputRef.current;
+    if (!el) return;
+    el.style.height = "auto";
+    el.style.height = `${Math.min(el.scrollHeight, 160)}px`;
+  }, [input]);
 
   // Completion callbacks: any [job id] the agent started that is still
   // running gets polled, and the dock posts a follow-up when it finishes —
@@ -2024,11 +2037,11 @@ export default function AgentDock() {
                 </div>
               ) : mentionShown.length === 0 ? (
                 <div style={{ padding: "8px 10px", fontSize: 12, color: "var(--kv-muted)" }}>
-                  No matches — open a project with frames, panels, takes, or generations first.
+                  No matches — open a project with frames, panels, takes, generations, or sequences first.
                 </div>
               ) : (
                 <>
-                  {(["frame", "panel", "media", "take", "gen"] as const).map((k) => {
+                  {(["frame", "panel", "media", "take", "gen", "sequence"] as const).map((k) => {
                     const group = mentionShown.filter((it) => it.kind === k);
                     if (group.length === 0) return null;
                     return (
@@ -2175,13 +2188,28 @@ export default function AgentDock() {
               </svg>
             )}
           </Btn>
-          <TextInput
+          <textarea
             ref={inputRef}
+            rows={1}
             placeholder="Ask the studio… (@ to reference, ＋ to attach audio/image, / for commands)"
             value={input}
             onChange={(e) => onComposerChange(e.target.value)}
             onKeyDown={onComposerKey}
-            style={{ flex: 1 }}
+            style={{
+              flex: 1,
+              background: "var(--kv-inset)",
+              color: "var(--kv-text)",
+              border: "1px solid var(--kv-border-strong)",
+              borderRadius: "var(--kv-radius-sm)",
+              padding: "6px 8px",
+              fontSize: 13,
+              font: "inherit",
+              lineHeight: 1.45,
+              resize: "none",
+              overflowY: "auto",
+              minHeight: 30,
+              maxHeight: 160,
+            }}
             aria-label="Agent message"
             aria-expanded={mention !== null || slash !== null}
             aria-autocomplete="list"

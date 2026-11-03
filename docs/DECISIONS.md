@@ -878,3 +878,25 @@ color-theory (cel shadow colors, light logic), manga-literacy
   role phrasing + from-to pair, look_at early-out, image guidance
   counts) — full backend 427 green, `npx tsc --noEmit` clean,
   `npm run build` green.
+
+
+## ADR-32: Fade is opt-in, sequence picker renders, composer grows (accepted)
+
+- The preview dissolve cover fired on every cut, so the timeline
+  felt like it faded by default. The cover now only engages when
+  the incoming clip carries a fade transition (`crossfade`,
+  `fade-black`, `fade-white` — `none` and motion moves cut hard),
+  lasts the clip's own `transition_duration` (0.1–2s clamped),
+  and stays a hard cut under reduced motion. `PreviewClip` types
+  the transition fields the timeline already sent; the "Blend in"
+  hint now reads preview + export.
+- @sequence: mentions resolved and sent but the picker popup only
+  rendered five hardcoded groups, so sequences were invisible. The
+  group list includes Sequences now (first-frame thumbs, "N frames
+  · M layers"); trigger and send paths already carried the kind.
+- The AI composer was a single-line input: it is a textarea that
+  auto-grows to 160px (then scrolls), Enter sends, Shift+Enter
+  makes a newline. Same inset/border/radius tokens, no new style
+  language.
+- Live: `npx tsc --noEmit` clean, `npm run build` green,
+  consistency suite 16 green (no backend change this round).
