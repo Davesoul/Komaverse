@@ -4,8 +4,8 @@ Approach learned from free-tts (the author's standalone project): lazy
 engine imports, first-available auto-pick, WAV intermediates, 192k MP3
 output. Differences: MP3 encoding uses the imageio-ffmpeg bundled binary
 (free-tts shells PATH `ffmpeg`), WAV writing uses stdlib `wave` (no
-soundfile dep), and Coqui XTTSv2 cloning is NOT vendored (GBs of weights;
-asking for it fails loudly with the reason).
+soundfile dep). Coqui XTTS v2 cloning follows the same lazy pattern
+(`pip install coqui-tts`; the ~2GB model is fetched on first use).
 
 Voice ids are provider-shaped "engine:voice" (e.g. "kokoro:af_sarah");
 a bare name means Kokoro. Engines: kokoro (pip: pykokoro), espeak-ng
@@ -18,6 +18,7 @@ import concurrent.futures
 import shutil
 import subprocess
 import tempfile
+import threading
 import wave
 from pathlib import Path
 
@@ -47,6 +48,96 @@ FREETTS_KNOWN_VOICES = (
 
 NAMED_ENGINES = ("kokoro",)
 LOCAL_ENGINES = ("kokoro", "espeak-ng", "pyttsx3")
+CLONE_ENGINES = ("xtts",)
+
+# XTTS v2 zero-shot clone, free-tts style: lazy import, one cached model
+# (its first call fetches ~2GB of weights), one synthesis at a time.
+_xtts = None
+_xtts_ready = False
+_xtts_lock = threading.Lock()
+
+
+def _get_xtts():
+    """Load and cache the XTTS v2 model (holding the process-wide lock)."""
+    global _xtts, _xtts_ready
+    with _xtts_lock:
+        if not _xtts_ready:
+            try:
+                from TTS.api import TTS
+            except Exception as exc:
+                raise ProviderError(
+                    "local voice cloning needs `pip install coqui-tts` "
+                    f"in the backend environment ({exc})"
+                ) from exc
+            try:
+                _xtts = TTS("tts_models/multilingual/multi-dataset/xtts_v2", progress_bar=False)
+            except Exception as exc:
+                raise ProviderError(f"XTTS model failed to load: {exc}") from exc
+            _xtts_ready = True
+        return _xtts
+
+
+def wav_normalize_22k(data: bytes) -> bytes:
+    """Any audio sample -> 22050Hz mono 16-bit WAV (XTTS reference sweet spot)."""
+    with tempfile.TemporaryDirectory() as tmp:
+        src = Path(tmp) / "in"
+        src.write_bytes(bytes(data))
+        dst = Path(tmp) / "ref.wav"
+        proc = subprocess.run(
+            [
+                imageio_ffmpeg.get_ffmpeg_exe(),
+                "-y",
+                "-v",
+                "error",
+                "-i",
+                str(src),
+                "-ar",
+                "22050",
+                "-ac",
+                "1",
+                "-c:a",
+                "pcm_s16le",
+                str(dst),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        if proc.returncode != 0 or not dst.is_file():
+            raise ProviderError(
+                f"reference audio is undecodable: {(proc.stderr or '').strip()[-200:]}"
+            )
+        return dst.read_bytes()
+
+
+def synthesize_xtts(text: str, ref_wav: Path, lang: str = "en") -> bytes:
+    """Text -> MP3 bytes in the cloned voice (XTTS v2, fully local)."""
+    body = (text or "").strip()
+    if not body:
+        raise ProviderError("nothing to speak: text is empty")
+    if not ref_wav.is_file():
+        raise ProviderError("clone reference audio is missing — re-clone the voice")
+    tts = _get_xtts()
+    with tempfile.TemporaryDirectory() as tmp:
+        wav_path = Path(tmp) / "clone.wav"
+        mp3_path = Path(tmp) / "clone.mp3"
+        try:
+            with _xtts_lock:
+                tts.tts_to_file(
+                    text=body,
+                    speaker_wav=str(ref_wav),
+                    language=(lang or "en").strip() or "en",
+                    file_path=str(wav_path),
+                )
+        except Exception as exc:
+            raise ProviderError(f"XTTS synthesis failed: {exc}") from exc
+        if not wav_path.is_file() or wav_path.stat().st_size == 0:
+            raise ProviderError("XTTS returned empty audio")
+        _wav_to_mp3(wav_path, mp3_path)
+        data = mp3_path.read_bytes()
+    if not data:
+        raise ProviderError("XTTS returned empty audio")
+    return data
 
 
 def parse_freetts_voice(value: str | None) -> tuple[str, str]:
@@ -310,13 +401,13 @@ def synthesize_local(
         resolved_engine, resolved_voice = want_engine, want_voice
     if resolved_engine == "coqui-clone":
         raise ProviderError(
-            "voice cloning (coqui-clone) isn't vendored into the studio — "
-            "pick a Kokoro voice or a system engine"
+            "voice cloning needs a cloned voice first (Render tab voice "
+            "box, Local engine) — then use it as xtts:<name> from the picker"
         )
     if resolved_engine not in LOCAL_ENGINES:
         raise ProviderError(
             f'unknown voice engine "{resolved_engine}" '
-            f"(want: {', '.join(LOCAL_ENGINES)}, coqui-clone)"
+            f"(want: {', '.join(LOCAL_ENGINES)})"
         )
     with tempfile.TemporaryDirectory() as tmp:
         mp3_path = Path(tmp) / "voice.mp3"

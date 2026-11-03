@@ -654,7 +654,20 @@ def ai_voices(provider: str = "free-tts", user: UserRow = Depends(get_current_us
         return VoiceCatalog(provider=kind, source="live", voices=[*mine, *voices])
     if kind == "free-tts":
         voices, source = list_freetts_voices()
-        return VoiceCatalog(provider=kind, source=source, voices=voices)
+        clones = (
+            session.execute(
+                select(ClonedVoiceRow)
+                .where(ClonedVoiceRow.user_id == user.id, ClonedVoiceRow.engine == "xtts")
+                .order_by(ClonedVoiceRow.created_at.desc())
+            ).scalars().all()
+            if session is not None and hasattr(session, 'execute')
+            else []
+        )
+        mine = [
+            {"id": f"xtts:{r.id}", "label": f"{r.name} · cloned", "maker": "cloned"}
+            for r in clones
+        ]
+        return VoiceCatalog(provider=kind, source=source, voices=[*mine, *voices])
     raise HTTPException(
         400, f'unknown voice provider "{provider}" (want: elevenlabs, free-tts)'
     )
@@ -684,15 +697,26 @@ def clone_voice(
     files: list[UploadFile] = File(...),
     session: Session = Depends(get_session),
     user: UserRow = Depends(get_current_user),
+    engine: str = Form("elevenlabs"),
 ):
-    """Clone a voice from 1–5 speech samples (ElevenLabs instant clone).
+    """Clone a voice from speech samples.
 
-    The clone lands in your ElevenLabs library and is recorded here, so
-    the Brain voice picker offers it for TTS like any other voice.
-    """
+    engine "elevenlabs": cloud Instant Voice Clone (1-5 samples,
+    needs ELEVENLABS_API_KEY). engine "xtts": local XTTS v2 clone
+    (exactly 1 sample, no key; needs `pip install coqui-tts`).
+    Either way the clone lands in the voice picker for its engine."""
+    from komaverse.ai.voice_local import wav_normalize_22k
+
+    # engine arrives as a plain string over HTTP; direct calls that
+    # omit it keep the Form() default object, which is not a string.
+    kind = (engine if isinstance(engine, str) else "elevenlabs").strip().lower()
+    if kind not in ("elevenlabs", "xtts"):
+        raise HTTPException(400, 'clone engine must be "elevenlabs" or "xtts"')
     clean = (name or "").strip()
     if not clean:
         raise HTTPException(400, "a name is required")
+    if kind == "xtts" and len(files) != 1:
+        raise HTTPException(400, "local xtts clone takes exactly 1 clear sample")
     if not files or len(files) > MAX_CLONE_SAMPLES:
         raise HTTPException(400, f"send 1–{MAX_CLONE_SAMPLES} audio samples")
     try:
@@ -703,20 +727,42 @@ def clone_voice(
                 f.file.close()
             except Exception:
                 pass
+    if kind == "elevenlabs":
+        try:
+            voice_id = ElevenLabsProvider().clone_voice(clean, samples)
+        except ProviderError as exc:
+            raise HTTPException(400, f"voice cloning failed: {exc}") from None
+        row = ClonedVoiceRow(
+            user_id=user.id,
+            name=clean[:80],
+            engine="elevenlabs",
+            elevenlabs_voice_id=voice_id,
+            sample_count=len(samples),
+        )
+        session.add(row)
+        session.commit()
+        return row.to_schema()
+    # Local XTTS v2: normalize the sample to the 22kHz reference the
+    # model wants and save it under the media dir; synthesis reads it
+    # back for every line (free-tts keeps the ref file the same way).
     try:
-        voice_id = ElevenLabsProvider().clone_voice(clean, samples)
+        ref_wav = wav_normalize_22k(samples[0][1])
     except ProviderError as exc:
-        raise HTTPException(400, f"voice cloning failed: {exc}") from None
+        raise HTTPException(400, f"voice sample is unusable: {exc}") from None
     row = ClonedVoiceRow(
         user_id=user.id,
         name=clean[:80],
-        elevenlabs_voice_id=voice_id,
-        sample_count=len(samples),
+        engine="xtts",
+        sample_count=1,
     )
     session.add(row)
+    session.flush()
+    voices_dir = settings.media_dir / "voices"
+    voices_dir.mkdir(parents=True, exist_ok=True)
+    (voices_dir / f"{row.id}.wav").write_bytes(ref_wav)
+    row.ref_audio = f"voices/{row.id}.wav"
     session.commit()
     return row.to_schema()
-
 
 @router.get("/ai/voices/clones", response_model=list[ClonedVoice])
 def list_clones(
@@ -740,14 +786,22 @@ def delete_clone(
     session: Session = Depends(get_session),
     user: UserRow = Depends(get_current_user),
 ):
-    """Remove a clone: from ElevenLabs first, then the local record."""
+    """Remove a clone: from ElevenLabs first (cloud ones), then the record.
+    Local XTTS clones also delete their saved reference audio."""
     row = session.get(ClonedVoiceRow, clone_id)
     if row is None or row.user_id != user.id:
         raise HTTPException(404, "clone not found")
-    try:
-        ElevenLabsProvider().delete_cloned_voice(row.elevenlabs_voice_id)
-    except ProviderError as exc:
-        raise HTTPException(400, f"elevenlabs delete failed: {exc}") from None
+    if (row.engine or "elevenlabs") == "xtts":
+        if row.ref_audio:
+            try:
+                (settings.media_dir / row.ref_audio).unlink(missing_ok=True)
+            except OSError:
+                pass
+    else:
+        try:
+            ElevenLabsProvider().delete_cloned_voice(row.elevenlabs_voice_id)
+        except ProviderError as exc:
+            raise HTTPException(400, f"elevenlabs delete failed: {exc}") from None
     session.delete(row)
     session.commit()
 

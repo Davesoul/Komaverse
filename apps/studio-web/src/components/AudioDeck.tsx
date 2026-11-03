@@ -69,7 +69,56 @@ export function AudioDeck({
   const [clones, setClones] = useState<ClonedVoice[]>([]);
   const [cloneName, setCloneName] = useState("");
   const [cloneBusy, setCloneBusy] = useState(false);
+  const [cloneEngine, setCloneEngine] = useState<"xtts" | "elevenlabs">("xtts");
+  const [cloneTake, setCloneTake] = useState("");
+  const [cloneFiles, setCloneFiles] = useState<File[]>([]);
   const cloneFileRef = useRef<HTMLInputElement>(null);
+
+  const doClone = async () => {
+    const staged: File[] = [...cloneFiles];
+    if (cloneTake) {
+      const take = takes.find((t) => t.id === cloneTake);
+      if (!take) {
+        notify("That take is gone — pick another sample.");
+        return;
+      }
+      try {
+        const res = await fetch(mediaUrl(take.url), { credentials: "include" });
+        if (!res.ok) throw new Error(`take fetch ${res.status}`);
+        const blob = await res.blob();
+        const ext = (take.name.split(".").pop() || "wav").slice(0, 8);
+        staged.unshift(new File([blob], `${take.name}.${ext}`, { type: blob.type || "audio/wav" }));
+      } catch (e) {
+        notify(`Couldn't read that take: ${(e as Error).message}`);
+        return;
+      }
+    }
+    if (cloneEngine === "xtts" && staged.length !== 1) {
+      notify("Local clone needs exactly 1 sample — pick one take or upload one file.");
+      return;
+    }
+    if (staged.length === 0 || staged.length > 5) {
+      notify("Pick 1–5 samples first (a take and/or uploaded files).");
+      return;
+    }
+    setCloneBusy(true);
+    try {
+      const v = await api.cloneVoice(cloneName.trim(), staged.slice(0, 5), cloneEngine);
+      setClones((cs) => [v, ...cs]);
+      setCloneName("");
+      setCloneTake("");
+      setCloneFiles([]);
+      notify(
+        `Voice "${v.name}" cloned — pick it in the Brain voice row (${
+          cloneEngine === "xtts" ? "free-tts" : "elevenlabs"
+        }).`,
+      );
+    } catch (err) {
+      notify(`Couldn't clone the voice: ${(err as Error).message}`);
+    } finally {
+      setCloneBusy(false);
+    }
+  };
   useEffect(() => {
     api.listClonedVoices().then(setClones).catch(() => setClones([]));
   }, []);
@@ -412,24 +461,37 @@ export function AudioDeck({
       </div>
 
       <div style={{ marginBottom: 8, border: "1px solid var(--kv-border)", borderRadius: 6, padding: 8 }}>
+        <div style={{ display: "flex", gap: 6, marginBottom: 6 }}>
+          <Btn small active={cloneEngine === "xtts"} onClick={() => setCloneEngine("xtts")} title="Free local voice clone (XTTS v2) — appears under free-tts in AI settings">
+            Local (free)
+          </Btn>
+          <Btn small active={cloneEngine === "elevenlabs"} onClick={() => setCloneEngine("elevenlabs")} title="ElevenLabs instant clone (needs API key) — appears under elevenlabs in AI settings">
+            ElevenLabs
+          </Btn>
+        </div>
         <div style={{ fontSize: 12, color: "var(--kv-muted)", marginBottom: 6 }}>
-          Clone a voice — 1–5 clear speech samples (ElevenLabs instant
-          clone). Clones appear in the Brain voice picker under elevenlabs.
+          {cloneEngine === "xtts" ? (
+            <>Clone a voice locally (XTTS v2) from one clear sample — a recording or an uploaded voice. Free, no key; needs <span className="kv-nums">pip install coqui-tts</span> once. The clone appears in AI settings under free-tts as “name · cloned”.</>
+          ) : (
+            <>Clone a voice — 1–5 clear speech samples (ElevenLabs instant clone). Clones appear in the Brain voice picker under elevenlabs.</>
+          )}
         </div>
         {clones.length > 0 && (
           <div style={{ display: "flex", flexDirection: "column", gap: 4, marginBottom: 6 }}>
-            {clones.map((c) => (
+            {clones.map((c) => {
+              const local = (c.engine || "elevenlabs") === "xtts";
+              return (
               <div key={c.id} style={{ display: "flex", gap: 6, alignItems: "center", fontSize: 13 }}>
                 <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis" }}>
                   {c.name}{" "}
                   <span className="kv-nums" style={{ color: "var(--kv-muted)" }}>
-                    · {c.sample_count} sample{c.sample_count === 1 ? "" : "s"}
+                    · {local ? "local" : "elevenlabs"} · {c.sample_count} sample{c.sample_count === 1 ? "" : "s"}
                   </span>
                 </span>
                 <IconBtn
                   danger
                   onClick={() => {
-                    if (!window.confirm(`Delete the "${c.name}" clone? It leaves ElevenLabs and the picker. This can't be undone.`)) return;
+                    if (!window.confirm(`Delete the "${c.name}" clone? It leaves ${local ? "the saved reference and" : "ElevenLabs and"} the picker. This can't be undone.`)) return;
                     void api.deleteClonedVoice(c.id)
                       .then(() => setClones((cs) => cs.filter((x) => x.id !== c.id)))
                       .catch((e) => notify(`Couldn't delete the clone: ${(e as Error).message}`));
@@ -439,10 +501,11 @@ export function AudioDeck({
                   ×
                 </IconBtn>
               </div>
-            ))}
+              );
+            })}
           </div>
         )}
-        <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+        <div style={{ display: "flex", gap: 6, alignItems: "center", marginBottom: 6 }}>
           <TextInput
             value={cloneName}
             onChange={(e) => setCloneName(e.target.value)}
@@ -450,41 +513,62 @@ export function AudioDeck({
             aria-label="Clone name"
             style={{ flex: 1, minWidth: 0 }}
           />
-          <Btn small disabled={cloneBusy || !cloneName.trim()} onClick={() => cloneFileRef.current?.click()}>
+        </div>
+        <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
+          <SelectInput
+            value={cloneTake}
+            onChange={(e) => setCloneTake(e.target.value)}
+            aria-label="Clone from a recorded take"
+            title="Use a recorded take as the clone sample"
+            style={{ flex: 1, minWidth: 140 }}
+          >
+            <option value="">Use a recorded take…</option>
+            {takes.map((t) => (
+              <option key={t.id} value={t.id}>
+                {t.name}
+              </option>
+            ))}
+          </SelectInput>
+          <Btn small onClick={() => cloneFileRef.current?.click()} title="Upload voice sample file(s)">
+            Upload…
+          </Btn>
+          <Btn
+            small
+            disabled={cloneBusy || !cloneName.trim()}
+            onClick={() => void doClone()}
+            title={cloneEngine === "xtts" ? "Clone from the chosen take or single uploaded file" : "Clone from the chosen take and/or up to 5 uploaded files"}
+          >
             {cloneBusy ? (
               <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
                 <BusyDots size={5} />
                 Cloning…
               </span>
             ) : (
-              "Samples…"
+              "Clone"
             )}
           </Btn>
         </div>
+        {cloneFiles.length > 0 && (
+          <div style={{ fontSize: 12, color: "var(--kv-muted)", marginTop: 4 }}>
+            Staged: {cloneFiles.map((f) => f.name).join(", ")}{" "}
+            <button type="button" onClick={() => setCloneFiles([])} style={{ textDecoration: "underline", background: "none", border: "none", color: "inherit", cursor: "pointer", padding: 0 }}>
+              clear
+            </button>
+          </div>
+        )}
         <input
           ref={cloneFileRef}
           type="file"
           accept="audio/*"
-          multiple
+          multiple={cloneEngine !== "xtts"}
           style={{ display: "none" }}
           aria-label="Clone voice samples"
           onChange={(e) => {
-            const files = [...(e.target.files ?? [])];
+            const picked = [...(e.target.files ?? [])];
             e.target.value = "";
-            if (files.length === 0) return;
-            void (async () => {
-              setCloneBusy(true);
-              try {
-                const v = await api.cloneVoice(cloneName.trim(), files);
-                setClones((cs) => [v, ...cs]);
-                setCloneName("");
-                notify(`Voice "${v.name}" cloned — pick it in the Brain voice row (elevenlabs).`);
-              } catch (err) {
-                notify(`Couldn't clone the voice: ${(err as Error).message}`);
-              } finally {
-                setCloneBusy(false);
-              }
-            })();
+            if (picked.length === 0) return;
+            setCloneTake("");
+            setCloneFiles(cloneEngine === "xtts" ? picked.slice(0, 1) : picked.slice(0, 5));
           }}
         />
       </div>

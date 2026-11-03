@@ -319,6 +319,20 @@ def synthesize_take(
         if provider == "elevenlabs":
             data = ElevenLabsProvider().synthesize(text, voice=body.voice)
             model = settings.elevenlabs_tts_model
+        elif provider == "free-tts" and (body.voice or "").strip().startswith("xtts:"):
+            from komaverse.ai.voice_local import synthesize_xtts
+            from komaverse.db_models import ClonedVoiceRow
+
+            clone_id = body.voice.strip()[len("xtts:") :]
+            row = session.get(ClonedVoiceRow, clone_id)
+            if row is None or row.user_id != user.id or row.engine != "xtts" or not row.ref_audio:
+                raise HTTPException(404, "cloned voice not found")
+            data = synthesize_xtts(
+                text,
+                settings.media_dir / row.ref_audio,
+                body.lang,
+            )
+            model = "xtts"
         elif provider == "free-tts":
             data = synthesize_local(
                 text,

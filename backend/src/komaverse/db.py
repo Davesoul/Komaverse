@@ -103,6 +103,8 @@ def init_db() -> None:
         "ALTER TABLE subtitle_tracks ADD COLUMN lane INTEGER",
         "ALTER TABLE pages ADD COLUMN name VARCHAR(200)",
         "ALTER TABLE panels ADD COLUMN name VARCHAR(200)",
+        "ALTER TABLE cloned_voices ADD COLUMN engine VARCHAR(32)",
+        "ALTER TABLE cloned_voices ADD COLUMN ref_audio VARCHAR(500)",
     ):
         try:
             with engine.begin() as conn:

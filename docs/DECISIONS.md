@@ -988,6 +988,36 @@ color-theory (cel shadow colors, light logic), manga-literacy
   clean, build green. NOTE: the dev backend on :8001 must be
   restarted to serve the new route (no --reload there).
 
+## ADR-39: Local XTTS voice cloning, free-tts style (accepted)
+
+- New clone engine "xtts" beside ElevenLabs: one clear sample -
+  an uploaded file or any recorded take - is normalized to a
+  22kHz mono WAV (bundled ffmpeg, same recipe as free-tts) and
+  saved under the media dir; synthesis runs XTTS v2 fully local
+  (`tts_to_file` with the saved reference, MP3 out). Mechanics
+  mirror free-tts (lazy import, cached model, one synthesis at a
+  time); only the dependency differs (`pip install coqui-tts`,
+  ~2GB model on first use, loud error otherwise).
+- Created voices show up where they should: xtts clones list
+  under free-tts in AI settings as "name - cloned" (voice id
+  `xtts:<clone-id>`), ElevenLabs clones stay under elevenlabs.
+  Render "Generate" dispatches `xtts:` voices to the local
+  runner; unknown/other-user ids are 404. Deletes remove the
+  row plus the saved reference (cloud path unchanged).
+- Render voice box: Local (free) / ElevenLabs toggle, name,
+  take picker and/or upload staging (take audio is fetched and
+  sent as the sample file), per-engine clone list with local /
+  elevenlabs badges and matching delete confirms.
+- Live: 6 new tests (clone save + 22kHz ref, validation, loud
+  missing-package error, synth via mocked TTS, catalog entry,
+  delete removes ref) plus a scratch-server E2E (clone 201,
+  catalog entry, synth 400 naming coqui-tts on a bare env, bad
+  id 404, delete 204, cascade clean); full backend 439 green,
+  `tsc` clean, build green. NOTE: install coqui-tts into the
+  backend venv for real synthesis, and restart the :8001 dev
+  backend to serve the new field.
+
+
 ## ADR-38: Media copy-refs, Scan comboboxes, drop-to-swap panels (accepted)
 
 - Every media card now has a copy-reference button (pages,

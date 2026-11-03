@@ -239,6 +239,7 @@ export interface ClonedVoice {
   id: string;
   name: string;
   voice_id: string;
+  engine: "elevenlabs" | "xtts";
   sample_count: number;
   created_at: string | null;
 }
@@ -788,9 +789,10 @@ export const api = {
     req<void>(`/api/v1/scenes/${sceneId}/subtitles?lane=${lane}`, { method: "DELETE" }),
   listClonedVoices: () =>
     req<ClonedVoice[]>(`/api/v1/ai/voices/clones`),
-  cloneVoice: (name: string, files: File[]) => {
+  cloneVoice: (name: string, files: File[], engine: "elevenlabs" | "xtts" = "elevenlabs") => {
     const form = new FormData();
     form.append("name", name);
+    form.append("engine", engine);
     for (const f of files) form.append("files", f, f.name);
     return req<ClonedVoice>(`/api/v1/ai/voices/clone`, {
       method: "POST",

@@ -507,7 +507,12 @@ class JobRow(Base):
 
 
 class ClonedVoiceRow(Base):
-    """ElevenLabs Instant Voice Clone: name + voice_id per user."""
+    """A voice clone owned by one user.
+
+    engine "elevenlabs": cloud Instant Voice Clone (voice_id set).
+    engine "xtts": local XTTS v2 clone (ref_audio points at the saved
+    22kHz reference WAV under the media dir).
+    """
 
     __tablename__ = "cloned_voices"
 
@@ -515,6 +520,8 @@ class ClonedVoiceRow(Base):
     user_id: Mapped[str] = mapped_column(String(64), index=True, default="local")
     name: Mapped[str] = mapped_column(String(80), default="")
     elevenlabs_voice_id: Mapped[str] = mapped_column(String(64), default="")
+    engine: Mapped[str] = mapped_column(String(32), default="elevenlabs")
+    ref_audio: Mapped[str] = mapped_column(String(500), default="")
     sample_count: Mapped[int] = mapped_column(default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
 
@@ -523,6 +530,7 @@ class ClonedVoiceRow(Base):
             id=self.id,
             name=self.name,
             voice_id=self.elevenlabs_voice_id,
+            engine=self.engine or "elevenlabs",
             sample_count=self.sample_count,
             created_at=self.created_at.isoformat() if self.created_at else None,
         )
