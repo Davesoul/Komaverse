@@ -52,6 +52,8 @@ export interface Clip {
   fade_in: number;
   fade_out: number;
   order: number;
+  /** 0 = V1 sequential base; >=1 = fullscreen overlay placed at start. */
+  lane: number;
   /** Text title cards (kind "text" only). */
   text: string;
   text_size: number;
@@ -168,6 +170,8 @@ export interface SubtitleTrack {
   id: string;
   scene_id: string;
   lang: string;
+  /** 0 = S1 bottom captions; 1 = S2 top captions. */
+  lane: number;
   segments: SubtitleSegment[];
 }
 
@@ -509,6 +513,8 @@ export const api = {
       transition_duration?: number;
       fade_in?: number;
       fade_out?: number;
+      lane?: number;
+      start_sec?: number;
       filter?: string;
       text?: string;
       text_size?: number;
@@ -641,6 +647,8 @@ export const api = {
       transition_duration?: number;
       fade_in?: number;
       fade_out?: number;
+      lane?: number;
+      start_sec?: number;
       filter?: string;
       text?: string;
       text_size?: number;
@@ -746,18 +754,18 @@ export const api = {
     }),
   deleteCue: (cueId: string) =>
     req<void>(`/api/v1/cues/${cueId}`, { method: "DELETE" }),
-  uploadSubtitles: (sceneId: string, file: File) => {
+  uploadSubtitles: (sceneId: string, file: File, lane: number = 0) => {
     const form = new FormData();
     form.append("file", file, file.name);
-    return req<SubtitleTrack>(`/api/v1/scenes/${sceneId}/subtitles`, {
+    return req<SubtitleTrack>(`/api/v1/scenes/${sceneId}/subtitles?lane=${lane}`, {
       method: "POST",
       body: form,
     });
   },
-  getSubtitles: (sceneId: string) =>
-    req<SubtitleTrack | null>(`/api/v1/scenes/${sceneId}/subtitles`),
-  deleteSubtitles: (sceneId: string) =>
-    req<void>(`/api/v1/scenes/${sceneId}/subtitles`, { method: "DELETE" }),
+  getSubtitles: (sceneId: string, lane: number = 0) =>
+    req<SubtitleTrack | null>(`/api/v1/scenes/${sceneId}/subtitles?lane=${lane}`),
+  deleteSubtitles: (sceneId: string, lane: number = 0) =>
+    req<void>(`/api/v1/scenes/${sceneId}/subtitles?lane=${lane}`, { method: "DELETE" }),
 
   generate: (body: {
     kind: string;

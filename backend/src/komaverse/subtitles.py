@@ -1,8 +1,8 @@
 """SRT subtitle tracks: strict-ish parse, WebVTT sidecar for the player.
 
-One track per scene. The MP4 render burns subtitles with ffmpeg's libass
-filter when it works; the VTT sidecar always ships so the in-app export
-player shows captions regardless.
+Up to two tracks per scene (S1 bottom, S2 top). The MP4 render burns
+subtitles with ffmpeg's libass filter when it works; the VTT sidecar
+always ships so the in-app export player shows captions regardless.
 """
 
 from __future__ import annotations
@@ -103,3 +103,42 @@ def segments_to_vtt(segments: list[SubSegment]) -> str:
         out.append(seg.text)
         out.append("")
     return "\n".join(out)
+
+
+def _fmt_ass_ts(t: float) -> str:
+    ms = max(0, int(round(t * 1000)))
+    h, ms = divmod(ms, 3600000)
+    mi, ms = divmod(ms, 60000)
+    s, ms = divmod(ms, 1000)
+    return f"{h}:{mi:02d}:{s:02d}.{ms // 10:02d}"
+
+
+def _ass_escape(text: str) -> str:
+    return text.replace("\\", "\\\\").replace("{", "\\{").replace("}", "\\}").replace("\n", "\\N")
+
+
+def segments_to_ass(items: list[tuple[int, SubSegment]]) -> str:
+    """Two-style ASS for dual-lane burn-in: lane 0 bottom-center (S1),
+    lane >= 1 top-center (S2). Single-style SRT cannot place tracks, so
+    any multi-lane export goes through here."""
+    lines = [
+        "[Script Info]",
+        "ScriptType: v4.00+",
+        "PlayResX: 1280",
+        "PlayResY: 720",
+        "",
+        "[V4+ Styles]",
+        "Format: Name, Fontname, Fontsize, PrimaryColour, OutlineColour, "
+        "BackColour, Bold, Italic, Alignment, MarginL, MarginR, MarginV, Encoding",
+        "Style: S1,Arial,56,&H00FFFFFF,&H00000000,&H80000000,1,0,2,20,20,36,1",
+        "Style: S2,Arial,44,&H00FFFFFF,&H00000000,&H80000000,1,0,8,20,20,36,1",
+        "",
+        "[Events]",
+        "Format: Layer, Start, End, Style, Text",
+    ]
+    for lane, seg in sorted(items, key=lambda it: it[1].start):
+        style = "S1" if lane <= 0 else "S2"
+        lines.append(
+            f"Dialogue: 0,{_fmt_ass_ts(seg.start)},{_fmt_ass_ts(seg.end)},{style},{_ass_escape(seg.text)}"
+        )
+    return "\n".join(lines) + "\n"

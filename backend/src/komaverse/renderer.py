@@ -571,7 +571,12 @@ def render_project(
     offset = 0.0
     for scene in scenes:
         scene_starts[scene.id] = offset
-        ordered = sorted(scene.clips, key=lambda c: c.order)
+        # Overlay lanes never join the sequential base: V1 alone sets the
+        # timeline length; overlays place at absolute scene time.
+        ordered = sorted(
+            (c for c in scene.clips if (c.lane or 0) == 0),
+            key=lambda c: c.order,
+        )
         clips.extend(ordered)
         offset += sum(c.duration for c in ordered)
     total = offset
@@ -620,6 +625,43 @@ def render_project(
     total_frames = sum(n for _, _, n in planned) - sum(overlap)
     video_dur = total_frames / fps
 
+    # Overlay lanes V2+: fullscreen cutaways at absolute scene time.
+    # They never stretch the base timeline; they clamp to the export end.
+    overlays: list[dict] = []
+    for scene in scenes:
+        base = scene_starts[scene.id]
+        for clip in sorted(scene.clips, key=lambda c: ((c.lane or 0), c.order)):
+            lane = clip.lane or 0
+            if lane == 0:
+                continue
+            gstart = base + max(clip.start or 0.0, 0.0)
+            if gstart >= video_dur:
+                warnings.append(
+                    f"overlay {clip.id} starts past the export end: skipped"
+                )
+                continue
+            gend = min(gstart + max(clip.duration, 0.1), video_dur)
+            if clip.kind == "video":
+                vid = resolve_clip_video(clip, session)
+                if vid is None:
+                    warnings.append(
+                        f"overlay {clip.id} (video): unresolvable source"
+                    )
+                    continue
+                src = ("video", *vid)
+            else:
+                src = resolve_clip_image(clip, session)
+                if src is None or src.size == 0:
+                    warnings.append(
+                        f"overlay {clip.id} ({clip.kind}): unresolvable source"
+                    )
+                    continue
+            overlays.append(
+                {"clip": clip, "src": src, "start": gstart, "end": gend,
+                 "lane": lane}
+            )
+    overlays.sort(key=lambda o: (o["lane"], o["start"]))
+
     # Timeline audio, verified before the mux stage runs.
     tracks: list[dict] = []
     if include_audio:
@@ -655,6 +697,29 @@ def render_project(
                         "end_sec": max(end - max(cue.fade_out, 0), 0),
                     }
                 )
+        # Overlay video audio rides the same mix at absolute time.
+        for ov in overlays:
+            oclip = ov["clip"]
+            if not isinstance(ov["src"], tuple):
+                continue
+            _, ovpath, ovdur = ov["src"]
+            ocdur = ov["end"] - ov["start"]
+            if ocdur <= 0 or not audio_has_stream(ovpath):
+                continue
+            ofade_out = max(oclip.fade_out or 0.0, 0.0)
+            tracks.append(
+                {
+                    "path": ovpath,
+                    "start_sec": ov["start"],
+                    "offset_sec": 0.0,
+                    "volume": 1.0,
+                    "fade_in": max(oclip.fade_in or 0.0, 0.0),
+                    "fade_out": ofade_out,
+                    "end_sec": max(ov["start"] + ocdur - ofade_out, ov["start"] + 0.1),
+                    "loop_sec": ovdur if ocdur > ovdur else None,
+                    "trim_dur": ocdur,
+                }
+            )
         cue_count = len(tracks)
         # Native audio of video clips: frames are re-rendered from pixels,
         # so without this the export goes silent wherever a video plays.
@@ -692,34 +757,34 @@ def render_project(
     from komaverse.subtitles import (  # noqa: PLC0415 — heavy sibling, render only
         SubSegment,
         parse_srt,
+        segments_to_ass,
         segments_to_srt,
         segments_to_vtt,
     )
 
-    merged_subs: list[SubSegment] = []
+    merged_subs: list[tuple[int, SubSegment]] = []
     for scene in scenes:
-        track = scene.subtitle_track
-        if track is None:
-            continue
-        try:
-            srt_path = storage.resolve(track.file_path)
-            parsed = parse_srt(srt_path.read_text(encoding="utf-8-sig"))
-        except (OSError, ValueError) as exc:
-            warnings.append(f"subtitles on '{scene.name}' skipped ({exc})")
-            continue
         base = scene_starts[scene.id]
-        merged_subs.extend(
-            SubSegment(start=s.start + base, end=s.end + base, text=s.text)
-            for s in parsed
-        )
-    merged_subs.sort(key=lambda s: s.start)
+        for track in getattr(scene, "subtitle_tracks", None) or []:
+            try:
+                srt_path = storage.resolve(track.file_path)
+                parsed = parse_srt(srt_path.read_text(encoding="utf-8-sig"))
+            except (OSError, ValueError) as exc:
+                warnings.append(f"subtitles on '{scene.name}' skipped ({exc})")
+                continue
+            lane = track.lane if track.lane is not None else 0
+            merged_subs.extend(
+                (lane, SubSegment(start=s.start + base, end=s.end + base, text=s.text))
+                for s in parsed
+            )
+    merged_subs.sort(key=lambda it: it[1].start)
 
     vtt_url: str | None = None
     if merged_subs:
         vtt_rel = Path("exports") / project_id / f"{uuid_short()}.vtt"
         vtt_dest = settings.media_dir / vtt_rel
         vtt_dest.parent.mkdir(parents=True, exist_ok=True)
-        vtt_dest.write_text(segments_to_vtt(merged_subs), encoding="utf-8")
+        vtt_dest.write_text(segments_to_vtt([s for _, s in merged_subs]), encoding="utf-8")
         vtt_url = f"/media/{vtt_rel.as_posix()}"
 
     export_id = uuid_short()
@@ -743,8 +808,46 @@ def render_project(
         writer.send(None)
         done = 0
 
+        overlay_caps: dict[int, object] = {}
+        overlay_last: dict[int, np.ndarray] = {}
+        for _oi, _ov in enumerate(overlays):
+            if isinstance(_ov["src"], tuple):
+                _, _vpath, _vdur = _ov["src"]
+                overlay_caps[_oi] = cv2.VideoCapture(str(_vpath))
         def emit(frame: np.ndarray) -> None:
             nonlocal done
+            t = done / fps
+            for _oi, _ov in enumerate(overlays):
+                if not (_ov["start"] <= t < _ov["end"]):
+                    continue
+                _clip = _ov["clip"]
+                _n = max(int(round((_ov["end"] - _ov["start"]) * fps)), 1)
+                _i = min(max(int((t - _ov["start"]) * fps), 0), _n - 1)
+                _src = _ov["src"]
+                if isinstance(_src, tuple):
+                    _, _vpath, _vdur = _src
+                    _got = None
+                    _cap = overlay_caps.get(_oi)
+                    if _cap is not None:
+                        _t_src = (t - _ov["start"]) % _vdur if _vdur > 0 else 0.0
+                        _cap.set(cv2.CAP_PROP_POS_MSEC, _t_src * 1000)
+                        _ok, _read = _cap.read()
+                        if _ok and _read is not None:
+                            _got = _read
+                            overlay_last[_oi] = _read
+                    if _got is None:
+                        _got = overlay_last.get(_oi)
+                    if _got is None:
+                        _got = np.full((h, w, 3), PAPER_RGB[::-1], dtype=np.uint8)
+                    frame = apply_filter(
+                        finish_frame(
+                            _got, _clip.motion, _i, _n, w, h, fps,
+                            _clip.fade_in or 0.0, _clip.fade_out or 0.0,
+                        ),
+                        _clip.clip_filter or "none",
+                    )
+                else:
+                    frame = still_frame(_clip, _src, _i, _n)
             writer.send(frame)
             done += 1
             if on_progress is not None:
@@ -838,20 +941,33 @@ def render_project(
                 for i in range(k_in, n - k_out):
                     emit(still_frame(clip, src, i, n))
         finally:
+            for _cap in overlay_caps.values():
+                try:
+                    _cap.release()
+                except Exception:
+                    pass
             writer.close()
 
     burned_subs = False
     if merged_subs:
-        merged_srt = dest.with_name(f"{dest.stem}_subs.srt")
-        merged_srt.write_text(segments_to_srt(merged_subs), encoding="utf-8")
-        escaped = merged_srt.as_posix().replace("\\", "/").replace(":", "\\:")
+        multi_lane = len({lane for lane, _ in merged_subs}) > 1
+        subs_suffix = "_subs.ass" if multi_lane else "_subs.srt"
+        merged_subs_file = dest.with_name(f"{dest.stem}{subs_suffix}")
+        if multi_lane:
+            # SRT has no per-track placement: S1 bottom, S2 top via ASS.
+            merged_subs_file.write_text(segments_to_ass(merged_subs), encoding="utf-8")
+        else:
+            merged_subs_file.write_text(
+                segments_to_srt([s for _, s in merged_subs]), encoding="utf-8"
+            )
+        escaped = merged_subs_file.as_posix().replace("\\", "/").replace(":", "\\:")
         try:
             render_video(["-vf", f"subtitles='{escaped}'"])
             burned_subs = True
         except Exception as exc:
             warnings.append(f"subtitle burn-in failed ({exc}); VTT sidecar still ships")
         finally:
-            merged_srt.unlink(missing_ok=True)
+            merged_subs_file.unlink(missing_ok=True)
     if not burned_subs:
         render_video([])
 

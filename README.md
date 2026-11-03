@@ -36,9 +36,14 @@ started Oct 28, 2026.
   into the export with `atempo`), and lane (A1–A8). The ＋ Lane menu adds
   audio lanes (video overlap and extra subtitle lanes stay disabled until
   the renderer grows a compositor and multi-track subs),
-  per-clip inspector (duration steppers, motion), scenes + clips timeline
-  (panels, frames, stills) with audio waveforms on cues and Ctrl+wheel
-  zoom + fit-to-width, sidebar grouped by sequence with search,
+  per-clip inspector (duration steppers, motion, lane V1–V4 + overlay
+  start), scenes + clips timeline (panels, frames, stills) with audio
+  waveforms on cues and Ctrl+wheel zoom + fit-to-width, V2–V4 overlay
+  lanes for fullscreen image/video cutaways (drag to move, right-edge
+  resize, composited into the export with native video audio, stacked
+  in the preview), S1 bottom + S2 top subtitle lanes (each replaces
+  only itself, both burn into the MP4), sidebar grouped by sequence
+  with search,
   clips open back in Draw (frames directly, stills place, video
   explodes), Ken Burns motion (drift added), transitions (wipe-right,
   push-left, fade-white added), per-clip color grades (grayscale/sepia/

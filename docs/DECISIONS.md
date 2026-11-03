@@ -762,3 +762,38 @@ color-theory (cel shadow colors, light logic), manga-literacy
   UTF-8 tooling).
 - Live: `npx tsc --noEmit` clean, `npm run build` green, full backend
   413 green.
+
+
+## ADR-29: Overlay video lanes and second subtitle lane (accepted)
+
+- Clips carry `lane` (0 = V1 sequential base; 1–3 = fullscreen overlay
+  V{lane+1} placed at the clip's absolute `start` in scene seconds).
+  New `clips.lane` column (+ ALTER backfill, NULL reads as 0);
+  `ClipCreate`/`ClipPatch` validate 0–3, moving to V1 clears `start`,
+  moving out seeds it from the clip's sequential position. Undo/redo
+  reconciles `lane` + `start`; scene duplicate copies both.
+- The export excludes overlays from the base layout (the timeline
+  length never stretches) and composites them per emitted frame —
+  stills via the same motion/filter/fade path, videos via a
+  persistent capture with last-frame fallback — clamped to the export
+  end with a warning when fully past it. Video overlays join the
+  audio mix at absolute time with loop/trim like base clips. Rate-1
+  projects render exactly as before (no overlays = no extra work).
+- Subtitle tracks carry `lane` (0 = S1 bottom, 1 = S2 top), one track
+  per (scene, lane): old `UNIQUE(scene_id)` DBs rebuild once to the
+  pair constraint (rows keep lane 0); upload/get/delete take an
+  optional lane (default 0, so old calls are untouched); scene
+  duplicate copies every lane. Single-lane exports burn the same SRT
+  path as before; multi-lane exports burn generated ASS (S1 bottom,
+  S2 top) while the VTT sidecar always merges both lanes.
+- Frontend: V2–V4 lane rows (clips or ＋ Lane menu), overlay blocks
+  with drag-to-move (one PATCH on release), right-edge resize, and
+  click-to-edit; inspector Lane + Start; preview stacks overlays
+  (video overlays play audible, like base clips). S1/S2 rows, top +
+  bottom preview captions, per-lane upload picker and per-lane
+  confirm-gated remove. The lane menu's Subtitles entry opens the
+  uploader for the next free lane.
+- Live: 6 new tests (clip lane validation, still overlay duration,
+  video overlay audio, subtitle lane CRUD, ASS placement, dual-lane
+  export burn) — full backend 419 green, `npx tsc --noEmit` clean,
+  `npm run build` green.

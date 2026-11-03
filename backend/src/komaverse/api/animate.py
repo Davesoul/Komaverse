@@ -186,10 +186,15 @@ class ScenePatch(BaseModel):
     order: int | None = None
 
 
+MAX_CLIP_LANE = 3  # V1 base + V2..V4 fullscreen overlays
+
+
 class ClipCreate(BaseModel):
     kind: str = "panel"
     source_id: str = ""
     duration: float = 2.0
+    lane: int = 0  # 0 = V1 sequential; >=1 = overlay placed at start_sec
+    start_sec: float = 0.0  # overlay placement (scene seconds; ignored on V1)
     motion: str = "none"
     transition: str = "none"  # into this clip from the previous one
     transition_duration: float = 0.5
@@ -217,6 +222,7 @@ class FrameOrder(BaseModel):
 
 class ClipPatch(BaseModel):
     duration: float | None = None
+    lane: int | None = None
     motion: str | None = None
     transition: str | None = None
     transition_duration: float | None = None
@@ -386,6 +392,7 @@ def duplicate_scene(
                 duration=clip.duration,
                 motion=clip.motion,
                 order=clip.order,
+                lane=clip.lane or 0,
             )
         )
     for cue in row.cues:
@@ -403,15 +410,20 @@ def duplicate_scene(
             )
         )
     session.flush()
-    old_track = session.execute(
+    old_tracks = session.execute(
         select(SubtitleTrackRow).where(SubtitleTrackRow.scene_id == row.id)
-    ).scalars().first()
-    if old_track is not None:
+    ).scalars().all()
+    for old_track in old_tracks:
         try:
             data = storage.resolve(old_track.file_path).read_bytes()
             rel, _url = storage.save_upload(project.id, "subtitles.srt", data)
             session.add(
-                SubtitleTrackRow(scene_id=copy.id, lang=old_track.lang, file_path=rel)
+                SubtitleTrackRow(
+                    scene_id=copy.id,
+                    lang=old_track.lang,
+                    lane=old_track.lane or 0,
+                    file_path=rel,
+                )
             )
         except OSError:
             logger.warning("subtitle copy failed for scene %s", row.id)
@@ -695,6 +707,10 @@ def add_clip(
     scene = _get_scene(session, user, scene_id)
     if body.kind not in CLIP_KINDS:
         raise HTTPException(400, f"unknown clip kind: {body.kind}")
+    if not 0 <= body.lane <= MAX_CLIP_LANE:
+        raise HTTPException(400, f"lane must be 0..{MAX_CLIP_LANE}, got {body.lane}")
+    if body.start_sec < 0:
+        raise HTTPException(400, f"start_sec out of range: {body.start_sec}")
     _, tdur, fi, fo = _check_fx(body.motion, body.transition, body.transition_duration, body.fade_in, body.fade_out)
     if body.kind == "ai":
         raise HTTPException(400, "ai clips land in M4")
@@ -710,6 +726,7 @@ def add_clip(
         scene_id=scene.id,
         kind=body.kind,
         source_id=body.source_id,
+        start=max(body.start_sec, 0.0) if body.lane > 0 else 0.0,
         duration=max(body.duration, 0.1),
         motion=body.motion,
         transition=body.transition,
@@ -717,6 +734,7 @@ def add_clip(
         fade_in=fi,
         fade_out=fo,
         order=len(existing.scalars().all()),
+        lane=body.lane,
         **extra,
     )
     session.add(row)
@@ -739,6 +757,10 @@ def add_clips_batch(
     for entry in body.clips:
         if entry.kind not in CLIP_KINDS:
             raise HTTPException(400, f"unknown clip kind: {entry.kind}")
+        if not 0 <= entry.lane <= MAX_CLIP_LANE:
+            raise HTTPException(400, f"lane must be 0..{MAX_CLIP_LANE}, got {entry.lane}")
+        if entry.start_sec < 0:
+            raise HTTPException(400, f"start_sec out of range: {entry.start_sec}")
         _check_fx(entry.motion, entry.transition, entry.transition_duration, entry.fade_in, entry.fade_out)
         if entry.kind == "ai":
             raise HTTPException(400, "ai clips land in M4")
@@ -762,6 +784,7 @@ def add_clips_batch(
             scene_id=scene.id,
             kind=entry.kind,
             source_id=entry.source_id,
+            start=max(entry.start_sec, 0.0) if entry.lane > 0 else 0.0,
             duration=max(entry.duration, 0.1),
             motion=entry.motion,
             transition=entry.transition,
@@ -769,6 +792,7 @@ def add_clips_batch(
             fade_in=fi,
             fade_out=fo,
             order=order,
+            lane=entry.lane,
             **extra,
         )
         order += 1
@@ -828,8 +852,14 @@ def patch_clip(
         row.fade_out = min(max(body.fade_out, 0.0), 10.0)
     if body.order is not None:
         row.order = body.order
+    if body.lane is not None:
+        if not 0 <= body.lane <= MAX_CLIP_LANE:
+            raise HTTPException(400, f"lane must be 0..{MAX_CLIP_LANE}, got {body.lane}")
+        row.lane = body.lane
+        if body.lane == 0:
+            row.start = 0.0
     if body.start is not None:
-        row.start = body.start
+        row.start = max(body.start, 0.0)
     if body.filter is not None:
         row.clip_filter = _check_filter(body.filter or "none")
     text_touched = any(

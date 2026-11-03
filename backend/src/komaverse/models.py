@@ -96,6 +96,7 @@ class Clip(BaseModel):
     fade_in: float = 0.0
     fade_out: float = 0.0
     order: int = 0
+    lane: int = 0  # 0 = V1 sequential base; >=1 = fullscreen overlay V{lane+1} placed at start
     # Text title cards (kind == "text" only): full-frame card rendered by
     # the backend, CapCut-style.
     text: str = ""
@@ -150,6 +151,7 @@ class SubtitleTrack(BaseModel):
     id: str = Field(default_factory=uuid_short)
     scene_id: str
     lang: str = "en"
+    lane: int = 0  # 0 = S1 bottom captions; 1 = S2 top captions
     segments: list[SubtitleSegment] = Field(default_factory=list)
 
 

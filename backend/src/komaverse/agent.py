@@ -1395,6 +1395,8 @@ def tool_add_clip(
     transition_duration=None,
     fade_in=None,
     fade_out=None,
+    lane=0,
+    start_sec=0.0,
 ) -> str:
     # Fresh reads: this session may have cached relations from an
     # earlier tool call in the same turn.
@@ -1420,9 +1422,17 @@ def tool_add_clip(
     except (TypeError, ValueError):
         duration = 2.0
     target = _resolve_scene(session, user, project_id, scene)
+    try:
+        lane_i = min(max(int(lane), 0), 3)
+    except (TypeError, ValueError):
+        lane_i = 0
+    try:
+        start_f = max(float(start_sec), 0.0)
+    except (TypeError, ValueError):
+        start_f = 0.0
     clip = add_clip(
         target.id,
-        ClipCreate(kind=kind, source_id=source_id, duration=duration, motion=motion, transition=transition, transition_duration=tdur, fade_in=fi, fade_out=fo),
+        ClipCreate(kind=kind, source_id=source_id, duration=duration, motion=motion, transition=transition, transition_duration=tdur, fade_in=fi, fade_out=fo, lane=lane_i, start_sec=start_f),
         session,
         user,
     )

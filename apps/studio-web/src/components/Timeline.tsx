@@ -9,6 +9,10 @@ export interface TimelineClipInfo {
   /** Set for video clips: muted thumbnail playback. */
   video?: string;
   duration: number;
+  /** 0 = V1 sequential base; >=1 = fullscreen overlay placed at startSec. */
+  lane: number;
+  /** Absolute overlay start in scene seconds (V1 ignores this). */
+  startSec: number;
   motion: string;
   /** Blend into this clip from the previous one ("none" hides the badge). */
   transition: string;
@@ -172,6 +176,8 @@ export function Timeline({
   onTrimCue,
   subtitles,
   onDropTake,
+  onMoveOverlay,
+  onRequestSubtitles,
 }: {
   clips: TimelineClipInfo[];
   cues: TimelineCueInfo[];
@@ -186,11 +192,15 @@ export function Timeline({
   onDrop: (id: string) => void;
   onDragEnd: () => void;
   onTrimClip: (id: string, duration: number) => void;
+  /** Overlay V2+ move: absolute scene start (pointer drag or inspector). */
+  onMoveOverlay: (id: string, startSec: number) => void;
+  /** Open the subtitle uploader for the next free lane (S1, then S2). */
+  onRequestSubtitles: () => void;
   onTrimCue: (
     id: string,
     patch: { start_sec?: number; offset_sec?: number; end_sec?: number | null; lane?: number },
   ) => void;
-  subtitles: { start: number; end: number; text: string }[];
+  subtitles: { start: number; end: number; text: string; lane: number }[];
   onDropTake: (takeId: string, atTime: number, lane: number) => void;
 }) {
   const [pps, setPps] = useState(96); // timeline zoom: pixels per second
@@ -221,16 +231,25 @@ export function Timeline({
   const [hoverId, setHoverId] = useState<string | null>(null);
   const [dragTake, setDragTake] = useState(false);
   const [extraLanes, setExtraLanes] = useState(1);
+  /** Extra overlay video lanes V2..V4 (V1 is always present; cap is 3). */
+  const [extraVideoLanes, setExtraVideoLanes] = useState(0);
   // Cue move: drag a sound block's body to reposition it (start shifts;
   // a set end trim rides along so the length survives the move; dragging
   // across lanes reassigns the lane on release).
   const [moveCue, setMoveCue] = useState<{ id: string; start: number; lane: number } | null>(null);
   const moveCueRef = useRef<{ id: string; start: number; lane: number } | null>(null);
+  // Overlay move: drag a V2+ block's body to reposition its absolute start.
+  const [moveOv, setMoveOv] = useState<{ id: string; start: number } | null>(null);
+  const ovMoveRef = useRef<{ id: string; startX: number; base: number } | null>(null);
   const moveRef = useRef<{
     id: string; startX: number; startY: number; base: number; end: number | null; baseLane: number;
   } | null>(null);
   const dataLanes = cues.reduce((m, c) => Math.max(m, cueLane(c)), 0);
   const laneCount = Math.max(dataLanes + 1, extraLanes, (moveCue?.lane ?? -1) + 1, 1);
+  /** Overlay video lanes to render: lanes holding clips plus added empties. */
+  const ovLanes = [1, 2, 3].filter(
+    (l) => l <= extraVideoLanes || clips.some((c) => (c.lane || 0) === l),
+  );
 
   // Trim gesture: drag a block's edge to resize it. Base values come from
   // props at grab time; the live value previews locally and commits once
@@ -364,6 +383,39 @@ export function Timeline({
     if (Object.keys(patch).length > 0) onTrimCue(m.id, patch);
   };
 
+  // Overlay drag: pointer capture on the block; commit one PATCH on release.
+  const beginOvMove = (e: React.PointerEvent, id: string, startSec: number) => {
+    if (e.button !== 0) return;
+    e.stopPropagation();
+    ovMoveRef.current = { id, startX: e.clientX, base: startSec };
+    try {
+      (e.currentTarget as Element).setPointerCapture(e.pointerId);
+    } catch {
+      // Moves still land while the pointer stays over the block.
+    }
+  };
+
+  const ovMove = (e: React.PointerEvent) => {
+    const m = ovMoveRef.current;
+    if (!m) return;
+    const dx = (e.clientX - m.startX) / ppsRef.current;
+    if (Math.abs(e.clientX - m.startX) < 4) return;
+    setMoveOv({ id: m.id, start: round1(Math.max(0, m.base + dx)) });
+  };
+
+  const ovUp = () => {
+    const m = ovMoveRef.current;
+    ovMoveRef.current = null;
+    if (!m) return;
+    setMoveOv((live) => {
+      if (live && live.id === m.id && live.start !== m.base) {
+        justTrimmedRef.current = true;
+        onMoveOverlay(m.id, live.start);
+      }
+      return null;
+    });
+  };
+
   const edgeHandle = (
     side: "l" | "r",
     visible: boolean,
@@ -411,8 +463,10 @@ export function Timeline({
     onSeek(Math.min(Math.max(t, 0), total));
   };
 
+  /** V1 base clips only: overlays place by absolute start, not order. */
+  const v1clips = clips.filter((c) => (c.lane || 0) === 0);
   let acc = 0;
-  const starts = clips.map((c) => {
+  const starts = v1clips.map((c) => {
     const s = acc;
     acc += c.duration;
     return s;
@@ -431,16 +485,22 @@ export function Timeline({
           value=""
           onChange={(e) => {
             if (e.target.value === "audio") setExtraLanes((n) => Math.min(n + 1, 8));
+            if (e.target.value === "video") setExtraVideoLanes((n) => Math.min(n + 1, 3));
+            if (e.target.value === "subtitle") onRequestSubtitles();
             e.target.value = "";
           }}
           aria-label="Add a timeline lane"
-          title="Audio lanes stack takes in the mix. Overlapping video lanes need a renderer compositor, and extra subtitle lanes need multi-track subs — both are planned, so they stay disabled here."
+          title="Audio lanes stack takes; video lanes overlay fullscreen cutaways (export composites them, preview stacks them); subtitles open the uploader for the next free lane."
           style={{ width: 116 }}
         >
           <option value="">＋ Lane…</option>
           <option value="audio">Audio A{laneCount + 1} — stacks takes</option>
-          <option value="video" disabled>Video — needs compositing</option>
-          <option value="subtitle" disabled>Subtitles — one track per scene</option>
+          {extraVideoLanes < 3 ? (
+            <option value="video">Video V{extraVideoLanes + 2} — overlay</option>
+          ) : (
+            <option value="video" disabled>Video — V2–V4 full</option>
+          )}
+          <option value="subtitle">Subtitles — next free lane</option>
         </SelectInput>
         <IconBtn
           onClick={() => setPps((p) => Math.max(12, Math.round(p / 1.25)))}
@@ -482,6 +542,21 @@ export function Timeline({
             <span style={{ fontSize: 13, fontWeight: 700 }}>V1</span>
             <span style={{ fontSize: 11, color: "var(--kv-muted)" }}>Video</span>
           </div>
+          {ovLanes.map((lane) => {
+            const n = clips.filter((c) => (c.lane || 0) === lane).length;
+            return (
+              <div
+                key={lane}
+                style={{ height: 56, display: "flex", alignItems: "center", gap: 6, padding: "0 8px", borderTop: "1px solid var(--kv-border)" }}
+              >
+                <span aria-hidden style={{ fontSize: 14 }}>⧉</span>
+                <span style={{ fontSize: 13, fontWeight: 700 }}>V{lane + 1}</span>
+                <span style={{ fontSize: 11, color: "var(--kv-muted)" }}>
+                  Overlay{n > 0 ? ` · ${n}` : ""}
+                </span>
+              </div>
+            );
+          })}
           {Array.from({ length: laneCount }).map((_, li) => {
             const n = cues.filter((c) => cueLane(c) === li).length;
             return (
@@ -500,8 +575,15 @@ export function Timeline({
           <div style={{ height: 36, display: "flex", alignItems: "center", gap: 6, padding: "0 8px", borderTop: "1px solid var(--kv-border)" }}>
             <span aria-hidden style={{ fontSize: 14 }}>💬</span>
             <span style={{ fontSize: 13, fontWeight: 700 }}>S1</span>
-            <span style={{ fontSize: 11, color: "var(--kv-muted)" }}>Subs{subtitles.length > 0 ? ` · ${subtitles.length}` : ""}</span>
+            <span style={{ fontSize: 11, color: "var(--kv-muted)" }}>Subs{subtitles.filter((s) => (s.lane || 0) === 0).length > 0 ? ` · ${subtitles.filter((s) => (s.lane || 0) === 0).length}` : ""}</span>
           </div>
+          {subtitles.some((s) => (s.lane || 0) === 1) && (
+            <div style={{ height: 36, display: "flex", alignItems: "center", gap: 6, padding: "0 8px", borderTop: "1px solid var(--kv-border)" }}>
+              <span aria-hidden style={{ fontSize: 14 }}>💬</span>
+              <span style={{ fontSize: 13, fontWeight: 700 }}>S2</span>
+              <span style={{ fontSize: 11, color: "var(--kv-muted)" }}>Subs · {subtitles.filter((s) => (s.lane || 0) === 1).length}</span>
+            </div>
+          )}
         </div>
 
         <div ref={scrollRef} style={{ flex: 1, minWidth: 0, overflowX: "auto", position: "relative", background: "var(--kv-inset)" }}>
@@ -533,7 +615,7 @@ export function Timeline({
             </div>
 
             <div style={{ height: 64, position: "relative", borderBottom: "1px solid var(--kv-border)" }} aria-label="Video track">
-              {clips.map((clip, i) => {
+              {v1clips.map((clip, i) => {
                 const selected = clip.id === selectedId;
                 const trimming = trim?.kind === "clip" && trim.id === clip.id ? trim : null;
                 const dur = trimming ? trimming.a : clip.duration;
@@ -660,12 +742,126 @@ export function Timeline({
                   </div>
                 );
               })}
-              {clips.length === 0 && (
+              {v1clips.length === 0 && (
                 <span style={{ fontSize: 12, color: "var(--kv-faint)", padding: 8, display: "block" }}>
                   No clips — auto-direct the timeline or add panels, frames, stills, videos, and texts.
                 </span>
               )}
             </div>
+
+            {ovLanes.map((lane) => (
+              <div
+                key={lane}
+                style={{ height: 56, position: "relative", borderBottom: "1px solid var(--kv-border)" }}
+                aria-label={`Overlay video lane ${lane + 1}`}
+              >
+                {clips
+                  .filter((c) => (c.lane || 0) === lane)
+                  .map((clip) => {
+                    const selected = clip.id === selectedId;
+                    const trimming = trim?.kind === "clip" && trim.id === clip.id ? trim : null;
+                    const moving = moveOv?.id === clip.id ? moveOv : null;
+                    const dur = trimming ? trimming.a : clip.duration;
+                    const start = moving ? moving.start : clip.startSec;
+                    const w = Math.max(dur * pps - 3, trimming || moving ? 10 : 22);
+                    if (start >= total && total > 0) return null;
+                    const handlesVisible = hoverId === clip.id || selected || trimming !== null;
+                    return (
+                      <div
+                        key={clip.id}
+                        role="button"
+                        tabIndex={0}
+                        aria-label={`${clip.label} overlay on V${lane + 1}, ${dur.toFixed(1)} seconds from ${fmtTC(start)}`}
+                        title={`${clip.label} (V${lane + 1}, ${dur.toFixed(1)}s from ${fmtTC(start)}) — click to edit, drag body to move, drag right edge to resize`}
+                        onPointerDown={(e) => beginOvMove(e, clip.id, clip.startSec)}
+                        onPointerMove={ovMove}
+                        onPointerUp={ovUp}
+                        onPointerCancel={() => {
+                          ovMoveRef.current = null;
+                          setMoveOv(null);
+                        }}
+                        onMouseEnter={() => setHoverId(clip.id)}
+                        onMouseLeave={() => setHoverId((h) => (h === clip.id ? null : h))}
+                        onClick={() => {
+                          if (consumeClickAfterTrim()) return;
+                          onSelect(clip.id);
+                          onSeek(start);
+                        }}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter") {
+                            onSelect(clip.id);
+                            onSeek(start);
+                          }
+                        }}
+                        style={{
+                          position: "absolute",
+                          left: start * pps,
+                          top: 4,
+                          width: w,
+                          height: 48,
+                          display: "flex",
+                          alignItems: "stretch",
+                          gap: 0,
+                          borderRadius: 6,
+                          overflow: "visible",
+                          cursor: moving ? "grabbing" : "grab",
+                          background: "var(--kv-raised)",
+                          border: selected ? "2px solid var(--kv-accent)" : "1px solid var(--kv-border-strong)",
+                          opacity: moving ? 0.85 : 1,
+                          padding: 0,
+                          color: "inherit",
+                          textAlign: "left",
+                          touchAction: "pan-y",
+                          zIndex: moving ? 4 : 1,
+                        }}
+                      >
+                        <div style={{ width: 4, flexShrink: 0, background: KIND_BAR[clip.kind] ?? "#888", borderRadius: "4px 0 0 4px" }} />
+                        {w > 64 && clip.video ? (
+                          <video
+                            src={clip.video}
+                            muted
+                            playsInline
+                            preload="metadata"
+                            draggable={false}
+                            style={{ width: 52, height: "100%", objectFit: "cover", flexShrink: 0, background: "#000" }}
+                          />
+                        ) : (
+                          w > 64 && clip.image && (
+                            <img
+                              crossOrigin="use-credentials"
+                              src={clip.image}
+                              alt=""
+                              draggable={false}
+                              style={{ width: 52, height: "100%", objectFit: "cover", flexShrink: 0, background: "#f6f1e8" }}
+                              loading="lazy"
+                            />
+                          )
+                        )}
+                        <div style={{ flex: 1, minWidth: 0, padding: "3px 6px", overflow: "hidden" }}>
+                          <div style={{ fontSize: 12, fontWeight: 600, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                            V{lane + 1} · {clip.label}
+                          </div>
+                          <div className="kv-nums" style={{ fontSize: 11, color: "var(--kv-muted)", whiteSpace: "nowrap" }}>
+                            {fmtTC(start)} → {fmtTC(start + dur)}
+                          </div>
+                        </div>
+                        {edgeHandle("r", handlesVisible, (e) =>
+                          beginTrim(e, {
+                            kind: "clip", id: clip.id, edge: "r",
+                            startX: e.clientX, base: clip.duration,
+                            cueStart: 0, cueOff: 0, cueEnd: null, takeDur: 0, cueRate: 1, moved: false, pa: 0, pb: 0,
+                          }),
+                        )}
+                      </div>
+                    );
+                  })}
+                {clips.every((c) => (c.lane || 0) !== lane) && (
+                  <span style={{ fontSize: 12, color: "var(--kv-faint)", padding: 8, display: "block" }}>
+                    Empty overlay — move a clip here from its inspector.
+                  </span>
+                )}
+              </div>
+            ))}
 
             <div
               style={{ height: laneCount * LANE_H, position: "relative" }}
@@ -788,8 +984,8 @@ export function Timeline({
               )}
             </div>
 
-            <div style={{ height: 36, position: "relative" }} aria-label="Subtitles track">
-              {subtitles.map((s, i) => {
+            <div style={{ height: 36, position: "relative" }} aria-label="Subtitles track S1">
+              {subtitles.filter((s) => (s.lane || 0) === 0).map((s, i) => {
                 const w = Math.max((s.end - s.start) * pps - 3, 14);
                 return (
                   <button
@@ -820,12 +1016,47 @@ export function Timeline({
                   </button>
                 );
               })}
-              {subtitles.length === 0 && (
+              {subtitles.every((s) => (s.lane || 0) !== 0) && (
                 <span style={{ fontSize: 12, color: "var(--kv-faint)", padding: 6, display: "block" }}>
                   No subtitles — upload an .srt below.
                 </span>
               )}
             </div>
+            {subtitles.some((s) => (s.lane || 0) === 1) && (
+              <div style={{ height: 36, position: "relative" }} aria-label="Subtitles track S2">
+                {subtitles.filter((s) => (s.lane || 0) === 1).map((s, i) => {
+                  const w = Math.max((s.end - s.start) * pps - 3, 14);
+                  return (
+                    <button
+                      key={i}
+                      type="button"
+                      title={`${s.text} (${fmtTC(s.start)} → ${fmtTC(s.end)}) — click to preview from here`}
+                      onClick={() => onSeek(s.start)}
+                      style={{
+                        position: "absolute",
+                        left: s.start * pps,
+                        top: 5,
+                        width: w,
+                        height: 26,
+                        borderRadius: 5,
+                        border: "1px solid #6b6b3d",
+                        background: "linear-gradient(180deg, #3a3a22, #26261a)",
+                        color: "#f0eec8",
+                        cursor: "pointer",
+                        padding: "1px 6px",
+                        overflow: "hidden",
+                        textAlign: "left",
+                        fontSize: 11,
+                        whiteSpace: "nowrap",
+                        textOverflow: "ellipsis",
+                      }}
+                    >
+                      {s.text}
+                    </button>
+                  );
+                })}
+              </div>
+            )}
 
             {total > 0 && (
               <div

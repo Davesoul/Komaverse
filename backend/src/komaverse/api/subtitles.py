@@ -50,14 +50,21 @@ def _read_segments(session: Session, row: SubtitleTrackRow) -> list[SubSegment]:
         raise HTTPException(400, f"stored subtitles unreadable: {exc}") from None
 
 
+MAX_SUBTITLE_LANE = 1  # S1 (0) bottom captions, S2 (1) top captions
+
+
 def save_subtitles_track(
-    session: Session, user: UserRow, scene_id: str, data: bytes
+    session: Session, user: UserRow, scene_id: str, data: bytes,
+    lane: int = 0,
 ) -> SubtitleTrack:
-    """Validate + store one SRT track, replacing any existing one.
+    """Validate + store one SRT track, replacing any existing one on the
+    same lane.
 
     Shared by the upload endpoint and the studio agent, so chat-added
     captions get the same parse, quota, and storage path as file uploads.
     """
+    if lane not in (0, 1):
+        raise HTTPException(400, f"subtitle lane must be 0 (S1) or 1 (S2), got {lane}")
     scene = _get_scene(session, user, scene_id)
     if not data:
         raise HTTPException(400, "empty subtitles")
@@ -73,13 +80,16 @@ def save_subtitles_track(
         raise HTTPException(413, str(exc)) from None
     rel, _url = storage.save_upload(scene.project_id, "subtitles.srt", data)
     old = session.execute(
-        select(SubtitleTrackRow).where(SubtitleTrackRow.scene_id == scene.id)
+        select(SubtitleTrackRow).where(
+            SubtitleTrackRow.scene_id == scene.id,
+            SubtitleTrackRow.lane == lane,
+        )
     ).scalars().first()
     if old is not None:
         storage.remove_file(old.file_path)
         session.delete(old)
         session.flush()
-    row = SubtitleTrackRow(scene_id=scene.id, file_path=rel)
+    row = SubtitleTrackRow(scene_id=scene.id, lane=lane, file_path=rel)
     session.add(row)
     session.commit()
     return row.to_schema(segments)
@@ -91,6 +101,7 @@ def upload_subtitles(
     file: UploadFile = File(...),
     session: Session = Depends(get_session),
     user: UserRow = Depends(get_current_user),
+    lane: int = 0,
 ):
     name = (file.filename or "").lower()
     if not name.endswith(".srt"):
@@ -99,7 +110,7 @@ def upload_subtitles(
         data = storage.read_upload_capped(file.file, MAX_SRT_BYTES)
     except storage.UploadTooLargeError:
         raise HTTPException(413, "subtitle file too large") from None
-    return save_subtitles_track(session, user, scene_id, data)
+    return save_subtitles_track(session, user, scene_id, data, lane=lane)
 
 
 @router.get("/scenes/{scene_id}/subtitles", response_model=SubtitleTrack | None)
@@ -107,10 +118,14 @@ def get_subtitles(
     scene_id: str,
     session: Session = Depends(get_session),
     user: UserRow = Depends(get_current_user),
+    lane: int = 0,
 ):
     scene = _get_scene(session, user, scene_id)
     row = session.execute(
-        select(SubtitleTrackRow).where(SubtitleTrackRow.scene_id == scene.id)
+        select(SubtitleTrackRow).where(
+            SubtitleTrackRow.scene_id == scene.id,
+            SubtitleTrackRow.lane == lane,
+        )
     ).scalars().first()
     if row is None:
         return None
@@ -122,10 +137,14 @@ def delete_subtitles(
     scene_id: str,
     session: Session = Depends(get_session),
     user: UserRow = Depends(get_current_user),
+    lane: int = 0,
 ):
     scene = _get_scene(session, user, scene_id)
     row = session.execute(
-        select(SubtitleTrackRow).where(SubtitleTrackRow.scene_id == scene.id)
+        select(SubtitleTrackRow).where(
+            SubtitleTrackRow.scene_id == scene.id,
+            SubtitleTrackRow.lane == lane,
+        )
     ).scalars().first()
     if row is None:
         return

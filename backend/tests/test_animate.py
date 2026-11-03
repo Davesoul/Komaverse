@@ -1075,3 +1075,86 @@ def test_export_keeps_video_clip_audio(factory, user):
     assert audio_has_stream(
         settings.media_dir / out["url"].removeprefix("/media/")
     )
+
+def test_clip_lane_validation(factory, user):
+    project_id, scene_id, panels = _scene_with_panels(factory, user)
+    with factory() as s:
+        overlay = add_clip(
+            scene_id,
+            ClipCreate(kind="panel", source_id=panels[0], duration=1.0, lane=2, start_sec=1.5),
+            s, user,
+        )
+    assert (overlay.lane, overlay.start) == (2, 1.5)
+    with factory() as s, pytest.raises(HTTPException) as exc:
+        add_clip(scene_id, ClipCreate(kind="panel", source_id=panels[0], lane=5), s, user)
+    assert exc.value.status_code == 400
+    with factory() as s, pytest.raises(HTTPException) as exc:
+        patch_clip(overlay.id, ClipPatch(lane=-1), s, user)
+    assert exc.value.status_code == 400
+    # Returning to V1 clears the absolute placement.
+    with factory() as s:
+        back = patch_clip(overlay.id, ClipPatch(lane=0), s, user)
+    assert (back.lane, back.start) == (0, 0.0)
+    with factory() as s:
+        moved = patch_clip(overlay.id, ClipPatch(lane=1, start=0.5), s, user)
+    assert (moved.lane, moved.start) == (1, 0.5)
+
+
+def test_export_with_overlay_keeps_duration(factory, user):
+    """V2 overlays cover the base picture without stretching the timeline."""
+    project_id, scene_id, panels = _scene_with_panels(factory, user)
+    with factory() as s:
+        add_clip(
+            scene_id,
+            ClipCreate(kind="panel", source_id=panels[0], duration=1.0),
+            s, user,
+        )
+        add_clip(
+            scene_id,
+            ClipCreate(kind="panel", source_id=panels[1], duration=1.0, lane=1, start_sec=0.5),
+            s, user,
+        )
+    with factory() as s:
+        out = render_project(project_id, s, fps=5, width=160, height=120)
+    assert out["url"].endswith(".mp4")
+    assert out["warnings"] == []
+    assert out["duration_sec"] == pytest.approx(1.0, abs=0.05)
+    video_path = settings.media_dir / out["url"].removeprefix("/media/")
+    assert video_path.exists() and video_path.stat().st_size > 1000
+
+
+def test_export_overlay_video_brings_audio(factory, user):
+    """A video overlay native audio mixes in at its absolute position."""
+    from komaverse.db_models import JobRow
+    from komaverse.renderer import audio_has_stream
+
+    with factory() as s:
+        project = create_project(ProjectCreate(name="OverlayAudio"), s, user)
+        vdir = settings.media_dir / "testvid"
+        noisy = vdir / "overlay_noisy.mp4"
+        _video_file(noisy, seconds=2.0, with_audio=True)
+        s.add(JobRow(
+            id="overlayjob1", user_id=user.id, project_id=project.id,
+            kind="video", status="done", prompt="noisy",
+            result_url="/media/testvid/overlay_noisy.mp4",
+        ))
+        s.commit()
+        scenes = list_scenes(project.id, s, user)
+        panel_id = _first_panel_id(factory, user, project.id)
+        add_clip(
+            scenes[0].id,
+            ClipCreate(kind="panel", source_id=panel_id, duration=1.0),
+            s, user,
+        )
+        add_clip(
+            scenes[0].id,
+            ClipCreate(kind="video", source_id="overlayjob1", duration=1.0, lane=2, start_sec=0.0),
+            s, user,
+        )
+    with factory() as s:
+        out = render_project(project.id, s, fps=5, width=160, height=120)
+    assert out["url"].endswith(".mp4")
+    assert out["duration_sec"] == pytest.approx(1.0, abs=0.05)
+    assert audio_has_stream(
+        settings.media_dir / out["url"].removeprefix("/media/")
+    )

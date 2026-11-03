@@ -99,6 +99,8 @@ def init_db() -> None:
         "ALTER TABLE clips ADD COLUMN text_position VARCHAR(16)",
         "ALTER TABLE clips ADD COLUMN text_anim VARCHAR(16)",
         "ALTER TABLE clips ADD COLUMN clip_filter VARCHAR(32)",
+        "ALTER TABLE clips ADD COLUMN lane INTEGER",
+        "ALTER TABLE subtitle_tracks ADD COLUMN lane INTEGER",
         "ALTER TABLE pages ADD COLUMN name VARCHAR(200)",
         "ALTER TABLE panels ADD COLUMN name VARCHAR(200)",
     ):
@@ -107,6 +109,43 @@ def init_db() -> None:
                 conn.exec_driver_sql(ddl)
         except Exception:
             pass
+    # Subtitle lanes (ADR-29): one track per (scene, lane). Old DBs carry
+    # UNIQUE(scene_id); rebuild the table once to the (scene_id, lane)
+    # constraint, preserving rows on lane 0. Fresh DBs already match.
+    try:
+        with engine.begin() as conn:
+            legacy = False
+            for row in conn.exec_driver_sql(
+                "PRAGMA index_list(subtitle_tracks)"
+            ).all():
+                if row[2] and row[1].startswith("sqlite_autoindex"):
+                    cols = conn.exec_driver_sql(
+                        f"PRAGMA index_info({row[1]})"
+                    ).all()
+                    if [c[2] for c in cols] == ["scene_id"]:
+                        legacy = True
+            if legacy:
+                conn.exec_driver_sql(
+                    "CREATE TABLE subtitle_tracks_new ("
+                    "id VARCHAR(12) NOT NULL PRIMARY KEY, "
+                    "scene_id VARCHAR(12) NOT NULL REFERENCES scenes(id), "
+                    "lang VARCHAR(16) DEFAULT 'en', "
+                    "lane INTEGER DEFAULT 0, "
+                    "file_path VARCHAR(500) DEFAULT '', "
+                    "CONSTRAINT uq_subtitle_scene_lane UNIQUE (scene_id, lane))"
+                )
+                conn.exec_driver_sql(
+                    "INSERT INTO subtitle_tracks_new "
+                    "(id, scene_id, lang, lane, file_path) "
+                    "SELECT id, scene_id, lang, COALESCE(lane, 0), file_path "
+                    "FROM subtitle_tracks"
+                )
+                conn.exec_driver_sql("DROP TABLE subtitle_tracks")
+                conn.exec_driver_sql(
+                    "ALTER TABLE subtitle_tracks_new RENAME TO subtitle_tracks"
+                )
+    except Exception:
+        pass
     # Studio AI overrides (provider/models picked in the widget) overlay
     # the environment so the saved brain survives restarts.
     try:

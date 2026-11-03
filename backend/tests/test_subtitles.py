@@ -107,6 +107,54 @@ def test_subtitle_validation(factory, user):
     assert exc.value.status_code == 400
 
 
+def test_subtitle_lanes(factory, user):
+    """S1 and S2 are independent tracks: same scene, separate replace."""
+    project_id, scene_id = _panel_project(factory, user)
+    with factory() as s:
+        s1 = upload_subtitles(scene_id, srt_file(), s, user)
+        s2 = upload_subtitles(
+            scene_id,
+            srt_file("1\n00:00:00,000 --> 00:00:01,000\nTop note\n"),
+            s, user, lane=1,
+        )
+    assert (s1.lane, s2.lane) == (0, 1)
+    with factory() as s:
+        assert get_subtitles(scene_id, s, user).segments[0].text == "Hello world"
+        top = get_subtitles(scene_id, s, user, lane=1)
+    assert top is not None and top.segments[0].text == "Top note"
+    # Replacing S1 leaves S2 alone.
+    with factory() as s:
+        again = upload_subtitles(
+            scene_id, srt_file("1\n00:00:00,000 --> 00:00:01,000\nSolo\n"), s, user
+        )
+    assert again.lane == 0
+    with factory() as s:
+        assert get_subtitles(scene_id, s, user).segments[0].text == "Solo"
+        assert get_subtitles(scene_id, s, user, lane=1).segments[0].text == "Top note"
+    with factory() as s, pytest.raises(HTTPException) as exc:
+        upload_subtitles(scene_id, srt_file(), s, user, lane=5)
+    assert exc.value.status_code == 400
+    # Deleting S2 leaves S1 in place.
+    with factory() as s:
+        delete_subtitles(scene_id, s, user, lane=1)
+    with factory() as s:
+        assert get_subtitles(scene_id, s, user, lane=1) is None
+        assert get_subtitles(scene_id, s, user) is not None
+
+
+def test_segments_to_ass_places_lanes():
+    from komaverse.subtitles import SubSegment, segments_to_ass
+
+    ass = segments_to_ass([
+        (1, SubSegment(0.5, 1.5, "Top {note}")),
+        (0, SubSegment(0.0, 2.0, "Bottom")),
+    ])
+    assert "Style: S1" in ass and "Style: S2" in ass
+    assert "Alignment" in ass
+    assert ",S1,Bottom" in ass and ",S2,Top \\{note\\}" in ass
+    assert "0:00:00.50" in ass
+
+
 def frame_bottom(path, at_sec: float):
     import imageio_ffmpeg
     from PIL import Image
@@ -155,3 +203,58 @@ def test_export_burns_subtitles(factory, user):
         )
         diff = sum(1 for x, y in zip(a, b) if abs(x - y) > 12) / len(a)
         assert diff > 0.005, "burned captions should change the lower third"
+
+
+def frame_top(path, at_sec: float):
+    import imageio_ffmpeg
+    from PIL import Image
+
+    out = str(path) + ".top.png"
+    subprocess.run(
+        [imageio_ffmpeg.get_ffmpeg_exe(), "-y", "-hide_banner",
+         "-ss", str(at_sec), "-i", str(path), "-frames:v", "1", out],
+        capture_output=True,
+        check=True,
+    )
+    img = Image.open(out).convert("L")
+    w, h = img.size
+    px = img.crop((0, 0, w, h // 3))
+    return list(px.getdata())
+
+
+def test_export_merges_subtitle_lanes(factory, user):
+    """S1 + S2 merge into one VTT and one burn; S2 draws in the top third."""
+    project_id, scene_id = _panel_project(factory, user)
+    with factory() as s:
+        job = export_project(
+            project_id, ExportRequest(fps=5, width=320, height=240),
+            BackgroundTasks(), s, user,
+        )
+    run_export_job(job.id, factory)
+    with factory() as s:
+        plain = get_export_report(job.id, s, user)
+    with factory() as s:
+        upload_subtitles(scene_id, srt_file(), s, user)
+        upload_subtitles(
+            scene_id,
+            srt_file("1\n00:00:00,000 --> 00:00:01,000\nTop note\n"),
+            s, user, lane=1,
+        )
+    with factory() as s:
+        job2 = export_project(
+            project_id, ExportRequest(fps=5, width=320, height=240),
+            BackgroundTasks(), s, user,
+        )
+    run_export_job(job2.id, factory)
+    with factory() as s:
+        report = get_export_report(job2.id, s, user)
+    assert report.subtitles_vtt_url is not None
+    vtt = (settings.media_dir / report.subtitles_vtt_url.removeprefix("/media/")).read_text()
+    assert "Hello world" in vtt and "Top note" in vtt
+    if not any("burn-in failed" in w for w in report.warnings):
+        a = frame_top(settings.media_dir / plain.url.removeprefix("/media/"), 0.2)
+        b = frame_top(
+            settings.media_dir / report.url.removeprefix("/media/"), 0.2
+        )
+        diff = sum(1 for x, y in zip(a, b) if abs(x - y) > 12) / len(a)
+        assert diff > 0.005, "burned S2 captions should change the top third"

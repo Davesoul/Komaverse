@@ -14,6 +14,17 @@ export interface PreviewClip {
   filter?: string;
 }
 
+/** A fullscreen overlay cutaway (V2+ lane) active on [start, end). */
+export interface PreviewOverlay {
+  id: string;
+  label: string;
+  image: string;
+  /** Set for video overlays: the playable file URL (audible, like base). */
+  video?: string;
+  start: number;
+  end: number;
+}
+
 /** A timeline video clip: audible playback synced to play/pause and seeks.
  * The element mounts only for the current clip, so its audio can play.
  * Autoplay policy may refuse sound: then the picture keeps moving muted. */
@@ -120,6 +131,7 @@ export function PreviewPlayer({
   autoPlay = false,
   playRequest = 0,
   audio = [],
+  overlays = [],
 }: {
   clips: PreviewClip[];
   /** External seek requests (filmstrip clicks). */
@@ -136,6 +148,8 @@ export function PreviewPlayer({
   playRequest?: number;
   /** Cued takes, mixed live under the preview while it plays. */
   audio?: PreviewAudio[];
+  /** Overlay cutaways stacked over the base picture while active. */
+  overlays?: PreviewOverlay[];
 }) {
   const [playing, setPlaying] = useState(autoPlay);
   const [time, setTime] = useState(0);
@@ -371,6 +385,44 @@ export function PreviewPlayer({
             }}
           />
         )}
+        {overlays
+          .filter((o) => time >= o.start && time < o.end)
+          .map((o) => (
+            <div key={o.id} style={{ position: "absolute", inset: 0, background: "#000" }}>
+              {o.video ? (
+                <VideoPreviewClip
+                  key={o.id}
+                  src={o.video}
+                  playing={playing}
+                  offset={Math.max(0, time - o.start)}
+                  seekNonce={seek?.nonce ?? 0}
+                  label={o.label}
+                />
+              ) : (
+                <img
+                  crossOrigin="use-credentials"
+                  src={o.image}
+                  alt={o.label}
+                  style={{ width: "100%", height: "100%", objectFit: "contain", background: "#000" }}
+                />
+              )}
+              <span
+                className="kv-nums"
+                style={{
+                  position: "absolute",
+                  right: 8,
+                  top: 6,
+                  fontSize: 12,
+                  color: "#fff",
+                  background: "rgba(0,0,0,0.55)",
+                  borderRadius: 4,
+                  padding: "1px 6px",
+                }}
+              >
+                {o.label}
+              </span>
+            </div>
+          ))}
         <span
           className="kv-nums"
           style={{

@@ -36,7 +36,7 @@ import {
 } from "../components/ui";
 import { AudioDeck } from "../components/AudioDeck";
 import { Magnet } from "../components/Magnet";
-import { PreviewPlayer, type PreviewClip } from "../components/PreviewPlayer";
+import { PreviewPlayer, type PreviewClip, type PreviewOverlay } from "../components/PreviewPlayer";
 import { Timeline, fmtTC, type TimelineCueInfo } from "../components/Timeline";
 import { getCurrentProject, getCurrentScene, getCurrentSequence, gotoTab, setCurrentProject, setCurrentScene, setCurrentSequence, setDrawFrame } from "../lib/studio";
 
@@ -309,6 +309,10 @@ export default function RenderPage() {
   const [seek, setSeek] = useState<{ time: number; nonce: number } | null>(null);
   const [playReq, setPlayReq] = useState(0);
   const [subtitles, setSubtitles] = useState<SubtitleTrack | null>(null);
+  /** Second subtitle lane (S2, top captions). */
+  const [subtitles2, setSubtitles2] = useState<SubtitleTrack | null>(null);
+  /** Which lane the subtitle uploader targets next. */
+  const [subLane, setSubLane] = useState(0);
   const [subBusy, setSubBusy] = useState(false);
   const subFileRef = useRef<HTMLInputElement>(null);
   const [renamingScene, setRenamingScene] = useState("");
@@ -426,7 +430,10 @@ export default function RenderPage() {
     () => [...(scene?.clips ?? [])].sort((a, b) => a.order - b.order),
     [scene],
   );
-  const total = clips.reduce((sum, c) => sum + c.duration, 0);
+  /** V1 base length: overlay lanes never stretch the timeline. */
+  const total = clips
+    .filter((c) => (c.lane ?? 0) === 0)
+    .reduce((sum, c) => sum + c.duration, 0);
   const cueCount = scenes.reduce((sum, s) => sum + s.cues.length, 0);
   const selectedClip = clips.find((c) => c.id === selectedClipId) ?? clips[0] ?? null;
   const selectedCue = scene?.cues.find((c) => c.id === selectedCueId) ?? null;
@@ -500,6 +507,8 @@ export default function RenderPage() {
       transition_duration?: number;
       fade_in?: number;
       fade_out?: number;
+      lane?: number;
+      start?: number;
       filter?: string;
       text?: string;
       text_size?: number;
@@ -593,33 +602,58 @@ export default function RenderPage() {
 
   const previewClips: PreviewClip[] = useMemo(
     () =>
-      clips.map((c, i) => ({
-        id: c.id,
-        kind: c.kind,
-        label: `${i + 1} · ${c.kind === "video" ? (videoJobs[c.source_id]?.label ?? "Video") : labelFor(c, project, frames)}`,
-        image: clipImageFor(c, project, true, artNonce),
-        video: videoJobs[c.source_id]?.url,
-        duration: c.duration,
-        motion: c.motion,
-        transition: c.transition,
-        filter: cssFilterFor(c.filter),
-      })),
+      clips
+        .filter((c) => (c.lane ?? 0) === 0)
+        .map((c, i) => ({
+          id: c.id,
+          kind: c.kind,
+          label: `${i + 1} · ${c.kind === "video" ? (videoJobs[c.source_id]?.label ?? "Video") : labelFor(c, project, frames)}`,
+          image: clipImageFor(c, project, true, artNonce),
+          video: videoJobs[c.source_id]?.url,
+          duration: c.duration,
+          motion: c.motion,
+          transition: c.transition,
+          filter: cssFilterFor(c.filter),
+        })),
+    [clips, project, frames, videoJobs, artNonce],
+  );
+
+  /** Fullscreen overlay cutaways (V2+) stacked over the preview. */
+  const overlayInfos: PreviewOverlay[] = useMemo(
+    () =>
+      clips
+        .filter((c) => (c.lane ?? 0) > 0)
+        .map((c) => {
+          const start = Math.max(c.start ?? 0, 0);
+          return {
+            id: c.id,
+            label: `V${(c.lane ?? 1) + 1} · ${c.kind === "video" ? (videoJobs[c.source_id]?.label ?? "Video") : labelFor(c, project, frames)}`,
+            image: clipImageFor(c, project, true, artNonce),
+            video: videoJobs[c.source_id]?.url,
+            start,
+            end: start + Math.max(c.duration, 0.1),
+          };
+        }),
     [clips, project, frames, videoJobs, artNonce],
   );
 
   const onTime = useCallback((t: number) => setPlayhead(t), []);
 
-  // Subtitle track follows the active scene.
+  // Subtitle tracks follow the active scene (S1 bottom, S2 top).
   useEffect(() => {
     if (!sceneId) {
       setSubtitles(null);
+      setSubtitles2(null);
       return;
     }
     api.getSubtitles(sceneId).then(setSubtitles).catch(() => setSubtitles(null));
+    api.getSubtitles(sceneId, 1).then(setSubtitles2).catch(() => setSubtitles2(null));
   }, [sceneId]);
 
   const caption =
     subtitles?.segments.find((s) => playhead >= s.start_sec && playhead < s.end_sec)?.text ?? "";
+  const caption2 =
+    subtitles2?.segments.find((s) => playhead >= s.start_sec && playhead < s.end_sec)?.text ?? "";
 
   const startVoiceover = useCallback(
     (atTime: number) => {
@@ -690,13 +724,21 @@ export default function RenderPage() {
     }
   };
 
+  /** Lane menu ("Subtitles — next free lane") lands here. */
+  const requestSubtitles = () => {
+    const next = subtitles && !subtitles2 ? 1 : 0;
+    setSubLane(next);
+    subFileRef.current?.click();
+  };
+
   const uploadSrt = async (file: File | undefined) => {
     if (!file || !scene) return;
     setSubBusy(true);
     try {
-      const track = await api.uploadSubtitles(scene.id, file);
-      setSubtitles(track);
-      setNotice(`Subtitles loaded — ${track.segments.length} captions on the S1 lane.`);
+      const track = await api.uploadSubtitles(scene.id, file, subLane);
+      if (subLane === 1) setSubtitles2(track);
+      else setSubtitles(track);
+      setNotice(`Subtitles loaded — ${track.segments.length} captions on the S${subLane + 1} lane.`);
     } catch (e) {
       setNotice(`Couldn't load subtitles: ${(e as Error).message}`);
     } finally {
@@ -831,7 +873,7 @@ export default function RenderPage() {
   /** Mutable clip fields reconciled by undo/redo (ids drive add/delete). */
   const CLIP_UNDO_FIELDS = [
     "duration", "motion", "transition", "transition_duration", "fade_in",
-    "fade_out", "filter", "text", "text_size", "text_color",
+    "fade_out", "lane", "start", "filter", "text", "text_size", "text_color",
     "text_position", "text_anim",
   ] as const;
 
@@ -857,6 +899,8 @@ export default function RenderPage() {
             transition_duration: s.transition_duration,
             fade_in: s.fade_in,
             fade_out: s.fade_out,
+            lane: s.lane ?? 0,
+            start_sec: s.start ?? 0,
             filter: s.filter,
             text: s.text,
             text_size: s.text_size,
@@ -1970,7 +2014,31 @@ export default function RenderPage() {
                       onTime={onTime}
                       playRequest={playReq}
                       audio={previewAudio}
+                      overlays={overlayInfos}
                     />
+                    {caption2 && (
+                      <div
+                        aria-live="polite"
+                        style={{
+                          position: "absolute",
+                          left: "50%",
+                          top: 12,
+                          transform: "translateX(-50%)",
+                          maxWidth: "90%",
+                          fontSize: 13,
+                          fontWeight: 600,
+                          textAlign: "center",
+                          color: "#fff",
+                          background: "rgba(0,0,0,0.65)",
+                          borderRadius: 6,
+                          padding: "4px 12px",
+                          pointerEvents: "none",
+                          whiteSpace: "pre-line",
+                        }}
+                      >
+                        {caption2}
+                      </div>
+                    )}
                     {caption && (
                       <div
                         aria-live="polite"
@@ -2032,6 +2100,8 @@ export default function RenderPage() {
                       image: clipImageFor(c, project, false, artNonce),
                       video: videoJobs[c.source_id]?.url,
                       duration: c.duration,
+                      lane: c.lane ?? 0,
+                      startSec: Math.max(c.start ?? 0, 0),
                       motion: c.motion,
                       transition: c.transition,
                       filter: c.filter,
@@ -2049,11 +2119,24 @@ export default function RenderPage() {
                     onDragEnd={() => setDragId(null)}
                     onTrimClip={(id, duration) => void commitClipPatch(id, { duration })}
                     onTrimCue={(id, patch) => void commitCuePatch(id, patch)}
-                    subtitles={(subtitles?.segments ?? []).map((s) => ({
-                      start: s.start_sec,
-                      end: s.end_sec,
-                      text: s.text,
-                    }))}
+                    onMoveOverlay={(id, startSec) =>
+                      void commitClipPatch(id, { start: Math.round(startSec * 10) / 10 })
+                    }
+                    onRequestSubtitles={() => requestSubtitles()}
+                    subtitles={[
+                      ...(subtitles?.segments ?? []).map((s) => ({
+                        start: s.start_sec,
+                        end: s.end_sec,
+                        text: s.text,
+                        lane: 0,
+                      })),
+                      ...(subtitles2?.segments ?? []).map((s) => ({
+                        start: s.start_sec,
+                        end: s.end_sec,
+                        text: s.text,
+                        lane: 1,
+                      })),
+                    ]}
                     onDropTake={(takeId, atTime, lane) => void dropTake(takeId, atTime, lane)}
                   />
                 </div>
@@ -2168,6 +2251,49 @@ export default function RenderPage() {
                     Picking a motion replays the preview from this clip;
                     it also burns into the MP4 export.
                   </span>
+                </div>
+                <div style={{ display: "flex", gap: 6, alignItems: "center", marginTop: 10, flexWrap: "wrap" }}>
+                  <span style={{ fontSize: 12, color: "var(--kv-muted)" }}>Lane</span>
+                  <SelectInput
+                    value={selectedClip.lane ?? 0}
+                    onChange={(e) => {
+                      const lane = Number(e.target.value);
+                      if (lane === 0) void commitClipPatch(selectedClip.id, { lane: 0 });
+                      else {
+                        // Land at the clip's current sequential start so nothing jumps.
+                        let acc = 0;
+                        for (const c of clips) {
+                          if ((c.lane ?? 0) !== 0) continue;
+                          if (c.id === selectedClip.id) break;
+                          acc += c.duration;
+                        }
+                        void commitClipPatch(selectedClip.id, {
+                          lane,
+                          start: Math.round(acc * 10) / 10,
+                        });
+                      }
+                    }}
+                    aria-label="Clip lane"
+                    title="V1 is the sequential base; V2–V4 overlay fullscreen cutaways at an absolute start"
+                  >
+                    {[0, 1, 2, 3].map((l) => (
+                      <option key={l} value={l}>{l === 0 ? "V1 — base" : `V${l + 1} — overlay`}</option>
+                    ))}
+                  </SelectInput>
+                  {(selectedClip.lane ?? 0) > 0 && (
+                    <>
+                      <span style={{ fontSize: 12, color: "var(--kv-muted)", marginLeft: 8 }}>Start</span>
+                      <SecInput
+                        value={Math.max(selectedClip.start ?? 0, 0)}
+                        label="Overlay start seconds"
+                        title="Absolute scene time where this overlay appears; drag the block or trim its right edge to adjust"
+                        onCommit={(v) => void commitClipPatch(selectedClip.id, { start: v })}
+                      />
+                      <span style={{ fontSize: 11, color: "var(--kv-faint)" }}>
+                        Overlays cover V1 fullscreen and clamp to the export end.
+                      </span>
+                    </>
+                  )}
                 </div>
                 <div style={{ display: "flex", gap: 6, alignItems: "center", marginTop: 10, flexWrap: "wrap" }}>
                   <span style={{ fontSize: 12, color: "var(--kv-muted)" }}>Filter</span>
@@ -2482,37 +2608,62 @@ export default function RenderPage() {
             {project && scene && (
               <div style={{ marginBottom: 20 }}>
                 <SectionTitle>Subtitles</SectionTitle>
-                {subtitles ? (
-                  <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-                    <Chip>.srt · {subtitles.segments.length} captions</Chip>
-                    <span style={{ fontSize: 13, color: "var(--kv-muted)" }}>
-                      On the S1 lane, over the preview, and burned into the MP4.
-                    </span>
-                    <Btn
-                      small
-                      danger
-                      disabled={subBusy}
-                      onClick={async () => {
-                        if (!window.confirm(`Remove subtitles from "${scene.name}"? The .srt track is deleted from the timeline and exports. This can't be undone.`)) return;
-                        try {
-                          await api.deleteSubtitles(scene.id);
-                          setSubtitles(null);
-                        } catch (e) {
-                          setNotice(`Couldn't remove subtitles: ${(e as Error).message}`);
-                        }
-                      }}
-                      style={{ marginLeft: "auto" }}
-                    >
-                      Remove
-                    </Btn>
-                  </div>
-                ) : (
+                {[subtitles, subtitles2].map((track, li) =>
+                  track ? (
+                    <div key={li} style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", marginBottom: 6 }}>
+                      <Chip>S{li + 1} · .srt · {track.segments.length} captions</Chip>
+                      <span style={{ fontSize: 13, color: "var(--kv-muted)" }}>
+                        {li === 0
+                          ? "Bottom captions over the preview, burned into the MP4."
+                          : "Top captions (ASS two-style burn when both lanes play)."}
+                      </span>
+                      <Btn
+                        small
+                        danger
+                        disabled={subBusy}
+                        onClick={async () => {
+                          if (!window.confirm(`Remove the S${li + 1} subtitles from "${scene.name}"? That lane is deleted from the timeline and exports. This can't be undone.`)) return;
+                          try {
+                            await api.deleteSubtitles(scene.id, li);
+                            if (li === 1) setSubtitles2(null);
+                            else setSubtitles(null);
+                          } catch (e) {
+                            setNotice(`Couldn't remove subtitles: ${(e as Error).message}`);
+                          }
+                        }}
+                        style={{ marginLeft: "auto" }}
+                      >
+                        Remove
+                      </Btn>
+                    </div>
+                  ) : null,
+                )}
+                {!subtitles && !subtitles2 ? (
                   <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
                     <Btn small disabled={subBusy} onClick={() => subFileRef.current?.click()}>
                       {subBusy ? "Loading…" : "Upload .srt…"}
                     </Btn>
                     <span style={{ fontSize: 13, color: "var(--kv-muted)" }}>
                       Captions land on the S1 lane and burn into the export.
+                    </span>
+                  </div>
+                ) : (
+                  <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                    <span style={{ fontSize: 12, color: "var(--kv-muted)" }}>Upload to</span>
+                    <SelectInput
+                      value={subLane}
+                      onChange={(e) => setSubLane(Number(e.target.value))}
+                      aria-label="Subtitle upload lane"
+                      title="S1 replaces the bottom captions; S2 adds top captions"
+                    >
+                      <option value={0}>S1 — bottom</option>
+                      <option value={1}>S2 — top</option>
+                    </SelectInput>
+                    <Btn small disabled={subBusy} onClick={() => subFileRef.current?.click()}>
+                      {subBusy ? "Loading…" : "Upload .srt…"}
+                    </Btn>
+                    <span style={{ fontSize: 13, color: "var(--kv-muted)" }}>
+                      Each lane replaces only itself; both burn into the export.
                     </span>
                   </div>
                 )}

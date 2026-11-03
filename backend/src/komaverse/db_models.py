@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from sqlalchemy import DateTime, Float, ForeignKey, String, Text
+from sqlalchemy import DateTime, Float, ForeignKey, String, Text, UniqueConstraint
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 from komaverse import models as schemas
@@ -217,7 +217,7 @@ class SceneRow(Base):
     clips: Mapped[list[ClipRow]] = relationship(
         back_populates="scene",
         cascade="all, delete-orphan",
-        order_by="ClipRow.order",
+        order_by="ClipRow.order, ClipRow.lane",
         lazy="selectin",
     )
     cues: Mapped[list[AudioCueRow]] = relationship(
@@ -226,11 +226,11 @@ class SceneRow(Base):
         order_by="AudioCueRow.start_sec",
         lazy="selectin",
     )
-    subtitle_track: Mapped["SubtitleTrackRow | None"] = relationship(
+    subtitle_tracks: Mapped[list[SubtitleTrackRow]] = relationship(
         back_populates="scene",
         cascade="all, delete-orphan",
+        order_by="SubtitleTrackRow.lane",
         lazy="selectin",
-        uselist=False,
     )
 
     def to_schema(self) -> schemas.Scene:
@@ -259,6 +259,7 @@ class ClipRow(Base):
     fade_in: Mapped[float] = mapped_column(default=0.0)
     fade_out: Mapped[float] = mapped_column(default=0.0)
     order: Mapped[int] = mapped_column(default=0)
+    lane: Mapped[int] = mapped_column(default=0)
     text_content: Mapped[str] = mapped_column(Text, default="")
     text_size: Mapped[int] = mapped_column(default=64)
     text_color: Mapped[str] = mapped_column(String(16), default="#ffffff")
@@ -286,6 +287,7 @@ class ClipRow(Base):
             fade_in=self.fade_in if self.fade_in is not None else 0.0,
             fade_out=self.fade_out if self.fade_out is not None else 0.0,
             order=self.order,
+            lane=self.lane if self.lane is not None else 0,
             # Pre-text rows hold NULL (ALTER backfill): serialize them as
             # the schema defaults instead of 500ing the list.
             text=self.text_content or "",
@@ -363,19 +365,23 @@ class SubtitleTrackRow(Base):
     __tablename__ = "subtitle_tracks"
 
     id: Mapped[str] = mapped_column(String(12), primary_key=True, default=uuid_short)
-    scene_id: Mapped[str] = mapped_column(
-        ForeignKey("scenes.id"), index=True, unique=True
-    )
+    scene_id: Mapped[str] = mapped_column(ForeignKey("scenes.id"), index=True)
     lang: Mapped[str] = mapped_column(String(16), default="en")
+    lane: Mapped[int] = mapped_column(default=0)
     file_path: Mapped[str] = mapped_column(String(500), default="")
 
-    scene: Mapped[SceneRow] = relationship(back_populates="subtitle_track")
+    __table_args__ = (
+        UniqueConstraint("scene_id", "lane", name="uq_subtitle_scene_lane"),
+    )
+
+    scene: Mapped[SceneRow] = relationship(back_populates="subtitle_tracks")
 
     def to_schema(self, segments: list | None = None) -> schemas.SubtitleTrack:
         return schemas.SubtitleTrack(
             id=self.id,
             scene_id=self.scene_id,
             lang=self.lang,
+            lane=self.lane if self.lane is not None else 0,
             segments=[
                 schemas.SubtitleSegment(start_sec=s.start, end_sec=s.end, text=s.text)
                 for s in (segments or [])
