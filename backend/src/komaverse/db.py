@@ -103,6 +103,9 @@ def init_db() -> None:
         "ALTER TABLE subtitle_tracks ADD COLUMN lane INTEGER",
         "ALTER TABLE pages ADD COLUMN name VARCHAR(200)",
         "ALTER TABLE panels ADD COLUMN name VARCHAR(200)",
+        "ALTER TABLE panels ADD COLUMN dialogue TEXT",
+        "ALTER TABLE panels ADD COLUMN sfx VARCHAR(500)",
+        "ALTER TABLE panels ADD COLUMN cues TEXT",
         "ALTER TABLE cloned_voices ADD COLUMN engine VARCHAR(32)",
         "ALTER TABLE cloned_voices ADD COLUMN ref_audio VARCHAR(500)",
     ):

@@ -188,6 +188,12 @@ class PanelRow(Base):
     h: Mapped[float] = mapped_column(default=0)
     reading_order: Mapped[int] = mapped_column(default=0)
     name: Mapped[str] = mapped_column(String(200), default="")
+    # Vision "read page" results: transcribed dialogue/captions, SFX
+    # words drawn in the art, and suggested timeline audio cues
+    # (stored as a JSON string list).
+    dialogue: Mapped[str] = mapped_column(Text, default="")
+    sfx: Mapped[str] = mapped_column(String(500), default="")
+    cues: Mapped[str] = mapped_column(Text, default="[]")
 
     page: Mapped[PageRow] = relationship(back_populates="panels")
 
@@ -201,6 +207,9 @@ class PanelRow(Base):
             h=self.h,
             reading_order=self.reading_order,
             name=self.name or "",
+            dialogue=self.dialogue or "",
+            sfx=self.sfx or "",
+            cues=self.cues or "[]",
             crop_url=f"/api/v1/panels/{self.id}/preview",
         )
 

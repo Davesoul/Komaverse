@@ -47,7 +47,7 @@ class StorageOut(BaseModel):
 
 
 class DetectRequest(BaseModel):
-    detector: str = "yolo-leoxs22"  # heuristic | yolo | yolo-leoxs22 | cloud | meta | openrouter | sam | local (fall back to heuristic)
+    detector: str = "sam"  # heuristic | yolo | yolo-leoxs22 | cloud | meta | openrouter | sam | local (fall back to heuristic)
     direction: str = "rtl"  # rtl (manga) | ltr (western)
     confirm: bool = False  # required when the page already has panels
 
@@ -353,6 +353,132 @@ def detect_panels(
     tiles = math.ceil((page.width or 0) / 512) * math.ceil((page.height or 0) / 512)
     record_usage(session, user.id, "detect", used, 85 + 170 * max(tiles, 1))
     return DetectResponse(panels=panels, detector_used=used, fell_back=fell_back)
+
+
+def _annotate_panels(image: Image.Image, boxes: list[tuple[int, int, int, int]]) -> bytes:
+    """Numbered red boxes over the page so the vision model can name panels."""
+    from PIL import ImageDraw
+
+    draw = ImageDraw.Draw(image)
+    for i, (x, y, w, h) in enumerate(boxes):
+        draw.rectangle([x, y, x + w, y + h], outline=(255, 45, 85), width=max(3, image.width // 300))
+        label = str(i + 1)
+        tw, th = draw.textlength(label), 24
+        draw.rectangle([x, y - 28, x + tw + 12, y], fill=(255, 45, 85))
+        draw.text((x + 6, y - 26), label, fill=(255, 255, 255))
+    buf = io.BytesIO()
+    image.save(buf, format="PNG")
+    return buf.getvalue()
+
+
+_READ_PROMPT = """You read manga pages. The image shows numbered panels in reading order (panel 1 first).
+For EACH numbered panel reply with:
+- dialogue: every speech balloon, thought, narration caption, and sign text inside that panel, verbatim, joined with " / ". Empty string when the panel has no text.
+- sfx: sound-effect words drawn as art in that panel (DON, GASHAN, ZA, DOKI, SHIIN, ...), as a list. Empty list when none.
+- cues: 1-3 audio cues a timeline would need for that panel (ambience, impacts, whooshes, silence), as short labels. Empty list when nothing stands out.
+Reply with JSON ONLY, no fences, no commentary:
+{"panels": [{"panel": 1, "dialogue": "...", "sfx": ["..."], "cues": ["..."]}, ...]}"""
+
+
+@router.post("/pages/{page_id}/read", response_model=list[Panel])
+def read_page(
+    page_id: str,
+    session: Session = Depends(get_session),
+    user: UserRow = Depends(get_current_user),
+):
+    """Vision read: dialogue, SFX, and audio-cue suggestions per panel.
+
+    Uses the multimodal Meta vision model (muse-spark-1.3-contributor
+    by default) on the page with its panels numbered in reading order.
+    Results are stored on the panels and returned in reading order.
+    """
+    import json as _json
+
+    from komaverse.ai.providers import chat_complete
+
+    page = _get_page(session, user, page_id)
+    panels = sorted(
+        session.execute(select(PanelRow).where(PanelRow.page_id == page.id)).scalars().all(),
+        key=lambda p: p.reading_order,
+    )
+    if not panels:
+        raise HTTPException(400, "detect panels first — there is nothing to read")
+    retry = limiter.check(f"page-read:{user.id}", 10, 60)
+    if retry is not None:
+        raise HTTPException(
+            429, f"page read rate limited", headers={"Retry-After": str(int(retry) + 1)}
+        )
+    if not settings.meta_api_key:
+        raise HTTPException(400, "page reading needs META_API_KEY (dev.meta.ai)")
+    model = settings.meta_vision_model or settings.meta_chat_model
+    try:
+        with Image.open(storage.resolve(page.image_path)) as img:
+            img = img.convert("RGB")
+            scale = min(1.0, 1536 / max(img.size))
+            if scale < 1.0:
+                img = img.resize(
+                    (max(1, round(img.width * scale)), max(1, round(img.height * scale))),
+                    Image.LANCZOS,
+                )
+            annotated = _annotate_panels(
+                img, [(p.x * scale, p.y * scale, p.w * scale, p.h * scale) for p in panels]
+            )
+    except FileNotFoundError:
+        raise HTTPException(404, "page image missing") from None
+    import base64 as _base64
+
+    try:
+        message = chat_complete(
+            base_url=settings.meta_base_url,
+            api_key=settings.meta_api_key,
+            model=model,
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": _READ_PROMPT},
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:image/png;base64,{_base64.b64encode(annotated).decode()}"
+                            },
+                        },
+                    ],
+                }
+            ],
+        )
+    except Exception as exc:
+        raise HTTPException(400, f"page reading failed: {exc}") from None
+    raw = message.get("content") or ""
+    if isinstance(raw, list):
+        raw = " ".join(
+            part.get("text", "") for part in raw if isinstance(part, dict)
+        )
+    try:
+        start, end = raw.index("{"), raw.rindex("}") + 1
+        data = _json.loads(raw[start:end])
+        entries = data.get("panels") or []
+        if not isinstance(entries, list):
+            raise ValueError("panels is not a list")
+    except (ValueError, AttributeError) as exc:
+        raise HTTPException(502, f"vision returned an unreadable reading: {exc}") from None
+    by_number = {}
+    for entry in entries:
+        if isinstance(entry, dict) and isinstance(entry.get("panel"), int):
+            by_number[entry["panel"]] = entry
+    out: list[Panel] = []
+    for i, row in enumerate(panels, start=1):
+        entry = by_number.get(i, {})
+        dialogue = entry.get("dialogue") if isinstance(entry.get("dialogue"), str) else ""
+        sfx_list = entry.get("sfx") if isinstance(entry.get("sfx"), list) else []
+        cue_list = entry.get("cues") if isinstance(entry.get("cues"), list) else []
+        row.dialogue = dialogue[:2000]
+        row.sfx = ", ".join(str(s) for s in sfx_list[:8])[:500]
+        row.cues = _json.dumps([str(c)[:80] for c in cue_list[:5]])
+        out.append(row.to_schema())
+    session.commit()
+    record_usage(session, user.id, "vision", model, 0)
+    return out
 
 
 @router.post("/pages/{page_id}/panels", response_model=Panel, status_code=201)

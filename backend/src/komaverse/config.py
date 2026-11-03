@@ -62,7 +62,8 @@ class Settings(BaseSettings):
         default="muse-spark-1.3", validation_alias="META_CHAT_MODEL"
     )
     meta_vision_model: str | None = Field(
-        default=None, validation_alias="META_VISION_MODEL"
+        default="muse-spark-1.3-contributor",
+        validation_alias="META_VISION_MODEL",
     )
     meta_image_model: str = Field(
         default="muse-image-1.0", validation_alias="META_IMAGE_MODEL"

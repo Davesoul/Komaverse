@@ -9,6 +9,10 @@ export interface Panel {
   h: number;
   reading_order: number;
   name: string;
+  dialogue: string;
+  sfx: string;
+  /** JSON string list of suggested timeline audio cues. */
+  cues: string;
   crop_url: string | null;
 }
 
@@ -512,6 +516,10 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ panel_ids: panelIds }),
     }),
+  /** Vision read: dialogue, SFX, and audio-cue suggestions per panel
+   * (multimodal Meta vision model). Requires META_API_KEY. */
+  readPage: (pageId: string) =>
+    req<Panel[]>(`/api/v1/pages/${pageId}/read`, { method: "POST" }),
 
   listScenes: (projectId: string) =>
     req<Scene[]>(`/api/v1/projects/${projectId}/scenes`),

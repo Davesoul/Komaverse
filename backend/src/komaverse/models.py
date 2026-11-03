@@ -29,6 +29,9 @@ class Panel(BaseModel):
     h: float = 0
     reading_order: int = 0
     name: str = ""
+    dialogue: str = ""
+    sfx: str = ""
+    cues: str = "[]"
     crop_url: str | None = None
 
 

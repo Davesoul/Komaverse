@@ -1059,4 +1059,31 @@ color-theory (cel shadow colors, light logic), manga-literacy
   at every scroll position, canvas 296px fully visible, toolbar
   one scrollable row; `tsc` clean, build green.
 
+## ADR-40: Scan vision read - SAM default, contributor vision, page text/SFX/cue reading (accepted)
+
+- Scan defaults: `sam` detector (Meta SAM 3.1, panel segmentation)
+  and `meta` vision provider with `muse-spark-1.3-contributor`
+  (multimodal) in backend config; the Scan detector combobox now
+  lists SAM first and preselects it.
+- New `POST /api/v1/pages/{page_id}/read`: numbers the page's
+  panels in reading order onto a <=1536px copy (`_annotate_panels`),
+  sends it + a JSON-only prompt to the multimodal Meta vision
+  model, and stores per-panel `dialogue` (<=2000 chars), `sfx`
+  (<=500 chars), and `cues` (JSON string list, <=5 cues) on the
+  panel rows. Returns panels in reading order.
+- Reading is explicit (a "Read text" button next to "Detect
+  panels"), not part of detection: it costs Meta API credit, so
+  it needs `META_API_KEY`, is rate-limited (10/min/user), and
+  records vision usage. Without a key it 400s with a message
+  naming the key; without panels it 400s asking to detect first;
+  unparsable vision output 502s instead of storing garbage.
+- Scan UI renders the reading under the canvas in reading order
+  (dialogue verbatim, SFX in `kv-sfx` style, cues as a muted
+  "Cues:" line); clicking a reading selects the panel. Empty
+  panels are skipped so the list stays scannable.
+- Live: 442 backend tests pass (3 new read tests with mocked
+  `chat_complete`: store+return, needs-key, needs-panels);
+  `tsc` clean, build green; `:8001` restarted so the live
+  backend serves `/api/v1/pages/{page_id}/read` (77 routes).
+
 

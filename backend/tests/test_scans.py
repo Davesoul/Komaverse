@@ -35,6 +35,7 @@ from komaverse.api.scans import (
     patch_page,
     patch_panel,
     project_storage,
+    read_page,
     router,
     upload_page,
 )
@@ -307,6 +308,7 @@ def test_scan_routes_registered():
         "/api/v1/projects/{project_id}/storage",
         "/api/v1/pages/{page_id}",
         "/api/v1/pages/{page_id}/detect",
+        "/api/v1/pages/{page_id}/read",
         "/api/v1/pages/{page_id}/panels",
         "/api/v1/pages/{page_id}/panels/order",
         "/api/v1/panels/{panel_id}",
@@ -653,3 +655,70 @@ def test_legacy_clip_without_effects_serializes():
     assert clip.transition_duration == 0.5
     assert clip.fade_in == 0.0
     assert clip.fade_out == 0.0
+
+
+def _read_payload() -> dict:
+    return {
+        "content": (
+            '{"panels": ['
+            '{"panel": 1, "dialogue": "I will win.", "sfx": ["DOOM"], "cues": ["drums"]},'
+            '{"panel": 2, "dialogue": "", "sfx": [], "cues": []},'
+            '{"panel": 3, "dialogue": "Again!", "sfx": ["WHOOSH"], "cues": ["whoosh", "strings"]}'
+            "]}"
+        )
+    }
+
+
+def test_read_page_stores_dialogue_sfx_cues(factory, user, monkeypatch):
+    import json as _json
+
+    import komaverse.ai.providers as providers_mod
+
+    monkeypatch.setattr(settings, "meta_api_key", "test-key")
+    monkeypatch.setattr(providers_mod, "chat_complete", lambda **kw: _read_payload())
+    with factory() as s:
+        project = create_project(ProjectCreate(name="V"), s, user)
+    with factory() as s:
+        page = upload(s, user, project.id, fake_page())
+    with factory() as s:
+        panels = detect_panels(page.id, DetectRequest(detector="heuristic"), s, user)
+    assert len(panels.panels) >= 3
+    with factory() as s:
+        read = read_page(page.id, session=s, user=user)
+    assert len(read) == len(panels.panels)
+    first = read[0]
+    assert first.dialogue == "I will win."
+    assert first.sfx == "DOOM"
+    assert _json.loads(first.cues) == ["drums"]
+    third = read[2]
+    assert third.dialogue == "Again!"
+    assert third.sfx == "WHOOSH"
+    assert _json.loads(third.cues) == ["whoosh", "strings"]
+    # Stored on the rows, not just returned.
+    with factory() as s:
+        row = s.get(PanelRow, read[0].id)
+    assert row is not None and row.dialogue == "I will win."
+
+
+def test_read_page_needs_key(factory, user, monkeypatch):
+    monkeypatch.setattr(settings, "meta_api_key", "")
+    with factory() as s:
+        project = create_project(ProjectCreate(name="K"), s, user)
+    with factory() as s:
+        page = upload(s, user, project.id, fake_page())
+    with factory() as s:
+        detect_panels(page.id, DetectRequest(detector="heuristic"), s, user)
+    with factory() as s, pytest.raises(HTTPException) as exc:
+        read_page(page.id, session=s, user=user)
+    assert exc.value.status_code == 400
+
+
+def test_read_page_needs_panels(factory, user, monkeypatch):
+    monkeypatch.setattr(settings, "meta_api_key", "test-key")
+    with factory() as s:
+        project = create_project(ProjectCreate(name="E"), s, user)
+    with factory() as s:
+        page = upload(s, user, project.id, fake_page())
+    with factory() as s, pytest.raises(HTTPException) as exc:
+        read_page(page.id, session=s, user=user)
+    assert exc.value.status_code == 400

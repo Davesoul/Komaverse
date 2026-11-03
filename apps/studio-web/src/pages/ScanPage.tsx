@@ -25,7 +25,7 @@ export default function ScanPage() {
   const [panels, setPanels] = useState<Panel[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [mode, setMode] = useState<Mode>("select");
-  const [detector, setDetector] = useState("yolo-leoxs22");
+  const [detector, setDetector] = useState("sam");
   const [direction, setDirection] = useState("rtl");
   const [sideQuery, setSideQuery] = useState("");
   const [autoDetect, setAutoDetect] = useState(true);
@@ -390,6 +390,27 @@ export default function ScanPage() {
       setNotice(`Detect failed: ${(e as Error).message}`);
     } finally {
       setBusy("");
+    }
+  };
+
+  const [reading, setReading] = useState(false);
+  const doReadPage = async () => {
+    if (!page || panels.length === 0) return;
+    setReading(true);
+    setNotice("");
+    try {
+      const read = await api.readPage(page.id);
+      syncPanels(read);
+      const withText = read.filter((p) => p.dialogue || p.sfx).length;
+      setNotice(
+        withText > 0
+          ? `Read ${read.length} panels: dialogue in ${withText}.`
+          : `Read ${read.length} panels — no dialogue or SFX found.`,
+      );
+    } catch (e) {
+      setNotice(`Read failed: ${(e as Error).message}`);
+    } finally {
+      setReading(false);
     }
   };
 
@@ -759,18 +780,25 @@ export default function ScanPage() {
                 style={{ width: 170 }}
                 aria-label="Detector"
               >
+                <option value="sam">SAM 3.1 (Meta, panels)</option>
                 <option value="heuristic">Heuristic (local)</option>
                 <option value="yolo">YOLO best-comic (local)</option>
                 <option value="yolo-leoxs22">YOLO leoxs22 (local, fast)</option>
                 <option value="cloud">Cloud vision (fallback local)</option>
                 <option value="meta">Meta Muse vision (fallback local)</option>
-                <option value="sam">Meta SAM 3.1 segment (fallback local)</option>
                 <option value="local">Local vision model (fallback heuristic)</option>
                 <option value="openrouter">OpenRouter vision (fallback local)</option>
               </SelectInput>
               <PrimaryBtn onClick={doDetect} disabled={!!busy}>
                 Detect panels
               </PrimaryBtn>
+              <Btn
+                onClick={doReadPage}
+                disabled={!!busy || panels.length === 0}
+                title="Read dialogue, SFX, and audio-cue suggestions with the multimodal Meta vision model (needs META_API_KEY)"
+              >
+                {reading ? "Reading…" : "Read text"}
+              </Btn>
               <span role="group" aria-label="Reading direction" style={{ display: "inline-flex", gap: 4 }}>
                 <Btn
                   small
@@ -985,6 +1013,55 @@ export default function ScanPage() {
                 })}
               </svg>
             </div>
+            {(panels.some((p) => p.dialogue || p.sfx || p.cues) || reading) && (
+              <section aria-label="Page reading" style={{ marginTop: 12 }}>
+                <div style={{ fontSize: 13, color: "var(--kv-faint)", marginBottom: 8 }}>
+                  Page reading{reading ? " — reading…" : ""}
+                </div>
+                <ol style={{ margin: 0, padding: 0, listStyle: "none", display: "grid", gap: 8 }}>
+                  {panels.map((p) => {
+                    const cues: string[] = (() => {
+                      try {
+                        const v = p.cues ? JSON.parse(p.cues) : [];
+                        return Array.isArray(v) ? v.filter((c) => typeof c === "string") : [];
+                      } catch {
+                        return [];
+                      }
+                    })();
+                    if (!p.dialogue && !p.sfx && cues.length === 0) return null;
+                    return (
+                      <li
+                        key={p.id}
+                        className="kv-media-card"
+                        style={{
+                          padding: "8px 10px",
+                          cursor: "pointer",
+                          outline: p.id === selectedId ? "2px solid var(--kv-accent)" : "none",
+                        }}
+                        onClick={() => setSelectedId(p.id)}
+                        title={`Panel ${p.reading_order + 1} — click to select`}
+                      >
+                        <div style={{ fontSize: 12, color: "var(--kv-faint)", marginBottom: 4 }}>
+                          Panel {p.reading_order + 1}
+                          {p.name ? ` · ${p.name}` : ""}
+                        </div>
+                        {p.dialogue && <div style={{ whiteSpace: "pre-wrap" }}>{p.dialogue}</div>}
+                        {p.sfx && (
+                          <div className="kv-sfx" style={{ fontSize: 16, marginTop: p.dialogue ? 6 : 0 }}>
+                            {p.sfx}
+                          </div>
+                        )}
+                        {cues.length > 0 && (
+                          <div style={{ fontSize: 12, color: "var(--kv-muted)", marginTop: 6 }}>
+                            Cues: {cues.join(" · ")}
+                          </div>
+                        )}
+                      </li>
+                    );
+                  })}
+                </ol>
+              </section>
+            )}
             <StatusBar
               items={[
                 `${page.width}×${page.height}`,

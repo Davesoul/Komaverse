@@ -265,7 +265,7 @@ export default function AgentDock() {
   const [brainForm, setBrainForm] = useState({
     chatProvider: "openrouter",
     chat: "",
-    visionProvider: "openrouter",
+    visionProvider: "meta",
     vision: "",
     imageProvider: "openrouter",
     image: "",
@@ -1328,7 +1328,7 @@ export default function AgentDock() {
       setBrainForm((f) => ({
         ...f,
         chatProvider: p.chat ?? agentInfo?.provider ?? "openrouter",
-        visionProvider: p.vision ?? agentInfo?.provider ?? "openrouter",
+        visionProvider: p.vision ?? agentInfo?.provider ?? "meta",
         imageProvider: p.image ?? agentInfo?.provider ?? "openrouter",
         voiceProvider: p.voice ?? "free-tts",
       }));
