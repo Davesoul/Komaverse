@@ -900,3 +900,18 @@ color-theory (cel shadow colors, light logic), manga-literacy
   language.
 - Live: `npx tsc --noEmit` clean, `npm run build` green,
   consistency suite 16 green (no backend change this round).
+
+
+## ADR-33: Draw tab narrow-screen responsiveness (accepted)
+
+- The floating tool bar wraps to several rows on narrow screens
+  but the canvas viewport reserved a fixed 76px, so the bar
+  covered the top of the paper. The viewport now reserves the
+  bar's measured height (ResizeObserver, +16px breathing room),
+  so it tracks wrapping exactly; fullscreen mode is unchanged.
+- The sequence/frames toolbar row and the onion-skin control row
+  never wrapped, overflowing the page on phones. Both wrap with
+  row gaps now. Side panel, frames strip, and layers already
+  stacked or scrolled correctly (grid collapses under 920px).
+- Live: `npx tsc --noEmit` clean, `npm run build` green
+  (no backend change this round).

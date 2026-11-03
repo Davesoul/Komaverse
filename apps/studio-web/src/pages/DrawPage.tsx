@@ -326,6 +326,20 @@ export default function DrawPage() {
   const placeFileRef = useRef<HTMLInputElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const viewportRef = useRef<HTMLDivElement>(null);
+  // The tool floatbar overlays the canvas box and wraps on narrow
+  // screens; the viewport reserves its measured height so the bar
+  // never covers the top of the paper.
+  const floatRef = useRef<HTMLDivElement>(null);
+  const [floatGap, setFloatGap] = useState(76);
+  useEffect(() => {
+    const el = floatRef.current;
+    if (!el || typeof ResizeObserver === "undefined") return;
+    const measure = () => setFloatGap(el.offsetHeight + 16);
+    measure();
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [full]);
   const engineRef = useRef<DrawEngine | null>(null);
   const openedRef = useRef<string>("");
   const liveRef = useRef(live);
@@ -1965,7 +1979,7 @@ export default function DrawPage() {
                 </div>
               )}
               {!full && (
-              <div className="kv-floatbar" role="toolbar" aria-label="Drawing tools">
+              <div ref={floatRef} className="kv-floatbar" role="toolbar" aria-label="Drawing tools">
                 {TOOLS.map((t) => (
                   <Btn
                     key={t.id}
@@ -2049,7 +2063,7 @@ export default function DrawPage() {
                   maxHeight: full ? "none" : "70vh",
                   height: full ? "calc(100vh - 148px)" : undefined,
                   borderRadius: 4,
-                  marginTop: full ? 0 : 76,
+                  marginTop: full ? 0 : floatGap,
                   cursor,
                   background: "#000",
                   position: "relative",
@@ -2255,7 +2269,7 @@ export default function DrawPage() {
             />
 
             <div style={{ marginTop: 16 }}>
-              <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 8, rowGap: 8, flexWrap: "wrap", marginBottom: 8 }}>
                 <SelectInput
                   value={sequenceId}
                   onChange={(e) => pickSequence(e.target.value)}
@@ -2306,7 +2320,7 @@ export default function DrawPage() {
                 <IconBtn disabled={seqFrames.length === 0} onClick={() => void sendSequenceToRender()} label="Send this sequence to the current timeline as clips">▸▸</IconBtn>
                 <IconBtn danger disabled={!frame} onClick={removeFrame} label="Delete frame">×</IconBtn>
               </div>
-              <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8, fontSize: 13 }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 8, rowGap: 6, flexWrap: "wrap", marginBottom: 8, fontSize: 13 }}>
                 <Btn
                   small
                   active={onion}
