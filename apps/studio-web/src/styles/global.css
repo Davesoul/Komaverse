@@ -404,6 +404,16 @@ a {
   box-shadow: 4px 4px 0 rgba(0, 0, 0, 0.5);
 }
 
+/* Narrow Draw toolbar: one scrolling row instead of three wrapping
+   rows, so the canvas keeps its vertical room. */
+@media (max-width: 640px) {
+  .kv-floatbar {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    scrollbar-width: thin;
+  }
+}
+
 /* Skip link: visible on keyboard focus only. */
 .kv-skip {
   position: absolute;
@@ -462,6 +472,14 @@ html {
 @media (max-width: 920px) {
   .kv-grid {
     flex-direction: column;
+    /* Column direction + flex-start (no stretch) lets children hug
+       their content width: a 960px canvas forced the whole page to
+       ~1050px and defeated every fit. Stretch them to the column. */
+    align-items: stretch;
+  }
+  .kv-grid > * {
+    min-width: 0;
+    max-width: 100%;
   }
   .kv-side {
     width: 100% !important;

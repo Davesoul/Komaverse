@@ -332,6 +332,8 @@ export default function DrawPage() {
   const floatRef = useRef<HTMLDivElement>(null);
   const [floatGap, setFloatGap] = useState(76);
   useEffect(() => {
+    // The bar only exists once a frame is open; re-run per frame so the
+    // first measurement doesn't land on a null ref and stick at 76.
     const el = floatRef.current;
     if (!el || typeof ResizeObserver === "undefined") return;
     const measure = () => setFloatGap(el.offsetHeight + 16);
@@ -339,7 +341,7 @@ export default function DrawPage() {
     const ro = new ResizeObserver(measure);
     ro.observe(el);
     return () => ro.disconnect();
-  }, [full]);
+  }, [full, frameId]);
   const engineRef = useRef<DrawEngine | null>(null);
   const openedRef = useRef<string>("");
   const liveRef = useRef(live);
