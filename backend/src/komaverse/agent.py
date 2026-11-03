@@ -80,7 +80,7 @@ from komaverse.api.animate import (
     run_export_job,
     video_to_frames,
 )
-from komaverse.api.audio import CueCreate, add_cue, list_takes
+from komaverse.api.audio import CueCreate, SynthCreate, add_cue, list_takes, synthesize_take
 from komaverse.api.scans import (
     DetectRequest,
     ProjectCreate,
@@ -1460,6 +1460,32 @@ def _strip_timeline_ask(prompt: str) -> str:
     return prompt
 
 
+def _parse_speech_line(text: str) -> str | None:
+    """The line to voice: quoted text first, else text after a speech verb."""
+    spans = [
+        (m.start(), ((m.group(1) or m.group(2)) or "").strip())
+        for m in re.finditer(r'"([^"]{1,2000})"|\'([^\']{1,2000})\'', text)
+    ]
+    spans = [(pos, line) for pos, line in spans if line]
+    if spans:
+        verb = re.search(
+            r"\b(?:say|speak|narrate|voice|utter|deliver)\b", text, re.IGNORECASE
+        )
+        if verb:
+            after = [line for pos, line in spans if pos > verb.start()]
+            if after:
+                return after[0]
+        return spans[0][1]
+    m = re.search(
+        r"(?:say|speak|narrate|voice|utter|deliver)\s*:\s*(.{1,2000})$",
+        text.strip(),
+        re.IGNORECASE,
+    )
+    if m:
+        return m.group(1).strip() or None
+    return None
+
+
 def _parse_scene_ref(text: str) -> str | None:
     m = re.search(r'\bscene\s+"([^"]+)"', text) or re.search(r"\bscene\s+'([^']+)'", text)
     if m:
@@ -2164,6 +2190,47 @@ def tool_transcribe_audio(
             f"as subtitles on '{target.name}': {head}"
         )
     return f"Transcript of '{row.name or 'take'}' ({len(segs)} turns): {head}"
+
+
+def tool_synthesize_voice(session, user, project_id, text, voice=None, lang="en", scene=None, start_sec=0.0):
+    """Generate a voiceover take from text (TTS) into the take library.
+
+    text is the line to speak (<=2000 chars). voice is provider-shaped
+    and optional (blank = Brain default): an ElevenLabs voice id, an
+    `xtts:<clone-id>` local clone, or a free-tts `engine:voice` value —
+    list voices in the Render tab voice settings. With scene (+ optional
+    start_sec) the new take is cued on the scene timeline in one trip.
+    """
+    line = (text or "").strip()
+    if not line:
+        return "No text to speak — give me the line first."
+    try:
+        start = max(float(start_sec or 0.0), 0.0)
+    except (TypeError, ValueError):
+        start = 0.0
+    cue_scene_id = None
+    if scene:
+        try:
+            cue_scene_id = _resolve_scene(session, user, project_id, scene).id
+        except HTTPException as exc:
+            return str(exc.detail)
+    try:
+        take = synthesize_take(
+            project_id,
+            SynthCreate(
+                text=line[:2000],
+                voice=(voice or None),
+                lang=(lang or "en"),
+                cue_scene_id=cue_scene_id,
+                cue_start_sec=start,
+            ),
+            session,
+            user,
+        )
+    except HTTPException as exc:
+        return str(exc.detail)
+    where = f", cued at {start:g}s" if cue_scene_id else ""
+    return f"Voiced {len(line)} chars as '{take.name or 'take'}' [take {take.id}]{where}."
 
 
 def tool_frame_from_media(session, user, project_id, source, name=None, sequence=None):
@@ -3517,6 +3584,12 @@ def demo_turn(
                 kind, source_id = resolved
                 reply = run("add_clip", tool_add_clip, session, user, project_id, kind, source_id, _parse_scene_ref(message), parse_seconds(message) or 2.0, (parse_motions(message) or ["none"])[0], _parse_transition(message), None,
                                                         _parse_fade(message, "in"), _parse_fade(message, "out"))
+    elif any(k in text for k in ("say ", "speak", "narrate", "text to speech", "text-to-speech", "tts", "voice this", "voice the", "voiceover for", "voiceover:", 'voice "', "voice '", "voice:")) and "transcribe" not in text:
+        line = _parse_speech_line(message)
+        if not line:
+            reply = "Which line should I voice? Quote it (e.g. voice \"we ride at dawn\") — and name a scene and I will cue it on the timeline in the same step."
+        else:
+            reply = run("synthesize_voice", tool_synthesize_voice, session, user, project_id, line, None, "en", _parse_scene_ref(message), parse_seconds(message) or 0.0)
     elif (
         any(k in text for k in TAKE_WORDS)
         and any(k in text for k in CUE_VERBS + ("timeline", "scene", "second", "voiceover"))
@@ -3670,7 +3743,16 @@ _SYSTEM = (
     "create_video so prompts carry the craft. For drawing advice, line "
     "art, or anime/cartoon style questions, read the "
     "drawing-fundamentals skill (construction, pen and pencil line "
-    "work, anime proportions, screentone, layer discipline)."
+    "work, anime proportions, screentone, layer discipline). "
+    "For story structure, episode/chapter beats, pacing, fps and "
+    "export cadence, or voice casting and line reads, read the "
+    "story-pacing skill (kishotenketsu, page-turn beats, ma, "
+    "animatic timing, voice direction); synthesize voiceover lines "
+    "with synthesize_voice, which cues the take on the timeline. "
+    "For shot and panel staging, perspective, and framing that reads "
+    "instantly, read the visual-composition skill (focal hierarchy, "
+    "leading lines, depth, anime-cut staging); for panel flow, "
+    "reading order, and lettering/SFX placement, read manga-literacy."
     "Research online with web_search, then read hits with web_fetch; "
     "list_tools shows every tool, list_skills shows every skill."
 )
@@ -3959,6 +4041,30 @@ _TOOLS_SCHEMA = [
                     "end_sec": {"type": "number"},
                     "lane": {"type": "number"},
                 },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "synthesize_voice",
+            "description": (
+                "Generate a voiceover take from text (TTS) into the take library, "
+                "then optionally cue it on a scene timeline in the same call. "
+                "voice is optional (blank = Brain default): an ElevenLabs voice id, "
+                "an xtts:<clone-id> local clone, or a free-tts engine:voice value. "
+                "Ask which voice to use when the line matters; scene cues the take at start_sec."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "text": {"type": "string"},
+                    "voice": {"type": "string"},
+                    "lang": {"type": "string"},
+                    "scene": {"type": "string"},
+                    "start_sec": {"type": "number"},
+                },
+                "required": ["text"],
             },
         },
     },
@@ -4481,6 +4587,13 @@ def _exec_cloud_tool(
                     args.get("scene"), str(args.get("mode") or "ENDPOINTING"),
                     bool(args.get("save_subtitles")),
                 )
+        elif name == "synthesize_voice":
+            result = tool_synthesize_voice(
+                session, user, project_id,
+                str(args.get("text") or ""),
+                args.get("voice"), args.get("lang"),
+                args.get("scene"), args.get("start_sec"),
+            )
         elif name == "frame_from_media":
             result = tool_frame_from_media(
                 session, user, project_id,

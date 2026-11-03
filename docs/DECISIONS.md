@@ -1092,4 +1092,40 @@ color-theory (cel shadow colors, light logic), manga-literacy
   (crowd roar / dramatic impact / heroic sting, ...) persisted
   in reading order. Probe projects deleted afterwards.
 
+## ADR-41: Agent voice synthesis + story-pacing skill (accepted)
+
+- New `synthesize_voice` agent tool, wired to the existing
+  `POST /projects/{id}/audio/synthesize` endpoint: text (<=2000
+  chars, required), optional voice (`ElevenLabs id`,
+  `xtts:<clone-id>`, or `engine:voice`; blank = Brain default),
+  lang, and optional scene + start_sec that cues the new take on
+  the timeline in the same round trip. Result lands in the take
+  library, so waveforms, cues, and the export mix just work.
+- Demo-brain router branch for speech verbs (`voice "..."`,
+  `say/narrate/speak`, `tts`, `voiceover for`) placed BEFORE the
+  cue-take branch: the cue branch's `at` substring was hijacking
+  lines like `voice "we ride at dawn"`. Quoted text is the line;
+  a verb + colon is the fallback; a bare verb with no line asks
+  the user to quote it instead of guessing. Scene refs reuse
+  `_parse_scene_ref`; voices stay Brain-default in the fast path
+  (the tool schema tells the model to ask when the line matters).
+- New `story-pacing` project skill (auto-discovered via
+  `list_skills`, referenced in the agent system prompt next to
+  anime-animation-production and drawing-fundamentals):
+  kishotenketsu vs three-act, manga pacing (decompression, page-
+  turn beats, panel density, cut lists, animatic timing), the
+  fps rule (animate the cadence, export the container — 24fps),
+  and voice direction (one voice per character, verb-led line
+  reads, dialogue-forward mix, time cuts to takes). No overlap
+  with the anime skill's shot grammar / cel QC / audio-pairing
+  sections — this one owns story, rhythm, and voice.
+- Same pass nudges two more craft skills in the system prompt:
+  visual-composition (staging, perspective, framing, anime-cut
+  composition) and manga-literacy (panel flow, reading order,
+  lettering/SFX placement); perspective + construction + anatomy
+  were already covered by the drawing-fundamentals nudge.
+- Live: 4 new agent tests (speech-line parser, routed synthesis
+  with cue, ask-without-line, skill registration); full suite
+  green; `:8001` restarted for the new tool/prompt.
+
 

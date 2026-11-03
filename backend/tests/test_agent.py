@@ -1429,3 +1429,54 @@ def test_cloud_generation_ignores_echoed_token(factory, user, monkeypatch):
     assert ".png" in summary
     assert "reference" not in summary.lower()
     assert job_entities(factory, job_id_of(summary)) == []
+def test_parse_speech_line():
+    from komaverse.agent import _parse_speech_line
+
+    assert _parse_speech_line('voice "we ride at dawn"') == "we ride at dawn"
+    assert _parse_speech_line("narrate: the city sleeps") == "the city sleeps"
+    assert _parse_speech_line("say 'again, louder'") == "again, louder"
+    assert _parse_speech_line('in scene "fight" say "again!"') == "again!"
+    assert _parse_speech_line('voice "hello" in scene "fight"') == "hello"
+    assert _parse_speech_line("speak up") is None
+    assert _parse_speech_line("voice this line as the hero") is None
+
+
+def test_agent_synthesize_voice_routes_and_cues(factory, user, monkeypatch):
+    import komaverse.agent as agent_mod
+    from types import SimpleNamespace
+
+    from komaverse.api.animate import list_scenes
+
+    seen = {}
+
+    def fake_synth(project_id, body, session, usr):
+        seen["text"] = body.text
+        seen["cue"] = body.cue_scene_id
+        return SimpleNamespace(id="take0001", name="Dawn")
+
+    monkeypatch.setattr(agent_mod, "synthesize_take", fake_synth)
+    pid = seed_project(factory, user)
+    out = turn(factory, user, 'voice "we ride at dawn"', pid)
+    assert out["actions"] and out["actions"][0]["tool"] == "synthesize_voice"
+    assert "[take take0001]" in out["reply"]
+    assert seen["text"] == "we ride at dawn"
+    # Scene mention cues the take on the timeline in the same step.
+    with factory() as s:
+        scene = list_scenes(pid, s, user)[0]
+    out = turn(factory, user, f'voice "charge!" in scene "{scene.name}"', pid)
+    assert seen["cue"] == scene.id
+
+
+def test_agent_voice_without_line_asks(factory, user):
+    pid = seed_project(factory, user)
+    out = turn(factory, user, "speak", pid)
+    assert out["actions"] == []
+    assert "which line" in out["reply"].lower()
+
+
+def test_story_pacing_skill_registered():
+    from komaverse.skills import list_skills
+
+    names = {s["name"] for s in list_skills()}
+    assert "story-pacing" in names
+    assert "anime-animation-production" in names
