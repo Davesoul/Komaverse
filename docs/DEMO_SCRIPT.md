@@ -14,6 +14,23 @@ submit the link — engagement counts through Nov 8), Community Vote
 Nov 3 for this hackathon — say that once, early; the repo history
 proves it.
 
+## The $2.18 budget box (read this, not on camera)
+
+Seedance 2.0 bills from ~$0.067/second, so a 4-second clip costs
+about $0.27. $2.18 buys roughly eight 4-second takes — plenty for
+ONE keyed run plus one retake, nothing more. Rules:
+
+- Rehearse the full run on the fake provider (zero spend) until
+  every click is muscle memory. Only then switch keys.
+- The keyed run burns exactly: 1 cheap image (Flux Klein default)
+  + 1 Seedance clip at 4 seconds. Say "four seconds" out loud in
+  the agent prompt so the duration locks before the call.
+- Check the OpenRouter balance on camera right before the run
+  (-keys page) — it doubles as "real money, real product" proof
+  and protects you from a mid-take insufficient-credit error.
+- If a take fails, you have one retake. Second failure: keep the
+  footage you have, cut around it, never narrate a spinner.
+
 Cold open: the ident sting, fullscreen, with sound (0:00–0:05).
 `apps/studio-web/public/ident.html` + `/audio/ident-sting.mp3`.
 
@@ -52,7 +69,9 @@ grammar, shot rhythm, QC — instead of vibes.
    paste the Meta key into Provider keys — no .env, no restart.
    Show `keys_set`: Meta saved in studio. Say it out loud: "the
    brain runs on Muse Spark — that's our Meta Model API spend,
-   and the Usage tab is the receipt."
+   and the Usage tab is the receipt." Then paste the OpenRouter
+   key the same way: "and video runs on Seedance 2.0 through
+   OpenRouter — four seconds, about twenty-seven cents."
 2. **Scan (1:00).** Upload a manga page, Detect panels. Panels snap
    out; reading order RTL. (SAM 3.1 is wired as a detector too —
    name it if you switch to it.)
@@ -60,7 +79,10 @@ grammar, shot rhythm, QC — instead of vibes.
    costume, exact hex palette. "This is the model sheet — every
    generation anchors to it, so the character can't drift."
 4. **Direct (1:20, the centerpiece).** Ask the agent: *"direct a
-   shonen battle cut from panel 1 — read the anime skill first."*
+   4-second shonen battle cut from panel 1, Seedance 2.0 — read the
+   anime skill first."* The agent confirms duration/ratio before
+   spending — let that confirmation play, it's the cost-gate
+   story told live.
    Hold for: the `read_skill` tool call, the `create_image` call
    with `genre: shonen`. Open "What was sent": cel-shaded tags,
    hard shadows, entity anchors in the prompt. This ten-second
@@ -84,7 +106,8 @@ the platform, farm the replies through Nov 8.
 
 ## Shoot notes
 
-- Record the keyed run first; everything else is B-roll around it.
+- Rehearse on the fake provider; record the keyed run first;
+  everything else is B-roll around it.
 - Keep the agent's tool calls visible — chips on screen at all times.
 - If autoplay blocks the sting audio, click "Play intro with sound";
   that fallback is a feature, show it working.
