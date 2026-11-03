@@ -9,11 +9,26 @@ Rebuild of `../saas-projects/koma-wari` (kept as legacy reference —
 do not import from it, port deliberately). All work in this repo
 started Oct 28, 2026.
 
+## Try it (judges — no credentials needed)
+
+- Open the app and **Sign up** with any email and password.
+  Accounts live on that server alone; there is no shared demo
+  account and nothing to look up.
+- Everything except paid AI works with zero keys: scan, panel
+  detection, draw, timeline, subtitles, local voice cloning and
+  local TTS, MP4 export.
+- Paid generations need your own keys: paste Meta / OpenRouter /
+  ElevenLabs keys into the Brain panel (Provider keys) — no
+  `.env`, no restart. Or pick the fake provider for a free tour.
+- Keys are never shown on screen; the status endpoint only
+  reports set-or-not.
+
 ## Features (v1)
 
-- **Scan:** upload manga pages, detect panels (YOLO `yolo-leoxs22`
-  default, `yolo` best-comic option via `KOMA_YOLO_MODEL`, heuristic
-  fallback, cloud with local fallback; missing weights can be fetched
+- **Scan:** upload manga pages, detect panels (SAM 3.1
+  default, YOLO `yolo-leoxs22` / `yolo` best-comic options via
+  `KOMA_YOLO_MODEL`, heuristic fallback, cloud with local fallback;
+  missing weights can be fetched
   once from `KOMA_YOLO_LEOXS_URL` / `KOMA_YOLO_URL` on web deploys, with
   a bottom-left download card visible on every tab until ready),
   1:1 true-size viewer, SVG overlay editor (move/reshape/add/delete,
