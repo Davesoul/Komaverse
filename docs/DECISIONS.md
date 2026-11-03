@@ -827,3 +827,54 @@ color-theory (cel shadow colors, light logic), manga-literacy
 - Live: 3 new clone tests (roundtrip + isolation + delete, validation,
   picker ordering, all ElevenLabs HTTP mocked) — full backend 422
   green, `npx tsc --noEmit` clean, `npm run build` green.
+
+
+## ADR-31: Reference roles, agent vision, sequence refs, preview cover, trust pass (accepted)
+
+- Start/end frames are roles, not references. `_tag_reference_roles`
+  reads phrasing near each @-token ("X as the start frame", "end on
+  Y", "from X to Y" — the pair beats window phrasing) and tags every
+  ref start, end, or reference; untagged refs stay style/subject
+  guidance even when alone, so the open frame is never scope-injected
+  and a lone character ref can no longer become the first frame.
+  `run_ai_job` routes role frames to `start_frame`/`end_frame`
+  (OpenRouter `first_frame`/`last_frame`) and keeps the rest as
+  guidance; the legacy explicit reference frame keeps its start
+  meaning only when no role claims the slot. Stills have no frame
+  slots: `image_guidance` sends every snap plus the legacy frame
+  first, exactly the old counts (regression-pinned).
+- The agent can SEE before generating, through the same Meta chat
+  models as text (`get_chat_config(vision=True)` → meta vision or
+  chat model — multimodal, no LangChain). `look_at` shows a frame,
+  panel, scan page, generation, or sequence to the vision model
+  (frames arrive with their layer inventory; sequences as a labeled
+  contact sheet with per-frame layer counts). `watch_video` samples
+  up to 8 frames across a finished generation plus a speech
+  transcript, timestamped, so the model apprehends a video reference
+  before generating from it. Both are registered tools with prompt
+  text that mandates look-before-describe.
+- Sequences are first-class references end to end: @sequence: tokens
+  resolve in `gather_reference_snapshots` with frame/layer counts,
+  participate in from-to role pairs, and appear in the composer
+  @-picker (`AgentRef` kind + REF_RE + Sequences group, first-frame
+  thumbnail, "N frames · M layers"). `AgentRef.role` defaults to
+  "reference"; phrasing overrides it server-side.
+- Butt-jointed clips flashed black while React remounted the layer:
+  the incoming clip now fades in over the frozen outgoing one
+  (220ms cover, 600ms can-play fallback) and the outgoing clip
+  unmounts only after the handoff. The playhead clip computation
+  moved above the hooks so the cover effects and the empty-cut
+  early return share one source (fixed a use-before-declaration
+  tsc break).
+- Trust pass: first-run model downloads show a bottom-left card on
+  every tab (polls /detect-status); the render timeline has Draw
+  parity undo/redo (Ctrl+Z / Ctrl+Shift+Z, clip snapshots) — audit
+  confirmed every destructive action (clips, cues, takes, clones,
+  scenes, entities, frames, layers, panels, pages, sequences,
+  projects, chat history) sits behind a window.confirm; all user
+  routes require JWT (`get_current_user`), the only open surfaces
+  are register/health/client-log plus the service-user MCP endpoint.
+- Live: 5 new tests (OpenRouter end_frame payload, role routing,
+  role phrasing + from-to pair, look_at early-out, image guidance
+  counts) — full backend 427 green, `npx tsc --noEmit` clean,
+  `npm run build` green.

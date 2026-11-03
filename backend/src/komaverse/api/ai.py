@@ -104,6 +104,14 @@ class EntityCreate(BaseModel):
 
 _REF_PX = 768  # reference snapshots are guidance, not artwork
 _MAX_REFS = 3
+def image_guidance(ref_pngs, start):
+    """Guidance images for a still: every snap rides along (stills have no first/last frame slots), legacy reference frame first as before."""
+    guidance = [png for _, png in ref_pngs]
+    if start is not None and not any(role == "start" for role, _ in ref_pngs):
+        guidance.insert(0, start)
+    return guidance
+
+
 _MAX_SEED = 2**31 - 1
 _AI_SEQUENCE_NAME = "AI generations"
 
@@ -311,11 +319,7 @@ def run_ai_job(job_id: str, factory=None) -> None:
             job.seed = seed_used
             # Visual guidance, cheapest-first: explicit start frame, then
             # entity snapshots in order. Capped — each is a full upload.
-            ref_pngs: list[bytes] = []
-            if job.reference_frame_id and job.project_id:
-                png = _frame_png(session, job.project_id, job.reference_frame_id)
-                if png is not None:
-                    ref_pngs.append(png)
+            ref_pngs: list[tuple[str, bytes]] = []
             for ent in entities:
                 if len(ref_pngs) >= _MAX_REFS:
                     break
@@ -331,7 +335,18 @@ def run_ai_job(job_id: str, factory=None) -> None:
                 else:
                     png = None
                 if png is not None:
-                    ref_pngs.append(png)
+                    ref_pngs.append((ent.get("role") or "reference", png))
+            # Roles route the video slots: an explicit start/end frame
+            # opens and closes the video; untagged refs stay style/subject
+            # guidance. The legacy explicit reference frame keeps its
+            # start meaning when no role claims the slot.
+            start = next((png for role, png in ref_pngs if role == "start"), None)
+            if start is None and job.reference_frame_id and job.project_id:
+                start = _frame_png(session, job.project_id, job.reference_frame_id)
+            end = next((png for role, png in ref_pngs if role == "end"), None)
+            rest = [png for role, png in ref_pngs if role not in ("start", "end")]
+            cap = max(_MAX_REFS - (1 if start else 0) - (1 if end else 0), 0)
+            rest = rest[:cap]
             if job.kind == "image":
                 data = provider.generate_image(
                     final,
@@ -340,19 +355,17 @@ def run_ai_job(job_id: str, factory=None) -> None:
                     model=job.model,
                     seed=seed_used,
                     negative_prompt=job.negative_prompt or "",
-                    reference_images=tuple(ref_pngs),
+                    reference_images=tuple(image_guidance(ref_pngs, start)),
                 )
                 suffix = "png"
             elif job.kind == "video":
-                start, rest = (
-                    (ref_pngs[0], ref_pngs[1:]) if ref_pngs else (None, [])
-                )
                 data = provider.generate_video(
                     final,
                     job.seconds,
                     model=job.model,
                     seed=seed_used,
                     start_frame=start,
+                    end_frame=end,
                     reference_images=tuple(rest),
                 )
                 suffix = "mp4"

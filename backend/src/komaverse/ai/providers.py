@@ -61,6 +61,7 @@ class AIProvider(Protocol):
         *,
         seed: int | None = None,
         start_frame: bytes | None = None,
+        end_frame: bytes | None = None,
         reference_images: tuple[bytes, ...] = (),
     ) -> bytes:
         ...
@@ -234,6 +235,7 @@ class CloudProvider:
         *,
         seed: int | None = None,
         start_frame: bytes | None = None,
+        end_frame: bytes | None = None,
         reference_images: tuple[bytes, ...] = (),
     ) -> bytes:
         raise UnsupportedOp("generic cloud endpoint has no video model configured")
@@ -418,6 +420,7 @@ class ComfyUIProvider:
         *,
         seed: int | None = None,
         start_frame: bytes | None = None,
+        end_frame: bytes | None = None,
         reference_images: tuple[bytes, ...] = (),
     ) -> bytes:
         raise UnsupportedOp("ComfyUI video workflow not configured")
@@ -465,12 +468,14 @@ class FakeProvider:
         *,
         seed: int | None = None,
         start_frame: bytes | None = None,
+        end_frame: bytes | None = None,
         reference_images: tuple[bytes, ...] = (),
     ) -> bytes:
         self.last_video = {
             "prompt": prompt,
             "seed": seed,
             "start_frame": start_frame is not None,
+            "end_frame": end_frame is not None,
             "references": len(reference_images),
         }
         raise UnsupportedOp("fake provider has no video")
@@ -1029,6 +1034,7 @@ class MetaProvider:
         *,
         seed: int | None = None,
         start_frame: bytes | None = None,
+        end_frame: bytes | None = None,
         reference_images: tuple[bytes, ...] = (),
     ) -> bytes:
         raise UnsupportedOp(
@@ -1418,6 +1424,7 @@ class OpenRouterProvider:
         *,
         seed: int | None = None,
         start_frame: bytes | None = None,
+        end_frame: bytes | None = None,
         reference_images: tuple[bytes, ...] = (),
     ) -> bytes:
         # Async Video API (docs/.../multimodal/video-generation): POST
@@ -1443,6 +1450,14 @@ class OpenRouterProvider:
                     "frame_type": "first_frame",
                 }
             ]
+        if end_frame is not None:
+            payload.setdefault("frame_images", []).append(
+                {
+                    "type": "image_url",
+                    "image_url": {"url": _data_url(end_frame)},
+                    "frame_type": "last_frame",
+                }
+            )
         if reference_images:
             payload["input_references"] = [
                 {"type": "image_url", "image_url": {"url": _data_url(png)}}

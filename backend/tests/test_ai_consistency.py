@@ -297,6 +297,122 @@ def test_openrouter_video_sends_start_frame_and_seed(monkeypatch):
     assert len(seen["body"]["input_references"]) == 1
 
 
+def test_openrouter_video_sends_end_frame(monkeypatch):
+    """Start + end frames ride as first_frame/last_frame; guidance stays
+    in input_references and never becomes a frame."""
+    seen = {}
+
+    def _post(url, json=None, headers=None, timeout=None):
+        seen["body"] = json
+        return _RespVid()
+
+    class _RespVid:
+        status_code = 202
+
+        def json(self):
+            return {"id": "j", "polling_url": "https://x.test/videos/j"}
+
+    def _get(url, headers=None, timeout=None):
+        if url == "https://x.test/videos/j":
+            return _RespDone()
+        return _RespBytes()
+
+    class _RespDone:
+        status_code = 200
+
+        def json(self):
+            return {"status": "completed", "unsigned_urls": []}
+
+    class _RespBytes:
+        status_code = 200
+        content = b"MP4BYTES"
+
+    monkeypatch.setattr(settings, "openrouter_api_key", "or-test")
+    monkeypatch.setattr(httpx, "post", _post)
+    monkeypatch.setattr(httpx, "get", _get)
+    out = OpenRouterProvider().generate_video(
+        "a duel", 2.0, start_frame=_png(), end_frame=_png(),
+        reference_images=(_png(),),
+    )
+    assert out == b"MP4BYTES"
+    frames = seen["body"]["frame_images"]
+    assert [f["frame_type"] for f in frames] == ["first_frame", "last_frame"]
+    assert len(seen["body"]["input_references"]) == 1
+
+
+def test_run_ai_job_routes_role_frames(factory, user, monkeypatch):
+    """Role-tagged snaps route to start/end slots; untagged refs stay
+    guidance and never become the first frame."""
+    import json
+
+    import komaverse.api.ai as ai_mod
+    from komaverse.db_models import JobRow
+
+    proj = _project(factory, user)
+    with factory() as s:
+        grant(GrantRequest(amount=100), s, user)
+        f1 = create_frame(proj.id, FrameCreate(name="S", width=64, height=64), s, user)
+        f2 = create_frame(proj.id, FrameCreate(name="E", width=64, height=64), s, user)
+        f3 = create_frame(proj.id, FrameCreate(name="G", width=64, height=64), s, user)
+    seen = {}
+
+    class Rec:
+        name = "rec"
+
+        def generate_video(self, prompt, seconds, model=None, **kw):
+            seen.update(kw)
+            return b"VID"
+
+    monkeypatch.setattr(ai_mod, "get_provider", lambda _name: Rec())
+    with factory() as s:
+        s.add(JobRow(
+            id="vidroles", user_id=user.id, project_id=proj.id, kind="video",
+            prompt="x", status="queued", provider="rec", model=None, seconds=2.0,
+            entities_json=json.dumps([
+                {"id": f"frame:{f1.id}", "name": "S", "kind": "reference", "frame_id": f1.id, "role": "start"},
+                {"id": f"frame:{f2.id}", "name": "E", "kind": "reference", "frame_id": f2.id, "role": "end"},
+                {"id": f"frame:{f3.id}", "name": "G", "kind": "reference", "frame_id": f3.id},
+            ]),
+        ))
+        s.commit()
+    ai_mod.run_ai_job("vidroles", factory)
+    assert isinstance(seen["start_frame"], bytes)
+    assert isinstance(seen["end_frame"], bytes)
+    assert len(seen["reference_images"]) == 1  # only the guidance frame
+    with factory() as s:
+        assert get_job("vidroles", s, user).status == "done"
+
+
+def test_tag_reference_roles_from_phrasing():
+    """Roles come from phrasing near each @-token, never from position:
+    untagged refs stay guidance even when alone."""
+    from komaverse.agent import _tag_reference_roles
+
+    refs = [{"kind": "frame", "id": "a"}]
+    assert _tag_reference_roles("use @frame:a as the start frame", refs)[0]["role"] == "start"
+    assert _tag_reference_roles("end on @frame:a", refs)[0]["role"] == "end"
+    assert _tag_reference_roles("in the style of @gen:a", [{"kind": "gen", "id": "a"}])[0]["role"] == "reference"
+    assert _tag_reference_roles("make @gen:a move", [{"kind": "gen", "id": "a"}])[0]["role"] == "reference"
+
+
+def test_tag_reference_roles_from_to_pair():
+    """An explicit from-X-to-Y pair beats nearby window phrasing."""
+    from komaverse.agent import _tag_reference_roles
+
+    refs = [{"kind": "sequence", "id": "s"}, {"kind": "frame", "id": "f"}]
+    out = _tag_reference_roles("from @sequence:s to @frame:f, epic ending", refs)
+    assert {r["id"]: r["role"] for r in out} == {"s": "start", "f": "end"}
+
+
+def test_look_at_empty_needs_no_vision_key(factory, user, monkeypatch):
+    """The nothing-to-look-at early-out fires before any vision call."""
+    from komaverse import agent as agent_mod
+
+    monkeypatch.setattr(agent_mod, "_vision_answer", lambda *a, **k: "SHOULD NOT RUN")
+    with factory() as s:
+        assert "look at yet" in agent_mod.tool_look_at(s, user, "nope", "")
+
+
 def test_enhance_fails_soft_without_chat(factory, user, monkeypatch):
     # Hermetic keys are blank, so the enhance call fails and the raw prompt
     # (with entities) goes through unchanged.

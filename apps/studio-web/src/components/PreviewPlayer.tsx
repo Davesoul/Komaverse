@@ -34,12 +34,15 @@ function VideoPreviewClip({
   offset,
   seekNonce,
   label,
+  onReady,
 }: {
   src: string;
   playing: boolean;
   offset: number;
   seekNonce: number;
   label: string;
+  /** Fires when the first frame can paint (cover handoff). */
+  onReady?: () => void;
 }) {
   const ref = useRef<HTMLVideoElement>(null);
   const tryPlay = (el: HTMLVideoElement) => {
@@ -74,6 +77,7 @@ function VideoPreviewClip({
       playsInline
       preload="auto"
       aria-label={label}
+      onCanPlay={onReady}
       style={{ width: "100%", height: "100%", objectFit: "contain", background: "#000" }}
     />
   );
@@ -122,6 +126,20 @@ const fmt = (t: number) => {
   return `${m}:${s < 10 ? "0" : ""}${s.toFixed(1)}`;
 };
 
+/** Mount fade: a freshly mounted layer eases in instead of popping. */
+function FadeIn({ children, style }: { children: React.ReactNode; style?: React.CSSProperties }) {
+  const [on, setOn] = useState(false);
+  useEffect(() => {
+    const r = requestAnimationFrame(() => setOn(true));
+    return () => cancelAnimationFrame(r);
+  }, []);
+  return (
+    <div style={{ ...style, opacity: on ? 1 : 0, transition: "opacity 220ms ease-out" }}>
+      {children}
+    </div>
+  );
+}
+
 export function PreviewPlayer({
   clips,
   seek,
@@ -169,6 +187,89 @@ export function PreviewPlayer({
   // play/seek sequences can't strand a stale closure.
   const audioEls = useRef(new Map<string, HTMLAudioElement>());
   const audioTimers = useRef<number[]>([]);
+
+  /** Absolute start of every clip in preview seconds. */
+  const starts = useMemo(() => {
+    const out: number[] = [];
+    let acc = 0;
+    for (const c of clips) {
+      out.push(acc);
+      acc += c.duration;
+    }
+    return out;
+  }, [clips]);
+  const startOf = (id: string) => {
+    const i = clips.findIndex((c) => c.id === id);
+    return i < 0 ? 0 : starts[i];
+  };
+  /** Clip under the playhead. Computed up here (not at render) because
+   * the crossfade effects above the empty-cut early return need it. */
+  const current: PreviewClip | undefined = (() => {
+    let acc = 0;
+    let cur: PreviewClip | undefined = clips[0];
+    for (const c of clips) {
+      if (time < acc + c.duration || c === clips[clips.length - 1]) {
+        cur = c;
+        break;
+      }
+      acc += c.duration;
+    }
+    return cur;
+  })();
+
+  /** Crossfade cover: the incoming clip fades in over the frozen
+   * outgoing one, so butt-jointed clips never flash the black stage
+   * while React remounts the layer. */
+  const [baseId, setBaseId] = useState<string | null>(null);
+  const [cover, setCover] = useState<{
+    clip: PreviewClip;
+    at: number;
+    shown: boolean;
+    gen: number;
+  } | null>(null);
+  const liveRef = useRef<string | null>(null);
+  const coverGen = useRef(0);
+  const coverTimers = useRef<number[]>([]);
+  useEffect(
+    () => () => {
+      coverTimers.current.forEach((t) => window.clearTimeout(t));
+    },
+    [],
+  );
+  const showCover = (gen: number) => {
+    if (gen !== coverGen.current) return;
+    setCover((c) => (c && c.gen === gen && !c.shown ? { ...c, shown: true } : c));
+    const promote = window.setTimeout(() => {
+      if (gen !== coverGen.current) return;
+      setCover((c) => {
+        if (c && c.gen === gen) setBaseId(c.clip.id);
+        return null;
+      });
+    }, 240);
+    coverTimers.current.push(promote);
+  };
+  const base = (baseId ? clips.find((c) => c.id === baseId) : undefined) ?? current ?? clips[0]!;
+  useEffect(() => {
+    if (!current) return;
+    if (liveRef.current === null) {
+      liveRef.current = current.id;
+      setBaseId(current.id);
+      return;
+    }
+    if (liveRef.current === current.id) return;
+    liveRef.current = current.id;
+    const gen = ++coverGen.current;
+    setBaseId((b) => b ?? current.id);
+    setCover({
+      clip: current,
+      at: Math.max(0, timeRef.current - startOf(current.id)),
+      shown: false,
+      gen,
+    });
+    const fallback = window.setTimeout(() => showCover(gen), 600);
+    coverTimers.current.push(fallback);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [current]);
 
   const stopAllAudio = () => {
     audioTimers.current.forEach((t) => window.clearTimeout(t));
@@ -252,6 +353,13 @@ export function PreviewPlayer({
     stopAllAudio();
     setTime(0);
     setPlaying(autoPlay);
+    // A new clip list invalidates any in-flight cover handoff.
+    coverGen.current += 1;
+    setCover(null);
+    if (current) {
+      setBaseId(current.id);
+      liveRef.current = current.id;
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [clips, autoPlay]);
 
@@ -338,15 +446,13 @@ export function PreviewPlayer({
     );
   }
 
+  // Local progress of the displayed (base) clip: during a cover handoff
+  // the base is the frozen outgoing clip, so its own offset applies.
   let acc = 0;
-  let current = clips[0];
   let local = 0;
-  let currentStart = 0;
   for (const c of clips) {
-    if (time < acc + c.duration || c === clips[clips.length - 1]) {
-      current = c;
-      currentStart = acc;
-      local = Math.min(Math.max((time - acc) / c.duration, 0), 1);
+    if (c === base) {
+      local = Math.min(Math.max((time - acc) / base.duration, 0), 1);
       break;
     }
     acc += c.duration;
@@ -364,21 +470,22 @@ export function PreviewPlayer({
           marginBottom: 8,
         }}
       >
-        {current.video ? (
+        {base.video ? (
           <VideoPreviewClip
-            key={current.id}
-            src={current.video}
-            playing={playing}
-            offset={Math.max(0, time - currentStart)}
+            key={base.id}
+            src={base.video}
+            // Frozen while the cover fades in over it, live otherwise.
+            playing={cover ? false : playing}
+            offset={Math.max(0, time - startOf(base.id))}
             seekNonce={seek?.nonce ?? 0}
-            label={current.label}
+            label={base.label}
           />
         ) : (
           <img
-            key={current.id}
+            key={base.id}
             crossOrigin="use-credentials"
-            src={current.image}
-            alt={current.label}
+            src={base.image}
+            alt={base.label}
             style={{
               width: "100%",
               height: "100%",
@@ -387,15 +494,53 @@ export function PreviewPlayer({
               // stage letterboxes the rest, which the Ken Burns drift plays on.
               objectFit: "contain",
               background: "#000",
-              filter: current.filter || undefined,
-              ...motionStyle(current.motion, local, motionOff),
+              filter: base.filter || undefined,
+              ...motionStyle(base.motion, local, motionOff),
             }}
           />
+        )}
+        {cover && (
+          <div
+            key={`${cover.clip.id}:${cover.gen}`}
+            style={{
+              position: "absolute",
+              inset: 0,
+              background: "#000",
+              opacity: cover.shown ? 1 : 0,
+              transition: "opacity 220ms ease-out",
+              pointerEvents: "none",
+            }}
+          >
+            {cover.clip.video ? (
+              <VideoPreviewClip
+                src={cover.clip.video}
+                playing={cover.shown && playing}
+                offset={cover.at}
+                seekNonce={seek?.nonce ?? 0}
+                label={cover.clip.label}
+                onReady={() => showCover(cover.gen)}
+              />
+            ) : (
+              <img
+                crossOrigin="use-credentials"
+                src={cover.clip.image}
+                alt={cover.clip.label}
+                onLoad={() => showCover(cover.gen)}
+                style={{
+                  width: "100%",
+                  height: "100%",
+                  objectFit: "contain",
+                  background: "#000",
+                  filter: cover.clip.filter || undefined,
+                }}
+              />
+            )}
+          </div>
         )}
         {overlays
           .filter((o) => time >= o.start && time < o.end)
           .map((o) => (
-            <div key={o.id} style={{ position: "absolute", inset: 0, background: "#000" }}>
+            <FadeIn key={o.id} style={{ position: "absolute", inset: 0, background: "#000" }}>
               {o.video ? (
                 <VideoPreviewClip
                   key={o.id}
@@ -428,7 +573,7 @@ export function PreviewPlayer({
               >
                 {o.label}
               </span>
-            </div>
+            </FadeIn>
           ))}
         <span
           className="kv-nums"

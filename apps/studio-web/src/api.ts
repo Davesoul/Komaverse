@@ -317,13 +317,13 @@ export interface ChatTurn {
   text: string;
 }
 
-/** One @-mention: a specific frame, detected panel, voice take, or generation. */
+/** One @-mention: a specific frame, detected panel, voice take, generation, or sequence. */
 export interface AgentRef {
-  kind: "frame" | "panel" | "media" | "take" | "gen";
+  kind: "frame" | "panel" | "media" | "take" | "gen" | "sequence";
   id: string;
 }
 
-const REF_RE = /@(frame|panel|media|take|gen):([A-Za-z0-9_-]+)/g;
+const REF_RE = /@(frame|panel|media|take|gen|sequence):([A-Za-z0-9_-]+)/g;
 
 /** Pull @kind:id tokens out of composer text for the refs array. */
 export function parseAgentRefs(message: string): AgentRef[] {

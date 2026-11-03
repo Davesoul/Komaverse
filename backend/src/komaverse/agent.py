@@ -102,6 +102,7 @@ from komaverse.db_models import (
     JobRow,
     PageRow,
     PanelRow,
+    SequenceRow,
     UserRow,
 )
 from komaverse.security import limiter
@@ -114,8 +115,9 @@ logger = logging.getLogger("komaverse.agent")
 class AgentRef(BaseModel):
     """One @-mention parsed by the client: a specific studio entity."""
 
-    kind: str  # frame | panel | take | gen
+    kind: str  # frame | panel | media | take | gen | sequence (+ role for video slots)
     id: str
+    role: str = "reference"  # start | end | reference (video first/last frame slots)
 
 
 def resolve_refs(
@@ -170,7 +172,7 @@ def resolve_refs(
                 )
             elif kind == "gen":
                 row = session.get(JobRow, rid)
-                if row is None or row.kind != "image":
+                if row is None or row.kind not in ("image", "video"):
                     raise _Missing()
                 get_project(row.project_id, session, user) if row.project_id else None
                 prompt = (row.prompt or "")[:200]
@@ -183,10 +185,23 @@ def resolve_refs(
                     )
                     if value is not None and value != "none"
                 )
+                kind_label = "video" if row.kind == "video" else "generation"
+                dur = f", {float(row.seconds or 0):.1f}s" if row.kind == "video" else ""
                 lines.append(
-                    f"@gen:{rid} = AI generation ({row.status})"
+                    f"@gen:{rid} = AI {kind_label} ({row.status}{dur})"
                     + (f": '{prompt}'" if prompt else "")
                     + (f" [locked {lock}]" if lock else "")
+                )
+            elif kind == "sequence":
+                row = session.get(SequenceRow, rid)
+                if row is None:
+                    raise _Missing()
+                get_project(row.project_id, session, user)
+                frames = [f for f in _project_frames(session, user, row.project_id) if f.sequence_id == row.id]
+                layers = sum(len(f.layers) for f in frames)
+                lines.append(
+                    f"@sequence:{rid} = Sequence '{row.name or 'Untitled'}' "
+                    f"({len(frames)} frames, {layers} layers)"
                 )
             elif kind == "media":
                 row = session.get(PageRow, rid)
@@ -935,7 +950,7 @@ def tool_export(
     return f"{chained}Rendered {n} clips ({secs:.1f}s): {job.result_url}"
 
 
-REF_TOKEN_RE = re.compile(r"@(frame|panel|media|gen):([A-Za-z0-9_-]+)")
+REF_TOKEN_RE = re.compile(r"@(frame|panel|media|gen|sequence):([A-Za-z0-9_-]+)")
 
 REFERENCE_INTENT_RE = re.compile(
     r"(us(e|ing)\s+(this|that|the|it|@)|as\s+(a\s+)?ref|with\s+(this|that|the|it|@)|"
@@ -1070,13 +1085,103 @@ def gather_reference_snapshots(session, user, project_id, text, references=None,
                 notes.append(f"Generation {rid} is still {job.status} - ignored for now.")
                 continue
             add(("gen", rid), {"id": f"gen:{rid}", "name": f"Generation '{(job.prompt or '')[:40]}'", "kind": "reference", "anchor": "reference image", "job_id": rid})
+        elif kind == "sequence":
+            seq = session.get(SequenceRow, rid)
+            if seq is None or seq.project_id != project_id:
+                notes.append(f"Unknown sequence {rid} - ignored.")
+                continue
+            frames = sorted(
+                [f for f in _project_frames(session, user, project_id) if f.sequence_id == seq.id],
+                key=lambda f: f.index,
+            )
+            layers = sum(len(f.layers) for f in frames)
+            add(("sequence", rid), {"id": f"sequence:{rid}", "name": f"Sequence '{seq.name or 'Untitled'}'", "kind": "reference", "anchor": "sequence frames", "sequence_id": rid})
+            notes.append(f"sequence '{seq.name or rid}' holds {len(frames)} frames, {layers} layers")
     for ref in references or []:
         if isinstance(ref, dict) and ref.get("kind") and ref.get("id"):
             extra, more = gather_reference_snapshots(session, user, project_id, f"@{ref['kind']}:{ref['id']}")
             for s in extra:
                 add((s.get("id"), None), s)
             notes.extend(more)
+    # Roles ride the refs into the snaps so the export can route start,
+    # end, and guidance images to the right video slots.
+    role_of = {}
+    for ref in references or []:
+        if isinstance(ref, dict) and ref.get("kind") and ref.get("id"):
+            role_of[(ref["kind"], ref["id"])] = ref.get("role") or "reference"
+    for s in snaps:
+        kind, _, rid = (s.get("id") or "").partition(":")
+        s["role"] = role_of.get((kind, rid), s.get("role", "reference"))
     return snaps, notes
+
+
+_START_HINTS = (
+    "start frame", "first frame", "opening frame", "start from",
+    "starts from", "starting from", "start with", "starts with",
+    "starting with", "open on", "open with", "opens on", "opens with",
+    "begin with", "begins with", "beginning with",
+)
+_END_HINTS = (
+    "end frame", "last frame", "final frame", "closing frame", "end on",
+    "ends on", "ending on", "end at", "ends at", "ending at", "end with",
+    "ends with", "ending with", "close on", "closes on", "finish on",
+)
+_FROM_TO_RE = re.compile(
+    r"from\s+@(frame|panel|media|gen|sequence):([A-Za-z0-9_-]+)"
+    r"\s+to\s+@(frame|panel|media|gen|sequence):([A-Za-z0-9_-]+)",
+    re.IGNORECASE,
+)
+
+
+def _tag_reference_roles(raw: str, refs):
+    """Tag each reference with its video role: start, end, or reference.
+
+    Start/end frame slots open and close the generated video; plain
+    style/subject guidance never lands in a frame slot. The role comes
+    from phrasing near each @-token ("X as the start frame", "end on
+    Y", "from X to Y") — never from position — so an untagged ref is
+    always guidance, even when it is the only ref. An explicit
+    from-X-to-Y pair beats nearby window phrasing for both ends.
+    """
+    text = raw or ""
+    lowered = text.lower()
+    tokens = [
+        (m.group(1).lower(), m.group(2), m.start(), m.end())
+        for m in REF_TOKEN_RE.finditer(text)
+    ]
+
+    def nearest(s: int, e: int) -> str:
+        best: tuple[int, str] | None = None
+        lo, hi = max(0, s - 80), e + 80
+        for hint in _START_HINTS:
+            p = lowered.find(hint, lo, hi)
+            while p != -1:
+                d = 0 if p < e and p + len(hint) > s else min(abs(p - e), abs(s - (p + len(hint))))
+                if best is None or d < best[0]:
+                    best = (d, "start")
+                p = lowered.find(hint, p + 1, hi)
+        for hint in _END_HINTS:
+            p = lowered.find(hint, lo, hi)
+            while p != -1:
+                d = 0 if p < e and p + len(hint) > s else min(abs(p - e), abs(s - (p + len(hint))))
+                if best is None or d < best[0]:
+                    best = (d, "end")
+                p = lowered.find(hint, p + 1, hi)
+        return best[1] if best else "reference"
+
+    roles = {(kind, rid): nearest(s, e) for kind, rid, s, e in tokens}
+    for m in _FROM_TO_RE.finditer(text):
+        roles[(m.group(1).lower(), m.group(2))] = "start"
+        roles[(m.group(3).lower(), m.group(4))] = "end"
+    out = []
+    for r in refs or []:
+        if isinstance(r, dict):
+            key = (r.get("kind"), r.get("id"))
+            out.append({**r, "role": r.get("role") or roles.get(key, "reference")})
+        else:
+            key = (getattr(r, "kind", None), getattr(r, "id", None))
+            out.append({"kind": key[0], "id": key[1], "role": roles.get(key, "reference")})
+    return out
 
 
 def _generation_references(raw: str, references=None, fallback_references=None):
@@ -1106,7 +1211,7 @@ def _generation_references(raw: str, references=None, fallback_references=None):
                     kind, rid = getattr(fb, "kind", None), getattr(fb, "id", None)
                 if kind and rid:
                     refs.append({"kind": kind, "id": rid})
-    return refs
+    return _tag_reference_roles(raw, refs)
 
 
 def tool_generate(
@@ -1596,6 +1701,350 @@ def tool_add_subtitles(session, user, project_id, segments=None, scene=None):
 
 TAKE_WORDS = ("take", "takes", "audio", "voiceover", "voice", "recording", "sound")
 CUE_VERBS = ("cue", "place", "put", "add", "at")
+
+
+def _vision_png(png: bytes, max_side: int = 1024) -> str:
+    """Downscale raster bytes to a data URL a vision chat model accepts."""
+    img = Image.open(io.BytesIO(png)).convert("RGB")
+    img.thumbnail((max_side, max_side))
+    buf = io.BytesIO()
+    img.save(buf, format="JPEG", quality=85)
+    return "data:image/jpeg;base64," + base64.b64encode(buf.getvalue()).decode()
+
+
+def _vision_answer(question: str, images: list[str]) -> str:
+    """Ask the configured vision chat model about attached images."""
+    try:
+        base_url, api_key, model = get_chat_config(vision=True)
+    except ProviderError as exc:
+        return f"Vision is not configured: {exc}"
+    content: list = [{"type": "text", "text": question or "Describe this image in detail."}]
+    content += [{"type": "image_url", "image_url": {"url": u}} for u in images]
+    try:
+        message, _usage = chat_complete_with_usage(
+            base_url=base_url,
+            api_key=api_key,
+            model=model,
+            messages=[{"role": "user", "content": content}],
+        )
+    except ProviderError as exc:
+        return f"Vision call failed: {exc}"
+    except Exception as exc:
+        return f"Vision call failed: {exc}"
+    text = message.get("content", "") if isinstance(message, dict) else ""
+    if isinstance(text, list):
+        text = " ".join(b.get("text", "") for b in text if isinstance(b, dict))
+    return str(text or "").strip() or "The vision model returned no text."
+
+
+def _contact_sheet(pngs: list[bytes], labels: list[str], thumb: int = 320) -> bytes:
+    """Tile frame thumbnails into one labeled contact sheet for one
+    vision call (the harness pattern: many frames, one round trip)."""
+    cells = []
+    for png in pngs:
+        img = Image.open(io.BytesIO(png)).convert("RGB")
+        img.thumbnail((thumb, thumb))
+        cells.append(img)
+    cols = min(4, max(len(cells), 1))
+    rows = max((len(cells) + cols - 1) // cols, 1)
+    sheet = Image.new("RGB", (cols * thumb, rows * thumb), (16, 16, 20))
+    drawer = ImageDraw.Draw(sheet)
+    for i, img in enumerate(cells):
+        x, y = (i % cols) * thumb, (i // cols) * thumb
+        sheet.paste(img, (x + (thumb - img.width) // 2, y + (thumb - img.height) // 2))
+        drawer.text((x + 6, y + 4), labels[i] if i < len(labels) else f"#{i + 1}")
+    buf = io.BytesIO()
+    sheet.save(buf, format="PNG")
+    return buf.getvalue()
+
+
+def _sequence_frames(session, user, project_id, target) -> tuple:
+    """SequenceRow + its frames in flipbook order, by @sequence:, id, or name."""
+    from komaverse.api.animate import _resolve_sequence
+
+    seq = None
+    if target:
+        m = re.search(r"@sequence:([A-Za-z0-9_-]+)", str(target))
+        ident = m.group(1) if m else str(target)
+        try:
+            seq = _resolve_sequence(session, user, project_id, ident)
+        except HTTPException:
+            seq = None
+    if seq is None:
+        return None, f"Unknown sequence {target or ''} - use @sequence:, an id, or a name."
+    frames = sorted(
+        [f for f in _project_frames(session, user, project_id) if f.sequence_id == seq.id],
+        key=lambda f: f.index,
+    )
+    return (seq, frames), ""
+
+
+def _layer_lines(frame) -> list[str]:
+    lines = []
+    for i, layer in enumerate(getattr(frame, "layers", None) or []):
+        paint = "blank" if not getattr(layer, "data_url", None) else "has paint"
+        lines.append(
+            f"{i + 1}. '{layer.name or 'Layer'}' "
+            f"({'visible' if layer.visible else 'hidden'}, "
+            f"opacity {layer.opacity}, blend {layer.blend_mode}, "
+            f"{'locked' if layer.locked else 'unlocked'}, {paint})"
+        )
+    return lines
+
+
+_DEFAULT_LOOK_QUESTION = (
+    "Describe this image in detail: subjects, composition, art style, "
+    "colors, and any text you can read."
+)
+
+
+def tool_look_at(session, user, project_id, target, question="") -> str:
+    """Actually SEE a frame, panel, scan page, generation, or sequence
+    with the vision model, then answer a question about it.
+
+    target is @frame:/@panel:/@media:/@gen:/@sequence:, a bare id or
+    name, or 'latest' (the newest finished image generation). Frames
+    come back with their layer inventory so the model understands the
+    layer stack, not just the flattened pixels; sequences come back
+    as a labeled contact sheet plus per-frame layer counts.
+    """
+    from komaverse.api.ai import _frame_png, _job_png, _page_png, _panel_png
+
+    q = (question or "").strip() or _DEFAULT_LOOK_QUESTION
+    text = str(target or "").strip()
+    m = REF_TOKEN_RE.search(text)
+    kind = rid = None
+    if m:
+        kind, rid = m.group(1).lower(), m.group(2)
+    png = None
+    extra = ""
+    if kind == "sequence" or (not kind and text):
+        seq_target = rid if kind == "sequence" else (text or None)
+        if kind == "sequence" or "/" not in (seq_target or ""):
+            found, err = _sequence_frames(session, user, project_id, seq_target or "latest")
+            if found is not None:
+                seq, frames = found
+                if not frames:
+                    return f"Sequence '{seq.name or seq.id}' has no frames yet."
+                use = frames[:12]
+                labels = [f"{i + 1}. {f.name or 'Untitled'}" for i, f in enumerate(use)]
+                sheet = _contact_sheet(
+                    [p for p in (
+                        _frame_png(session, project_id, f.id) for f in use
+                    ) if p is not None],
+                    labels,
+                )
+                if sheet is None:
+                    return f"Could not render sequence '{seq.name or seq.id}'."
+                counts = "; ".join(
+                    f"{i + 1}. {f.name or 'Untitled'} ({len(f.layers)} layers)"
+                    for i, f in enumerate(use)
+                )
+                extra = (
+                    f"Sequence '{seq.name or seq.id}': {len(frames)} frames "
+                    f"(showing {len(use)}): {counts}."
+                    + (f" Plus {len(frames) - len(use)} more not shown." if len(frames) > len(use) else "")
+                    + " Layer order inside each frame is bottom-first."
+                )
+                png = sheet
+    if png is None and (kind == "frame" or (not kind and text)):
+        f = None
+        if kind == "frame":
+            f = session.get(FrameRow, rid)
+            if f is None or f.project_id != project_id:
+                return f"Unknown frame {rid} in this project."
+        elif text and text != "latest":
+            resolved = _resolve_frame(session, user, project_id, text)
+            if isinstance(resolved, str):
+                return resolved
+            f = resolved
+        if f is not None:
+            png = _frame_png(session, project_id, f.id)
+            if png is None:
+                return f"Could not render frame '{f.name or f.id}'."
+            layers = _layer_lines(f)
+            extra = (
+                f"Frame '{f.name or f.id}' layers bottom-first: "
+                + ("; ".join(layers) if layers else "no layers")
+            )
+    if png is None and (kind == "panel" or (not kind and text)):
+        pid = rid if kind == "panel" else text
+        png = _panel_png(session, project_id, pid) if pid and pid != "latest" else None
+        if png is not None:
+            extra = f"Panel {pid}."
+    if png is None and (kind == "media" or (not kind and text)):
+        pid = rid if kind == "media" else text
+        png = _page_png(session, project_id, pid) if pid and pid != "latest" else None
+        if png is not None:
+            extra = f"Scan page {pid}."
+    if png is None and (kind == "gen" or (not kind and (text in ("latest", "") or text))):
+        jid = rid if kind == "gen" else None
+        if jid is None:
+            if text and text not in ("latest", ""):
+                job = session.get(JobRow, text)
+                if job is not None and job.user_id == user.id and job.project_id == project_id:
+                    jid = job.id
+            if jid is None:
+                jid = _latest_done_image_job(session, user, project_id)
+        if jid is None:
+            return "No finished image generation to look at yet."
+        job = session.get(JobRow, jid)
+        if job is not None and job.kind == "video":
+            return (
+                f"@{jid} is a video - use watch_video to sample its frames "
+                f"and hear what happens in it."
+            )
+        png = _job_png(session, user.id, project_id, jid) if jid else None
+        if png is None:
+            return f"Generation {jid} is not a finished image."
+        extra = f"Generation '{(job.prompt or '')[:80]}'." if job else ""
+    if png is None:
+        return (
+            "Nothing to look at - pass @frame:, @panel:, @media:, @gen:, "
+            "@sequence:, an id or name, or 'latest'."
+        )
+    answer = _vision_answer(f"{extra} {q}".strip(), [_vision_png(png)])
+    return answer
+
+
+def _sample_video_frames(path: str, count: int) -> tuple[list, list, float]:
+    """Evenly sampled (timestamp, JPEG) pairs plus the clip duration."""
+    import cv2
+
+    cap = cv2.VideoCapture(path)
+    try:
+        fps = cap.get(cv2.CAP_PROP_FPS) or 24.0
+        total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+        dur = total / fps if fps > 0 and total > 0 else 0.0
+        if dur <= 0:
+            return [], [], 0.0
+        times = [dur * (i + 0.5) / count for i in range(count)]
+        out: list = []
+        for t in times:
+            cap.set(cv2.CAP_PROP_POS_MSEC, t * 1000)
+            ok, frame = cap.read()
+            if not ok or frame is None:
+                continue
+            ok2, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 82])
+            if ok2:
+                out.append((t, buf.tobytes()))
+    finally:
+        cap.release()
+    if not out:
+        return [], [], 0.0
+    return out, [t for t, _ in out], dur
+
+
+def _video_audio_wav(path: str, max_mb: int = 24) -> bytes | None:
+    """Mono 16 kHz WAV of a video file for transcription (None when the
+    track is missing or too large for the one-shot cap)."""
+    import subprocess
+
+    import imageio_ffmpeg
+
+    try:
+        proc = subprocess.run(
+            [
+                imageio_ffmpeg.get_ffmpeg_exe(), "-hide_banner", "-v", "error",
+                "-i", path, "-vn", "-ar", "16000", "-ac", "1", "-f", "wav", "pipe:1",
+            ],
+            capture_output=True,
+            timeout=180,
+        )
+    except Exception:
+        return None
+    data = proc.stdout or b""
+    if not data or len(data) > max_mb * 1024 * 1024:
+        return None
+    return data
+
+
+def tool_watch_video(session, user, project_id, target, question="", frames=6) -> str:
+    """Watch a finished video generation: N frames sampled across its
+    length go to the vision model together with a speech transcript,
+    so the model apprehends the reference before generating from it.
+
+    target is @gen:, a job id, or 'latest'. Answers timestamped, in
+    order — the evidence-ledger shape video harnesses use: sample
+    frames first, transcript alongside, lazy vision over both.
+    """
+    text = str(target or "").strip()
+    m = REF_TOKEN_RE.search(text)
+    jid = None
+    if m and m.group(1).lower() == "gen":
+        jid = m.group(2)
+    elif text and text != "latest":
+        job = session.get(JobRow, text)
+        if (
+            job is not None
+            and job.user_id == user.id
+            and job.project_id == project_id
+            and job.kind == "video"
+        ):
+            jid = job.id
+    if jid is None:
+        rows = (
+            session.execute(
+                select(JobRow)
+                .where(
+                    JobRow.user_id == user.id,
+                    JobRow.project_id == project_id,
+                    JobRow.kind == "video",
+                    JobRow.status == "done",
+                )
+                .order_by(JobRow.created_at.desc())
+            )
+            .scalars()
+            .all()
+        )
+        jid = rows[0].id if rows else None
+    if jid is None:
+        return "No finished video to watch yet - generate one first."
+    job = session.get(JobRow, jid)
+    if job is None or job.status != "done" or not job.result_url:
+        return f"Video {jid} is not finished yet - check it with check_job."
+    try:
+        rel = job.result_url.split("/media/", 1)[-1]
+        vpath = str(storage.resolve(rel))
+    except OSError:
+        return f"Could not read video {jid}."
+    try:
+        n = min(max(int(frames or 6), 2), 8)
+    except (TypeError, ValueError):
+        n = 6
+    samples, times, dur = _sample_video_frames(vpath, n)
+    if not samples:
+        return f"Could not sample frames from video {jid}."
+    transcript = ""
+    wav = _video_audio_wav(vpath)
+    if wav:
+        try:
+            res = MetaProvider().transcribe_audio(wav, "video.wav")
+            turns = [
+                t for t in (res.get("turns") or [])
+                if str(t.get("transcript") or "").strip()
+            ]
+            if turns:
+                transcript = "\n".join(
+                    f"[{t.get('startMs', 0) / 1000:.1f}s] {str(t.get('transcript')).strip()}"
+                    for t in turns
+                )
+            elif str(res.get("transcript") or "").strip():
+                transcript = str(res.get("transcript")).strip()
+        except ProviderError as exc:
+            transcript = f"(transcription unavailable: {exc})"
+    else:
+        transcript = "(no audio track, or audio too large to transcribe)"
+    q = (question or "").strip() or "What happens in this video, in order?"
+    prompt = (
+        f"You are watching a {dur:.1f}s video. {len(samples)} frames sampled at "
+        f"{', '.join(f'{t:.1f}s' for t in times)}. "
+        f"Speech transcript with timestamps:\n{transcript or '(none)'}\n"
+        f"Question: {q} Answer with what happens in order, citing timestamps like [3.2s]."
+    )
+    answer = _vision_answer(prompt, [_vision_png(jpg, max_side=768) for _, jpg in samples])
+    label = (job.prompt or jid)[:60]
+    return f"Watched '{label}' ({dur:.1f}s): {answer}"
 
 
 def tool_list_takes(session, user, project_id):
@@ -3026,6 +3475,12 @@ def demo_turn(
     elif any(k in text for k in TAKE_WORDS) and any(k in text for k in ("list", "show", "what", "have", "many")):
         reply = run("list_takes", tool_list_takes, session, user, project_id)
     
+    elif any(k in text for k in ("look at", "take a look", "describe", "what do you see", "what is in", "what's in")) and (
+        re.search(r"@(frame|panel|media|gen|sequence):", text) or any(k in text for k in ("frame", "panel", "sequence", "generation", "image", "picture"))
+    ):
+        reply = run("look_at", tool_look_at, session, user, project_id, message, "")
+    elif any(k in text for k in ("watch", "walk me through")) and ("video" in text or "@gen:" in text) and "timeline" not in text:
+        reply = run("watch_video", tool_watch_video, session, user, project_id, message, "", 6)
     elif any(k in text for k in ("transcribe", "transcription", "speech to text", "speech-to-text")):
         resolved = resolve_take(message, session, user, project_id)
         if isinstance(resolved, str):
@@ -3200,8 +3655,15 @@ _SYSTEM = (
     "Greetings, thanks, and other smalltalk get a words-only reply — "
     "call no tools unless the user asks for an action, a change, or "
     "information not already in context. Reference images attach only "
-    "when the user asked to reuse a frame, panel, scan, generation, "
-    "or entity — never assume one. "
+    "when the user asked to reuse a frame, panel, scan, generation, sequence, "
+    "or entity — never assume one. References are style/subject guidance "
+    "unless the user names a frame role: 'as the start/first frame' opens "
+    "the video, 'as the end/last frame' or 'from X to Y' closes it. Never "
+    "invent what a reference shows: call look_at to see an image, frame, "
+    "panel, generation, or sequence first (frames report their layer stack, "
+    "sequences a contact sheet with layer counts), and call watch_video "
+    "before summarizing or generating from a video - it returns timestamped "
+    "frames plus speech. "
     "For anime-styled generation or direction, read the "
     "anime-animation-production skill (list_skills/read_skill) for genre "
     "tags, shot grammar, and QC: pass a genre to create_image/"
@@ -3420,9 +3882,12 @@ _TOOLS_SCHEMA = [
             "description": (
                 "Generate an image from a prompt into the media gallery. "
                 "Attach a reference only when the user asked to reuse one: "
-                "pass their @frame:/@panel:/@media:/@gen: mentions as "
+                "pass their @frame:/@panel:/@media:/@gen:/@sequence: mentions as "
                 "references, named entities as entity_ids - never paste "
-                "@-tokens into the prompt, never invent references."
+                "@-tokens into the prompt, never invent references. "
+                "References are style/subject guidance only: look_at a ref "
+                "first when you must describe it, never claim pixels you "
+                "have not seen."
             ),
             "parameters": {
                 "type": "object",
@@ -3433,7 +3898,7 @@ _TOOLS_SCHEMA = [
                     "genre": {"type": "string"},
                     "negative_prompt": {"type": "string"},
                     "reference_frame_id": {"type": "string"},
-                    "references": {"type": "array", "description": "[{kind, id}] for user-mentioned refs to reuse (frame|panel|media|gen). Omit otherwise."},
+                    "references": {"type": "array", "description": "[{kind, id}] for user-mentioned refs to reuse (frame|panel|media|gen|sequence). Style/subject guidance unless the user names a start/end frame role. Omit otherwise."},
                     "entity_ids": {"type": "array", "description": "Named entity ids to keep on-model. Omit otherwise."},
                     "width": {"type": "number", "description": "Pixels; honor the thread's format answer (16:9→1280x720, 9:16→720x1280, 1:1→1024x1024)."},
                     "height": {"type": "number", "description": "Pixels; honor the thread's quality answer (draft→512, standard→768, high→1024 longest side)."},
@@ -3451,7 +3916,13 @@ _TOOLS_SCHEMA = [
                 "Start an async video render from a prompt. The job runs "
                 "in the background — use check_job to see when it is done. "
                 "Attach a reference only when the user asked to reuse one, "
-                "via references - never paste @-tokens into the prompt."
+                "via references - never paste @-tokens into the prompt. "
+                "Frame roles come from the user's words, never position: "
+                "'as the start/first frame' opens the video, 'as the "
+                "end/last frame' or 'from X to Y' closes it, everything "
+                "else is style/subject guidance and never becomes a frame. "
+                "look_at an image ref or watch_video a video ref before "
+                "generating from it."
             ),
             "parameters": {
                 "type": "object",
@@ -3504,6 +3975,50 @@ _TOOLS_SCHEMA = [
                     "mode": {"type": "string"},
                     "save_subtitles": {"type": "boolean"},
                 },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "look_at",
+            "description": (
+                "Actually SEE a frame, panel, scan page, generation, or "
+                "sequence with the vision model, then answer a question "
+                "about it. Call this before describing or generating from "
+                "a reference: never invent what an image shows. Frames "
+                "arrive with their layer inventory; sequences arrive as a "
+                "labeled contact sheet with per-frame layer counts."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "target": {"type": "string"},
+                    "question": {"type": "string"},
+                },
+                "required": ["target"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "watch_video",
+            "description": (
+                "Watch a finished video generation: frames sampled across "
+                "its length go to the vision model together with a speech "
+                "transcript, timestamped. Call this to apprehend a video "
+                "reference before generating from it - never summarize a "
+                "video from its prompt text alone."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "target": {"type": "string"},
+                    "question": {"type": "string"},
+                    "frames": {"type": "integer"},
+                },
+                "required": ["target"],
             },
         },
     },
@@ -3971,6 +4486,19 @@ def _exec_cloud_tool(
                 session, user, project_id,
                 str(args.get("source") or message),
                 args.get("name"), args.get("sequence"),
+            )
+        elif name == "look_at":
+            result = tool_look_at(
+                session, user, project_id,
+                str(args.get("target") or message),
+                str(args.get("question") or ""),
+            )
+        elif name == "watch_video":
+            result = tool_watch_video(
+                session, user, project_id,
+                str(args.get("target") or message),
+                str(args.get("question") or ""),
+                args.get("frames", 6),
             )
         elif name == "check_job":
             result = tool_check_job(

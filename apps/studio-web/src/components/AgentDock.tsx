@@ -44,9 +44,10 @@ const KIND_LABEL: Record<AgentRef["kind"], string> = {
   media: "Media",
   take: "Takes",
   gen: "Generations",
+  sequence: "Sequences",
 };
 
-const REF_TOKEN = /(@(?:frame|panel|media|take|gen):[A-Za-z0-9_-]+)/g;
+const REF_TOKEN = /(@(?:frame|panel|media|take|gen|sequence):[A-Za-z0-9_-]+)/g;
 
 const CHIPS = [
   "Project status",
@@ -381,7 +382,7 @@ export default function AgentDock() {
   }, [open]);
 
   // @-mention picker: type @ in the composer to reference a specific
-  // frame, detected panel, voice take, or generation. Tokens go out both
+  // frame, panel, scan page, voice take, generation, or sequence. Tokens
   // as message text and as structured refs the server resolves scoped.
   const [mention, setMention] = useState<{
     query: string;
@@ -415,11 +416,12 @@ export default function AgentDock() {
   const loadMentions = async (projectId: string, silent: boolean) => {
     if (!silent) setMention((m) => (m ? { ...m, loading: true } : m));
     try {
-      const [frames, proj, takes, jobs] = await Promise.all([
+      const [frames, proj, takes, jobs, sequences] = await Promise.all([
         api.listFrames(projectId).catch(() => []),
         api.getProject(projectId).catch(() => null),
         api.listTakes(projectId).catch(() => []),
         api.listJobs().catch(() => []),
+        api.listSequences(projectId).catch(() => []),
       ]);
       const items: MentionItem[] = [];
       // Most recent first: takes by creation, frames/pages by index.
@@ -483,6 +485,19 @@ export default function AgentDock() {
           sub: `${f.width}×${f.height} · ${f.layers.length} layers`,
           thumb: `${apiBase()}/api/v1/frames/${f.id}/thumbnail?px=96`,
         });
+      const sortedSeqs = [...sequences].sort((a, b) => b.index - a.index);
+      for (const s of sortedSeqs) {
+        const layers = s.frames.reduce((n, f) => n + (f.layer_count || 0), 0);
+        items.push({
+          kind: "sequence",
+          id: s.id,
+          label: s.name || `Sequence ${s.index + 1}`,
+          sub: `${s.frames.length} frames · ${layers} layers`,
+          thumb: s.frames.length
+            ? `${apiBase()}/api/v1/frames/${s.frames[0].id}/thumbnail?px=96`
+            : undefined,
+        });
+      }
       mentionCache.current = { project: projectId, items, at: Date.now() };
       setMention((m) => (m ? { ...m, items, loading: false } : m));
     } catch {
