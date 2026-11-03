@@ -45,6 +45,8 @@ export default function ScanPage() {
     kind: "move" | "nw" | "ne" | "sw" | "se";
     startX: number;
     startY: number;
+    lastX: number;
+    lastY: number;
     orig: Panel;
     latest: { x: number; y: number; w: number; h: number };
   } | null>(null);
@@ -238,6 +240,8 @@ export default function ScanPage() {
       kind,
       startX: p.x,
       startY: p.y,
+      lastX: p.x,
+      lastY: p.y,
       orig: panel,
       latest: { x: panel.x, y: panel.y, w: panel.w, h: panel.h },
     };
@@ -267,6 +271,8 @@ export default function ScanPage() {
     const drag = dragRef.current;
     if (!drag || !page) return;
     const p = toSvg(e.clientX, e.clientY);
+    drag.lastX = p.x;
+    drag.lastY = p.y;
     const dx = p.x - drag.startX;
     const dy = p.y - drag.startY;
     const o = drag.orig;
@@ -316,6 +322,30 @@ export default function ScanPage() {
     const drag = dragRef.current;
     dragRef.current = null;
     if (!drag) return;
+    // Drop-onto reorder: releasing a moved panel inside another panel
+    // swaps their reading order instead of moving the box. The server
+    // list replaces the optimistic geometry, so nothing else to save.
+    if (drag.kind === "move" && page) {
+      const target = panels.find(
+        (p) =>
+          p.id !== drag.id &&
+          drag.lastX >= p.x &&
+          drag.lastX <= p.x + p.w &&
+          drag.lastY >= p.y &&
+          drag.lastY <= p.y + p.h,
+      );
+      if (target) {
+        const ordered = [...panels].sort((a, b) => a.reading_order - b.reading_order);
+        const ids = ordered.map((p) => (p.id === drag.id ? target.id : p.id === target.id ? drag.id : p.id));
+        try {
+          syncPanels(await api.orderPanels(page.id, ids));
+          setSelectedId(drag.id);
+        } catch (e) {
+          setNotice(`Reorder failed: ${(e as Error).message}`);
+        }
+        return;
+      }
+    }
     const u = drag.latest;
     const o = drag.orig;
     if (u.x !== o.x || u.y !== o.y || u.w !== o.w || u.h !== o.h) {
@@ -543,31 +573,30 @@ export default function ScanPage() {
             aria-label="Search projects and pages"
             style={{ width: "100%", marginBottom: 6 }}
           />
-          <div style={{ display: "flex", flexDirection: "column", gap: 4, marginBottom: 8 }}>
+          <SelectInput
+            value={project?.id ?? ""}
+            onChange={(e) => { if (e.target.value) void refreshProject(e.target.value); }}
+            aria-label="Project"
+            title="Pick the project to scan"
+            style={{ width: "100%", marginBottom: 8 }}
+          >
+            <option value="">Select a project…</option>
             {projects.filter((p) => {
               const q = sideQuery.trim().toLowerCase();
               if (!q) return true;
               if (p.name.toLowerCase().includes(q)) return true;
               return p.pages.some((pg) => (pg.name || "").toLowerCase().includes(q));
             }).map((p) => (
-              <Btn
-                key={p.id}
-                active={p.id === project?.id}
-                style={{ textAlign: "left", display: "flex", alignItems: "center", width: "100%" }}
-                onClick={() => refreshProject(p.id)}
-              >
-                <span style={{ overflow: "hidden", textOverflow: "ellipsis" }}>{p.name}</span>
-                <span className="kv-nums" style={{ marginLeft: "auto", opacity: 0.6, paddingLeft: 8 }}>
-                  {p.pages.length} pg
-                </span>
-              </Btn>
+              <option key={p.id} value={p.id}>
+                {p.name} ({p.pages.length} pg)
+              </option>
             ))}
-            {projects.length === 0 && (
-              <span style={{ fontSize: 13, color: "var(--kv-faint)" }}>
-                No projects yet — create one on the Home dashboard.
-              </span>
-            )}
-          </div>
+          </SelectInput>
+          {projects.length === 0 && (
+            <div style={{ fontSize: 13, color: "var(--kv-faint)", marginBottom: 8 }}>
+              No projects yet — create one on the Home dashboard.
+            </div>
+          )}
           {project && (
             <div style={{ marginTop: 6 }}>
               <IconBtn danger onClick={doDeleteProject} label={`Delete project “${project.name}”`}>
@@ -580,26 +609,27 @@ export default function ScanPage() {
         {project && (
           <div>
             <SectionTitle>Pages ({project.pages.length})</SectionTitle>
-            <div style={{ display: "flex", flexDirection: "column", gap: 4, marginBottom: 8 }}>
+            <SelectInput
+              value={page?.id ?? ""}
+              onChange={(e) => {
+                const next = project.pages.find((p) => p.id === e.target.value);
+                if (next) selectPage(next);
+              }}
+              aria-label="Scan page"
+              title="Pick the page to inspect"
+              style={{ width: "100%", marginBottom: 8 }}
+            >
+              <option value="">Select a page…</option>
               {project.pages.filter((p, i) => {
                 const q = sideQuery.trim().toLowerCase();
                 if (!q) return true;
                 return (p.name || "").toLowerCase().includes(q) || `pg ${i + 1}`.includes(q) || `page ${i + 1}`.includes(q);
               }).map((p, i) => (
-                <Btn
-                  key={p.id}
-                  active={p.id === page?.id}
-                  style={{ textAlign: "left", display: "flex", alignItems: "center", gap: 8, width: "100%" }}
-                  onClick={() => selectPage(p)}
-                >
-                  <span className="kv-nums">PG {String(i + 1).padStart(2, "0")}</span>
-                  <span className="kv-nums" style={{ opacity: 0.6 }}>{p.width}×{p.height}</span>
-                  <span className="kv-nums" style={{ marginLeft: "auto", opacity: 0.6 }}>
-                    {p.panels.length} panels
-                  </span>
-                </Btn>
+                <option key={p.id} value={p.id}>
+                  PG {String(i + 1).padStart(2, "0")}{p.name ? ` — ${p.name}` : ""} ({p.panels.length} panels)
+                </option>
               ))}
-            </div>
+            </SelectInput>
             <input
               ref={fileRef}
               type="file"
@@ -759,7 +789,7 @@ export default function ScanPage() {
                   LTR
                 </Btn>
               </span>
-              <Btn active={mode === "select"} onClick={() => setMode("select")} title="Select / move (V)">
+              <Btn active={mode === "select"} onClick={() => setMode("select")} title="Select / move (V) — drop a panel onto another to swap their reading order">
                 Select / move
               </Btn>
               <Btn active={mode === "reshape"} onClick={() => setMode("reshape")} title="Reshape (R)">
@@ -894,7 +924,7 @@ export default function ScanPage() {
                 {panels.map((p) => {
                   const selected = p.id === selectedId;
                   return (
-                    <g key={p.id}>
+                    <g key={p.id} data-panel-id={p.id}>
                       <rect
                         x={p.x}
                         y={p.y}

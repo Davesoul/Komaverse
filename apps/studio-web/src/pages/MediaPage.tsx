@@ -386,6 +386,25 @@ export default function MediaPage() {
     gotoTab("draw");
   };
 
+  /** Copy an @kind:id mention for the agent composer. */
+  const copyRef = async (token: string) => {
+    try {
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(token);
+      } else {
+        const ta = document.createElement("textarea");
+        ta.value = token;
+        document.body.appendChild(ta);
+        ta.select();
+        document.execCommand("copy");
+        ta.remove();
+      }
+      toast(`Copied ${token} — paste it in the AI chat with @.`);
+    } catch {
+      toast(`Copy failed — reference is ${token}`, "error");
+    }
+  };
+
   const doNewSequence = async () => {
     if (!project) return;
     setBusy("Creating sequence…");
@@ -967,6 +986,12 @@ export default function MediaPage() {
                         >
                           ⤵
                         </IconBtn>
+                        <IconBtn
+                          label={`Copy reference @media:${pg.id} for the AI chat`}
+                          onClick={() => void copyRef(`@media:${pg.id}`)}
+                        >
+                          ⧉
+                        </IconBtn>
                         <IconBtn danger onClick={() => doDeletePage(pg, i)} label="Delete page and its scan file">
                           ×
                         </IconBtn>
@@ -1014,6 +1039,12 @@ export default function MediaPage() {
                     <Btn small onClick={() => void doTranscribeTake(t)} disabled={transcribing === t.id}>
                       {transcribing === t.id ? "Transcribing…" : "Transcribe"}
                     </Btn>
+                    <IconBtn
+                      label={`Copy reference @take:${t.id} for the AI chat`}
+                      onClick={() => void copyRef(`@take:${t.id}`)}
+                    >
+                      ⧉
+                    </IconBtn>
                     <IconBtn danger onClick={() => doDeleteTake(t)} style={{ marginLeft: "auto" }} label="Delete take">
                       ×
                     </IconBtn>
@@ -1215,8 +1246,16 @@ export default function MediaPage() {
                       <div className="kv-nums" style={{ fontSize: 11, color: "var(--kv-muted)" }}>
                         {j.id} · {j.status}
                       </div>
-                      {j.status === "done" && j.kind === "image" && (
+                      {j.status === "done" && (
                         <div style={{ marginTop: 6, display: "flex", gap: 6, flexWrap: "wrap" }}>
+                          <IconBtn
+                            label={`Copy reference @gen:${j.id} for the AI chat`}
+                            onClick={() => void copyRef(`@gen:${j.id}`)}
+                          >
+                            ⧉
+                          </IconBtn>
+                          {j.kind === "image" && (
+                          <>
                           <IconBtn
                             disabled={busy !== ""}
                             label="Frame it: stage as a draw frame in the current sequence"
@@ -1300,6 +1339,8 @@ export default function MediaPage() {
                           >
                             ◫
                           </IconBtn>
+                          </>
+                          )}
                         </div>
                       )}
                       {j.status === "done" && j.kind === "video" && (
@@ -1354,6 +1395,12 @@ export default function MediaPage() {
                         ` · ${s.frames.reduce((n, f) => n + f.layer_count, 0)} layers`}
                     </span>
                     <span style={{ marginLeft: "auto", display: "flex", gap: 6 }}>
+                      <IconBtn
+                        label={`Copy reference @sequence:${s.id} for the AI chat`}
+                        onClick={() => void copyRef(`@sequence:${s.id}`)}
+                      >
+                        ⧉
+                      </IconBtn>
                       <Btn small onClick={() => openSequenceInDraw(s)}>
                         Open in Draw
                       </Btn>

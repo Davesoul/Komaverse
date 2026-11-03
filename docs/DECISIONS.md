@@ -988,6 +988,31 @@ color-theory (cel shadow colors, light logic), manga-literacy
   clean, build green. NOTE: the dev backend on :8001 must be
   restarted to serve the new route (no --reload there).
 
+## ADR-38: Media copy-refs, Scan comboboxes, drop-to-swap panels (accepted)
+
+- Every media card now has a copy-reference button (pages,
+  takes, generations, sequences) writing `@kind:id` via the
+  clipboard API with a textarea fallback, plus a toast naming
+  the token. Panels are not card-listed, so they have no button.
+- Scan sidebar lists became comboboxes: project and page are
+  `SelectInput`s (search box still filters both option lists),
+  keeping delete/upload/auto-detect where they were.
+- Dragging a panel box onto another panel swaps their reading
+  order (same `orderPanels` + `syncPanels` path as the arrow
+  buttons; geometry reverts from the server list) instead of
+  just moving the box. Pure moves, reshapes, and click-select
+  behave as before; only a drop landing inside another panel
+  reorders. Swap-two preserves the directional sequence
+  (manga-literacy).
+- Live: headless-Chrome probe (seeded user/project/page, two
+  API-created panels) - comboboxes render with options, real
+  mouse drag A-onto-B flips reading order server-side,
+  copy button puts `@media:{id}` on the clipboard; `tsc`
+  clean, build green. The only 401s are the boot-time
+  logged-out `auth/me` check (pre-existing). Probe projects
+  deleted afterwards.
+
+
 
 ## ADR-36: Phone canvas maximized, intro lockup verified (accepted)
 
