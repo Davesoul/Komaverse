@@ -100,3 +100,59 @@ def test_me_requires_auth(factory):
         with pytest.raises(HTTPException) as exc:
             get_current_user(Request({"type": "http", "headers": []}), s)
     assert exc.value.status_code == 401
+
+def test_ensure_demo_user_seeds_once(factory, monkeypatch):
+    from sqlalchemy import select
+
+    from komaverse.auth import (
+        DEMO_EMAIL,
+        DEMO_PASSWORD,
+        ensure_demo_user,
+        verify_password,
+    )
+    from komaverse.db_models import UserRow
+
+    monkeypatch.setattr(settings, "seed_demo", True)
+    with factory() as s:
+        first = ensure_demo_user(s)
+    assert first is not None and first.email == DEMO_EMAIL
+    with factory() as s:
+        second = ensure_demo_user(s)
+    assert second.id == first.id
+    with factory() as s:
+        row = (
+            s.execute(select(UserRow).where(UserRow.email == DEMO_EMAIL)).scalar_one()
+        )
+    assert verify_password(DEMO_PASSWORD, row.password_hash)
+
+
+def test_ensure_demo_user_respects_flag(factory, monkeypatch):
+    from komaverse.auth import ensure_demo_user
+
+    monkeypatch.setattr(settings, "seed_demo", False)
+    with factory() as s:
+        assert ensure_demo_user(s) is None
+
+
+def test_ensure_demo_user_never_overwrites(factory, monkeypatch):
+    from sqlalchemy import select
+
+    from komaverse.auth import DEMO_EMAIL, ensure_demo_user, verify_password
+    from komaverse.db_models import UserRow
+
+    monkeypatch.setattr(settings, "seed_demo", True)
+    with factory() as s:
+        existing = UserRow(
+            email=DEMO_EMAIL, name="Custom",
+            password_hash="pbkdf2$1000$00$00",
+        )
+        s.add(existing)
+        s.commit()
+        kept = ensure_demo_user(s)
+    assert kept.id == existing.id
+    assert kept.name == "Custom"
+    with factory() as s:
+        row = (
+            s.execute(select(UserRow).where(UserRow.email == DEMO_EMAIL)).scalar_one()
+        )
+    assert not verify_password("demo1234", row.password_hash)

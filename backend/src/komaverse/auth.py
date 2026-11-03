@@ -23,6 +23,31 @@ SESSION_COOKIE = "komaverse_session"
 SESSION_DAYS = 30
 PBKDF2_ROUNDS = 600_000  # tests monkeypatch this down
 
+# Demo sign-in published in the README for judges. Created on startup
+# when KOMA_SEED_DEMO is on and no user with this email exists yet;
+# never touches an existing account (so a changed password survives).
+DEMO_EMAIL = "demo@komaverse.local"
+DEMO_PASSWORD = "demo1234"
+DEMO_NAME = "Demo Director"
+
+
+def ensure_demo_user(session: Session) -> UserRow | None:
+    """Create the README demo account when seeding is on. Idempotent."""
+    if not settings.seed_demo:
+        return None
+    existing = session.execute(
+        select(UserRow).where(UserRow.email == DEMO_EMAIL)
+    ).scalar_one_or_none()
+    if existing is not None:
+        return existing
+    user = UserRow(
+        email=DEMO_EMAIL, name=DEMO_NAME,
+        password_hash=hash_password(DEMO_PASSWORD),
+    )
+    session.add(user)
+    session.commit()
+    return user
+
 
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc).replace(tzinfo=None)

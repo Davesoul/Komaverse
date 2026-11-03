@@ -22,6 +22,10 @@ class Settings(BaseSettings):
         validation_alias="ALLOWED_ORIGINS",
     )
     upload_max_mb: int = Field(default=50, validation_alias="UPLOAD_MAX_MB")
+    # Demo sign-in for judges (email + password printed in the README):
+    # created on startup when missing. Set KOMA_SEED_DEMO=false on
+    # any public deploy that must not carry a known-password account.
+    seed_demo: bool = Field(default=True, validation_alias="KOMA_SEED_DEMO")
     project_quota_mb: int = Field(
         default=500, validation_alias="PROJECT_QUOTA_MB"
     )

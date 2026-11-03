@@ -1124,6 +1124,24 @@ color-theory (cel shadow colors, light logic), manga-literacy
   composition) and manga-literacy (panel flow, reading order,
   lettering/SFX placement); perspective + construction + anatomy
   were already covered by the drawing-fundamentals nudge.
+
+## ADR-42: README demo sign-in + startup seed (accepted)
+
+- Judges sign IN, not up: `demo@komaverse.local` / `demo1234`,
+  printed in the README "Try it" section. `ensure_demo_user`
+  (auth.py) creates the account on startup when `KOMA_SEED_DEMO`
+  (default true) and no such email exists; it never touches an
+  existing account, so a changed password survives restarts.
+- Public deploys set `KOMA_SEED_DEMO=false` (documented in
+  `.env.example`); local/judge runs get the account for free.
+- Usage scope, as asked: the Usage tab is per-user GLOBAL only —
+  `UsageEventRow` carries user/kind/label/tokens/cost but no
+  project id, so the summary groups by activity+model with a
+  daily series and cannot split per project today. Per-project
+  usage would need a project_id column + backfill; not built.
+- Live: restarted `:8001` logged "demo sign-in ready" and
+  `POST /auth/login` with the README credentials returns 200.
+  3 new auth tests (seed-once, flag-off, never-overwrite).
 - Live: 4 new agent tests (speech-line parser, routed synthesis
   with cue, ask-without-line, skill registration); full suite
   green; `:8001` restarted for the new tool/prompt.

@@ -9,11 +9,13 @@ Rebuild of `../saas-projects/koma-wari` (kept as legacy reference —
 do not import from it, port deliberately). All work in this repo
 started Oct 28, 2026.
 
-## Try it (judges — no credentials needed)
+## Try it (judges — sign in with the demo account)
 
-- Open the app and **Sign up** with any email and password.
-  Accounts live on that server alone; there is no shared demo
-  account and nothing to look up.
+- Open the app and **Sign in**: `demo@komaverse.local` /
+  `demo1234`. The account is created automatically on startup
+  (or sign up with any email — accounts live on that server).
+- Set `KOMA_SEED_DEMO=false` on a public deploy that must not
+  carry a known-password account.
 - Everything except paid AI works with zero keys: scan, panel
   detection, draw, timeline, subtitles, local voice cloning and
   local TTS, MP4 export.

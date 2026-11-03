@@ -34,7 +34,7 @@ from komaverse.api.scans import router as scans_router
 from komaverse.api.subtitles import router as subtitles_router
 from komaverse.api.usage import router as usage_router
 from komaverse.config import settings
-from komaverse.db import init_db
+from komaverse.db import init_db, session_factory
 from komaverse.observability import (
     metrics,
     new_request_id,
@@ -53,6 +53,11 @@ settings.media_dir.mkdir(parents=True, exist_ok=True)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_db()
+    from komaverse.auth import ensure_demo_user  # noqa: PLC0415 — startup only
+
+    with session_factory()() as session:
+        if ensure_demo_user(session) is not None:
+            logger.info("demo sign-in ready (%s)", "demo@komaverse.local")
     logger.info("komaverse %s starting (env=%s)", __version__, settings.app_env)
     yield
 
