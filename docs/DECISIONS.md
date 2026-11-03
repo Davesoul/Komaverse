@@ -1085,5 +1085,11 @@ color-theory (cel shadow colors, light logic), manga-literacy
   `chat_complete`: store+return, needs-key, needs-panels);
   `tsc` clean, build green; `:8001` restarted so the live
   backend serves `/api/v1/pages/{page_id}/read` (77 routes).
+- Live E2E (real Meta vision engine, real French One Piece scan):
+  login -> project -> upload -> SAM detect (2 panels) ->
+  `POST /read` returned 200 with dialogue ("VOUS / D'EN
+  DECIDEZ !!", ...), Japanese SFX readings, and audio cues
+  (crowd roar / dramatic impact / heroic sting, ...) persisted
+  in reading order. Probe projects deleted afterwards.
 
 
