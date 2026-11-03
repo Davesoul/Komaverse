@@ -108,6 +108,16 @@ class Clip(BaseModel):
     filter: str = "none"  # none | grayscale | sepia | vintage | vivid
 
 
+class ClonedVoice(BaseModel):
+    """An ElevenLabs Instant Voice Clone owned by one user."""
+
+    id: str = Field(default_factory=uuid_short)
+    name: str = ""
+    voice_id: str = ""  # ElevenLabs voice_id (usable as a TTS voice)
+    sample_count: int = 0
+    created_at: str | None = None
+
+
 class AudioTake(BaseModel):
     """One library recording: mic take or uploaded file (metadata only)."""
 

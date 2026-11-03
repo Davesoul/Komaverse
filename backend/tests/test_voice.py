@@ -367,6 +367,100 @@ def test_ai_voices_route(user):
     assert exc.value.status_code == 400
 
 
+def _sample_file(name="sample.mp3"):
+    import io
+
+    from fastapi import UploadFile
+    from starlette.datastructures import Headers
+
+    return UploadFile(
+        file=io.BytesIO(b"ID3" + b"\x00" * 100),
+        filename=name,
+        headers=Headers({"content-type": "audio/mpeg"}),
+    )
+
+
+def test_clone_voice_roundtrip(factory, user, monkeypatch):
+    """Clone → list → cross-user isolation → delete (ElevenLabs mocked)."""
+    import komaverse.ai.providers as providers
+    from komaverse.api.ai import clone_voice, delete_clone, list_clones
+
+    monkeypatch.setattr(settings, "elevenlabs_api_key", "ek-test")
+    seen = {}
+
+    def fake_post(url, **kwargs):
+        seen["url"] = url
+        seen["names"] = [f[1][0] for f in kwargs.get("files", [])]
+        seen["form"] = kwargs.get("data", {})
+        return FakeResp(status=200, payload={"voice_id": "vx_clone1"})
+
+    monkeypatch.setattr(providers.httpx, "post", fake_post)
+    with factory() as s:
+        voice = clone_voice("Narrator", [_sample_file(), _sample_file("b.wav")], s, user)
+    assert voice.voice_id == "vx_clone1" and voice.sample_count == 2
+    assert seen["url"].endswith("/v1/voices/add")
+    assert seen["names"] == ["sample.mp3", "b.wav"]
+    assert seen["form"].get("name") == "Narrator"
+    with factory() as s:
+        assert [v.name for v in list_clones(s, user)] == ["Narrator"]
+        other = create_user(s, email="clone2@test.local")
+    with factory() as s:
+        assert list_clones(s, other) == []
+        with pytest.raises(HTTPException) as exc:
+            delete_clone(voice.id, s, other)
+        assert exc.value.status_code == 404
+    deleted = {}
+
+    def fake_delete(url, **kwargs):
+        deleted["url"] = url
+        return FakeResp(status=200)
+
+    monkeypatch.setattr(providers.httpx, "delete", fake_delete)
+    with factory() as s:
+        delete_clone(voice.id, s, user)
+    assert deleted["url"].endswith("/v1/voices/vx_clone1")
+    with factory() as s:
+        assert list_clones(s, user) == []
+
+
+def test_clone_voice_validation(factory, user):
+    from komaverse.api.ai import clone_voice
+
+    with factory() as s, pytest.raises(HTTPException) as exc:
+        clone_voice("", [_sample_file()], s, user)
+    assert exc.value.status_code == 400
+    with factory() as s, pytest.raises(HTTPException) as exc:
+        clone_voice("NoFiles", [], s, user)
+    assert exc.value.status_code == 400
+    with factory() as s, pytest.raises(HTTPException) as exc:
+        clone_voice("Bad", [_sample_file("notes.txt")], s, user)
+    assert exc.value.status_code == 400
+
+
+def test_ai_voices_lists_clones_first(factory, user, monkeypatch):
+    import komaverse.ai.providers as providers
+    from komaverse.api.ai import ai_voices, clone_voice
+
+    monkeypatch.setattr(settings, "elevenlabs_api_key", "ek-test")
+    monkeypatch.setattr(
+        providers.httpx, "post",
+        lambda url, **kw: FakeResp(status=200, payload={"voice_id": "vx_9"}),
+    )
+    import komaverse.api.ai as ai_api
+
+    monkeypatch.setattr(
+        ai_api, "list_elevenlabs_voices",
+        lambda: [{"id": "premade", "label": "Premade", "maker": "elevenlabs"}],
+    )
+    with factory() as s:
+        clone_voice("Mine", [_sample_file()], s, user)
+    with factory() as s:
+        out = ai_voices("elevenlabs", user, s)
+    assert out.voices[0].id == "vx_9"
+    assert out.voices[0].maker == "cloned"
+    assert out.voices[1].id == "premade"
+
+
 def test_voice_local_honors_brain_default_voice(monkeypatch):
     """Blank engine+voice speaks the Brain default (was: always af_sarah)."""
     import komaverse.ai.voice_local as local

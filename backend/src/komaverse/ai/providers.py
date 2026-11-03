@@ -545,6 +545,81 @@ class ElevenLabsProvider:
             raise ProviderError("elevenlabs returned empty audio")
         return data
 
+    def clone_voice(self, name: str, samples: list[tuple[str, bytes]]) -> str:
+        """Instant Voice Cloning via /v1/voices/add. Returns the voice_id."""
+        if not settings.elevenlabs_api_key:
+            raise ProviderError(
+                "elevenlabs voice cloning needs ELEVENLABS_API_KEY (elevenlabs.io)"
+            )
+        clean = (name or "").strip()[:80]
+        if not clean:
+            raise ProviderError("a name is required to clone a voice")
+        if not samples:
+            raise ProviderError(
+                "at least one voice sample is required (clear speech, 1+ min total)"
+            )
+        files = [
+            ("files", (fname or f"sample{i}.mp3", data, "audio/mpeg"))
+            for i, (fname, data) in enumerate(samples)
+        ]
+        try:
+            res = httpx.post(
+                f"{settings.elevenlabs_base_url.rstrip('/')}/v1/voices/add",
+                headers={"xi-api-key": settings.elevenlabs_api_key},
+                data={"name": clean},
+                files=files,
+                timeout=300.0,
+            )
+        except httpx.HTTPError as exc:
+            raise ProviderUnavailable(
+                f"elevenlabs clone request failed: {exc}"
+            ) from exc
+        if res.status_code == 401:
+            raise ProviderError(
+                "elevenlabs rejected the API key (401) — check ELEVENLABS_API_KEY"
+            )
+        if res.status_code == 422:
+            raise ProviderError(
+                f"elevenlabs rejected the samples (422): {res.text[:200]}"
+            )
+        if res.status_code >= 400:
+            raise ProviderError(
+                f"elevenlabs clone failed ({res.status_code}): {res.text[:200]}"
+            )
+        try:
+            voice_id = str(res.json().get("voice_id") or "").strip()
+        except ValueError as exc:
+            raise ProviderError("elevenlabs returned non-JSON clone") from exc
+        if not voice_id:
+            raise ProviderError("elevenlabs returned no voice_id")
+        return voice_id
+
+    def delete_cloned_voice(self, voice_id: str) -> None:
+        """Remove a cloned voice from the ElevenLabs account (404 = gone)."""
+        if not settings.elevenlabs_api_key:
+            raise ProviderError(
+                "elevenlabs voice cloning needs ELEVENLABS_API_KEY (elevenlabs.io)"
+            )
+        vid = (voice_id or "").strip()
+        if not vid:
+            return
+        try:
+            res = httpx.delete(
+                f"{settings.elevenlabs_base_url.rstrip('/')}/v1/voices/{vid}",
+                headers={"xi-api-key": settings.elevenlabs_api_key},
+                timeout=30.0,
+            )
+        except httpx.HTTPError as exc:
+            raise ProviderUnavailable(
+                f"elevenlabs delete request failed: {exc}"
+            ) from exc
+        if res.status_code == 404:
+            return
+        if res.status_code >= 400:
+            raise ProviderError(
+                f"elevenlabs delete failed ({res.status_code}): {res.text[:200]}"
+            )
+
 
 def list_elevenlabs_voices() -> list[dict]:
     """Live ElevenLabs voice catalog: [{id, label, maker}]. Needs the key."""

@@ -16,6 +16,7 @@ from fastapi import (
     BackgroundTasks,
     Depends,
     File,
+    Form,
     HTTPException,
     UploadFile,
 )
@@ -29,6 +30,7 @@ from komaverse.ai.direction import (
     build_final_prompt,
 )
 from komaverse.ai.providers import (
+    ElevenLabsProvider,
     MetaProvider,
     ProviderError,
     chat_complete,
@@ -46,6 +48,7 @@ from komaverse.auth import ensure_owner, get_current_user
 from komaverse.config import settings
 from komaverse.db import get_session, session_factory
 from komaverse.db_models import (
+    ClonedVoiceRow,
     EntityRow,
     FrameRow,
     JobRow,
@@ -56,7 +59,7 @@ from komaverse.db_models import (
     SequenceRow,
     UserRow,
 )
-from komaverse.models import CreditEntry, Entity, Job
+from komaverse.models import ClonedVoice, CreditEntry, Entity, Job
 from komaverse.observability import metrics
 from komaverse.renderer import (
     audio_has_stream,
@@ -610,7 +613,7 @@ class VoiceCatalog(BaseModel):
 
 
 @router.get("/ai/voices", response_model=VoiceCatalog)
-def ai_voices(provider: str = "free-tts", user: UserRow = Depends(get_current_user)):
+def ai_voices(provider: str = "free-tts", user: UserRow = Depends(get_current_user), session: Session | None = Depends(get_session)):
     """TTS voice picker catalog for the Brain voice row.
 
     ElevenLabs voices come live from the API (needs the key);
@@ -622,13 +625,118 @@ def ai_voices(provider: str = "free-tts", user: UserRow = Depends(get_current_us
             voices = list_elevenlabs_voices()
         except ProviderError as exc:
             raise HTTPException(400, str(exc)) from None
-        return VoiceCatalog(provider=kind, source="live", voices=voices)
+        clones = (
+            session.execute(
+                select(ClonedVoiceRow)
+                .where(ClonedVoiceRow.user_id == user.id)
+                .order_by(ClonedVoiceRow.created_at.desc())
+            ).scalars().all()
+            if session is not None and hasattr(session, "execute")
+            else []
+        )
+        mine = [
+            {"id": r.elevenlabs_voice_id, "label": f"{r.name} · cloned", "maker": "cloned"}
+            for r in clones
+        ]
+        return VoiceCatalog(provider=kind, source="live", voices=[*mine, *voices])
     if kind == "free-tts":
         voices, source = list_freetts_voices()
         return VoiceCatalog(provider=kind, source=source, voices=voices)
     raise HTTPException(
         400, f'unknown voice provider "{provider}" (want: elevenlabs, free-tts)'
     )
+
+
+MAX_CLONE_SAMPLES = 5
+MAX_CLONE_BYTES = 25 * 1024 * 1024
+CLONE_AUDIO_EXTS = (".mp3", ".wav", ".m4a", ".ogg", ".flac", ".webm")
+
+
+def _read_clone_sample(file: UploadFile) -> tuple[str, bytes]:
+    name = (file.filename or "sample").strip() or "sample"
+    if Path(name).suffix.lower() not in CLONE_AUDIO_EXTS:
+        raise HTTPException(400, f"voice sample must be audio ({name})")
+    try:
+        data = storage.read_upload_capped(file.file, MAX_CLONE_BYTES)
+    except storage.UploadTooLargeError:
+        raise HTTPException(413, f"voice sample too large ({name})") from None
+    if not data:
+        raise HTTPException(400, f"voice sample is empty ({name})")
+    return name, data
+
+
+@router.post("/ai/voices/clone", response_model=ClonedVoice, status_code=201)
+def clone_voice(
+    name: str = Form(""),
+    files: list[UploadFile] = File(...),
+    session: Session = Depends(get_session),
+    user: UserRow = Depends(get_current_user),
+):
+    """Clone a voice from 1–5 speech samples (ElevenLabs instant clone).
+
+    The clone lands in your ElevenLabs library and is recorded here, so
+    the Brain voice picker offers it for TTS like any other voice.
+    """
+    clean = (name or "").strip()
+    if not clean:
+        raise HTTPException(400, "a name is required")
+    if not files or len(files) > MAX_CLONE_SAMPLES:
+        raise HTTPException(400, f"send 1–{MAX_CLONE_SAMPLES} audio samples")
+    try:
+        samples = [_read_clone_sample(f) for f in files]
+    finally:
+        for f in files:
+            try:
+                f.file.close()
+            except Exception:
+                pass
+    try:
+        voice_id = ElevenLabsProvider().clone_voice(clean, samples)
+    except ProviderError as exc:
+        raise HTTPException(400, f"voice cloning failed: {exc}") from None
+    row = ClonedVoiceRow(
+        user_id=user.id,
+        name=clean[:80],
+        elevenlabs_voice_id=voice_id,
+        sample_count=len(samples),
+    )
+    session.add(row)
+    session.commit()
+    return row.to_schema()
+
+
+@router.get("/ai/voices/clones", response_model=list[ClonedVoice])
+def list_clones(
+    session: Session = Depends(get_session),
+    user: UserRow = Depends(get_current_user),
+):
+    """Your cloned voices, newest first."""
+    rows = (
+        session.execute(
+            select(ClonedVoiceRow)
+            .where(ClonedVoiceRow.user_id == user.id)
+            .order_by(ClonedVoiceRow.created_at.desc())
+        ).scalars().all()
+    )
+    return [r.to_schema() for r in rows]
+
+
+@router.delete("/ai/voices/clones/{clone_id}", status_code=204)
+def delete_clone(
+    clone_id: str,
+    session: Session = Depends(get_session),
+    user: UserRow = Depends(get_current_user),
+):
+    """Remove a clone: from ElevenLabs first, then the local record."""
+    row = session.get(ClonedVoiceRow, clone_id)
+    if row is None or row.user_id != user.id:
+        raise HTTPException(404, "clone not found")
+    try:
+        ElevenLabsProvider().delete_cloned_voice(row.elevenlabs_voice_id)
+    except ProviderError as exc:
+        raise HTTPException(400, f"elevenlabs delete failed: {exc}") from None
+    session.delete(row)
+    session.commit()
 
 
 @router.get("/projects/{project_id}/entities", response_model=list[Entity])

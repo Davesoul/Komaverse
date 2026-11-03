@@ -797,3 +797,33 @@ color-theory (cel shadow colors, light logic), manga-literacy
   video overlay audio, subtitle lane CRUD, ASS placement, dual-lane
   export burn) — full backend 419 green, `npx tsc --noEmit` clean,
   `npm run build` green.
+
+
+## ADR-30: Live preview updates, volume slider, cue-row speed, voice cloning (accepted)
+
+- Speed/volume edits felt dead because `syncAudio` (which applies
+  `playbackRate` and `volume` to the persistent `<audio>` elements)
+  only re-ran on play/seek/mount. It now also re-runs whenever the
+  `audio` list changes, so inspector and cue-row edits apply
+  instantly, paused or playing, with no seek or replay needed. This
+  was the actual "can't change the speed" bug: the value saved fine,
+  but the preview kept playing the old rate.
+- The cue inspector volume is now a slider with the numeric field on
+  the side: dragging stages the level locally and releases (or Enter)
+  commits exactly one PATCH per gesture. Timeline cue rows in the
+  voice tab carry a compact speed-cycle button (0.5/1/1.5/2×) for the
+  same control without opening the inspector.
+- Voice cloning is real: `ElevenLabsProvider.clone_voice` calls
+  ElevenLabs Instant Voice Cloning (`/v1/voices/add`, 1–5 audio
+  samples) and `delete_cloned_voice` removes the library copy.
+  Clones persist in a per-user `cloned_voices` table
+  (`POST/GET/DELETE /api/v1/ai/voices/clone[s]`), surface in the
+  elevenlabs picker first (maker "cloned"), and work as a TTS voice
+  with no synthesize-path change — the voice row just sends the
+  clone's voice_id. The AudioDeck voice section has a clone box
+  (name + multi-sample picker, busy state, per-clone confirm-gated
+  delete). Needs `ELEVENLABS_API_KEY`; without it the endpoints
+  explain instead of 500ing.
+- Live: 3 new clone tests (roundtrip + isolation + delete, validation,
+  picker ordering, all ElevenLabs HTTP mocked) — full backend 422
+  green, `npx tsc --noEmit` clean, `npm run build` green.

@@ -506,6 +506,28 @@ class JobRow(Base):
         )
 
 
+class ClonedVoiceRow(Base):
+    """ElevenLabs Instant Voice Clone: name + voice_id per user."""
+
+    __tablename__ = "cloned_voices"
+
+    id: Mapped[str] = mapped_column(String(12), primary_key=True, default=uuid_short)
+    user_id: Mapped[str] = mapped_column(String(64), index=True, default="local")
+    name: Mapped[str] = mapped_column(String(80), default="")
+    elevenlabs_voice_id: Mapped[str] = mapped_column(String(64), default="")
+    sample_count: Mapped[int] = mapped_column(default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
+
+    def to_schema(self) -> schemas.ClonedVoice:
+        return schemas.ClonedVoice(
+            id=self.id,
+            name=self.name,
+            voice_id=self.elevenlabs_voice_id,
+            sample_count=self.sample_count,
+            created_at=self.created_at.isoformat() if self.created_at else None,
+        )
+
+
 class EntityRow(Base):
     """Named consistency anchor (character, field, prop) + frame snapshot."""
 

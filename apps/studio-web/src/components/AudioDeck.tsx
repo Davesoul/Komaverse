@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { api, mediaUrl, type AudioTake, type Scene } from "../api";
+import { api, mediaUrl, type AudioTake, type ClonedVoice, type Scene } from "../api";
 import { probeDuration } from "../lib/audio/peaks";
 import { Btn, BusyDots, IconBtn, SectionTitle, SelectInput, TextInput } from "./ui";
 import { Waveform } from "./Waveform";
@@ -66,6 +66,13 @@ export function AudioDeck({
   const [genText, setGenText] = useState("");
   const [genBusy, setGenBusy] = useState(false);
   const [genCue, setGenCue] = useState(true);
+  const [clones, setClones] = useState<ClonedVoice[]>([]);
+  const [cloneName, setCloneName] = useState("");
+  const [cloneBusy, setCloneBusy] = useState(false);
+  const cloneFileRef = useRef<HTMLInputElement>(null);
+  useEffect(() => {
+    api.listClonedVoices().then(setClones).catch(() => setClones([]));
+  }, []);
   const recRef = useRef<RecState | null>(null);
   const voiceoverRef = useRef<number | null>(null);
   const playersRef = useRef(new Map<string, HTMLAudioElement>());
@@ -404,6 +411,84 @@ export function AudioDeck({
         </div>
       </div>
 
+      <div style={{ marginBottom: 8, border: "1px solid var(--kv-border)", borderRadius: 6, padding: 8 }}>
+        <div style={{ fontSize: 12, color: "var(--kv-muted)", marginBottom: 6 }}>
+          Clone a voice — 1–5 clear speech samples (ElevenLabs instant
+          clone). Clones appear in the Brain voice picker under elevenlabs.
+        </div>
+        {clones.length > 0 && (
+          <div style={{ display: "flex", flexDirection: "column", gap: 4, marginBottom: 6 }}>
+            {clones.map((c) => (
+              <div key={c.id} style={{ display: "flex", gap: 6, alignItems: "center", fontSize: 13 }}>
+                <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis" }}>
+                  {c.name}{" "}
+                  <span className="kv-nums" style={{ color: "var(--kv-muted)" }}>
+                    · {c.sample_count} sample{c.sample_count === 1 ? "" : "s"}
+                  </span>
+                </span>
+                <IconBtn
+                  danger
+                  onClick={() => {
+                    if (!window.confirm(`Delete the "${c.name}" clone? It leaves ElevenLabs and the picker. This can't be undone.`)) return;
+                    void api.deleteClonedVoice(c.id)
+                      .then(() => setClones((cs) => cs.filter((x) => x.id !== c.id)))
+                      .catch((e) => notify(`Couldn't delete the clone: ${(e as Error).message}`));
+                  }}
+                  label={`Delete the "${c.name}" clone`}
+                >
+                  ×
+                </IconBtn>
+              </div>
+            ))}
+          </div>
+        )}
+        <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+          <TextInput
+            value={cloneName}
+            onChange={(e) => setCloneName(e.target.value)}
+            placeholder="Voice name…"
+            aria-label="Clone name"
+            style={{ flex: 1, minWidth: 0 }}
+          />
+          <Btn small disabled={cloneBusy || !cloneName.trim()} onClick={() => cloneFileRef.current?.click()}>
+            {cloneBusy ? (
+              <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+                <BusyDots size={5} />
+                Cloning…
+              </span>
+            ) : (
+              "Samples…"
+            )}
+          </Btn>
+        </div>
+        <input
+          ref={cloneFileRef}
+          type="file"
+          accept="audio/*"
+          multiple
+          style={{ display: "none" }}
+          aria-label="Clone voice samples"
+          onChange={(e) => {
+            const files = [...(e.target.files ?? [])];
+            e.target.value = "";
+            if (files.length === 0) return;
+            void (async () => {
+              setCloneBusy(true);
+              try {
+                const v = await api.cloneVoice(cloneName.trim(), files);
+                setClones((cs) => [v, ...cs]);
+                setCloneName("");
+                notify(`Voice "${v.name}" cloned — pick it in the Brain voice row (elevenlabs).`);
+              } catch (err) {
+                notify(`Couldn't clone the voice: ${(err as Error).message}`);
+              } finally {
+                setCloneBusy(false);
+              }
+            })();
+          }}
+        />
+      </div>
+
       <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 8 }}>
         {takes.map((t, i) => (
           <div
@@ -492,8 +577,19 @@ export function AudioDeck({
                     {take?.name || "Missing take"}
                   </span>
                   <span className="kv-nums" style={{ color: "var(--kv-muted)" }}>
-                    @{c.start_sec.toFixed(1)}s ×{c.volume.toFixed(1)}{(c.rate ?? 1) !== 1 ? ` · ${(c.rate ?? 1)}×` : ""}
+                    @{c.start_sec.toFixed(1)}s ×{c.volume.toFixed(1)}
                   </span>
+                  <IconBtn
+                    onClick={() => {
+                      const order = [0.5, 1, 1.5, 2];
+                      const cur = c.rate ?? 1;
+                      const next = order[(order.indexOf(cur) + 1 + order.length) % order.length] ?? 1;
+                      void api.patchCue(c.id, { rate: next }).then(onScene);
+                    }}
+                    label={`Cue speed ${(c.rate ?? 1)}× — click to cycle 0.5 / 1 / 1.5 / 2`}
+                  >
+                    <span className="kv-nums" style={{ fontSize: 12 }}>{(c.rate ?? 1)}×</span>
+                  </IconBtn>
                   <IconBtn
                     onClick={() => {
                       if (!window.confirm(`Remove this cue from the timeline? The take stays in the library. This can't be undone.`)) return;

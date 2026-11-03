@@ -184,6 +184,50 @@ function DurationInput({ value, onCommit }: { value: number; onCommit: (v: numbe
   );
 }
 
+/** Volume slider with a numeric field on the side. Dragging stages the
+ * level locally; releasing (or Enter) commits one PATCH for the gesture. */
+function VolumeField({ value, onCommit }: { value: number; onCommit: (v: number) => void }) {
+  const [local, setLocal] = useState(value);
+  const committed = useRef(value);
+  useEffect(() => {
+    setLocal(value);
+    committed.current = value;
+  }, [value]);
+  const commit = (v: number) => {
+    const c = Math.round(Math.min(Math.max(v, 0), 2) * 100) / 100;
+    setLocal(c);
+    if (c !== committed.current) {
+      committed.current = c;
+      onCommit(c);
+    }
+  };
+  return (
+    <>
+      <input
+        type="range"
+        min={0}
+        max={2}
+        step={0.05}
+        value={local}
+        aria-label="Cue volume slider"
+        title="Drag to a level, release to apply (0–2; preview caps at 1)"
+        onChange={(e) => setLocal(Number(e.target.value))}
+        onPointerUp={(e) => commit(Number((e.target as HTMLInputElement).value))}
+        onKeyUp={(e) => {
+          if (e.key === "Enter") commit(Number((e.target as HTMLInputElement).value));
+        }}
+        style={{ width: 120 }}
+      />
+      <SecInput
+        value={value}
+        label="Cue volume"
+        title="Cue gain 0–2 (preview caps at 1; the export honors the full range)"
+        onCommit={onCommit}
+      />
+    </>
+  );
+}
+
 function SecInput({
   value,
   onCommit,
@@ -2484,34 +2528,10 @@ export default function RenderPage() {
                     </div>
                     <div style={{ display: "flex", gap: 6, alignItems: "center", marginLeft: "auto", flexWrap: "wrap" }}>
                       <span style={{ fontSize: 12, color: "var(--kv-muted)" }}>Volume</span>
-                      <Btn
-                        small
-                        title="Quieter by 0.1"
-                        onClick={() =>
-                          void commitCuePatch(selectedCue.id, {
-                            volume: Math.round(Math.max(0, selectedCue.volume - 0.1) * 10) / 10,
-                          })
-                        }
-                      >
-                        −
-                      </Btn>
-                      <SecInput
+                      <VolumeField
                         value={selectedCue.volume}
-                        label="Cue volume"
-                        title="Cue gain 0–2 (preview caps at 1; the export honors the full range)"
                         onCommit={(v) => void commitCuePatch(selectedCue.id, { volume: v })}
                       />
-                      <Btn
-                        small
-                        title="Louder by 0.1"
-                        onClick={() =>
-                          void commitCuePatch(selectedCue.id, {
-                            volume: Math.round(Math.min(2, selectedCue.volume + 0.1) * 10) / 10,
-                          })
-                        }
-                      >
-                        +
-                      </Btn>
                     </div>
                   </div>
                   <div style={{ display: "flex", gap: 6, alignItems: "center", marginTop: 10, flexWrap: "wrap" }}>

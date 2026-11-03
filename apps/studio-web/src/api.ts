@@ -235,6 +235,14 @@ export interface VoiceCatalog {
   voices: VoiceOption[];
 }
 
+export interface ClonedVoice {
+  id: string;
+  name: string;
+  voice_id: string;
+  sample_count: number;
+  created_at: string | null;
+}
+
 export interface CreditEntry {
   id: string;
   delta: number;
@@ -766,6 +774,19 @@ export const api = {
     req<SubtitleTrack | null>(`/api/v1/scenes/${sceneId}/subtitles?lane=${lane}`),
   deleteSubtitles: (sceneId: string, lane: number = 0) =>
     req<void>(`/api/v1/scenes/${sceneId}/subtitles?lane=${lane}`, { method: "DELETE" }),
+  listClonedVoices: () =>
+    req<ClonedVoice[]>(`/api/v1/ai/voices/clones`),
+  cloneVoice: (name: string, files: File[]) => {
+    const form = new FormData();
+    form.append("name", name);
+    for (const f of files) form.append("files", f, f.name);
+    return req<ClonedVoice>(`/api/v1/ai/voices/clone`, {
+      method: "POST",
+      body: form,
+    });
+  },
+  deleteClonedVoice: (cloneId: string) =>
+    req<void>(`/api/v1/ai/voices/clones/${cloneId}`, { method: "DELETE" }),
 
   generate: (body: {
     kind: string;

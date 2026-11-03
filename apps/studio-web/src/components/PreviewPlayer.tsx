@@ -260,6 +260,13 @@ export function PreviewPlayer({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [playing]);
 
+  // A cue volume/speed edit replaces the audio list while the elements
+  // persist: re-apply rate + volume immediately, no seek or replay needed.
+  useEffect(() => {
+    syncAudio(timeRef.current, playingRef.current);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [audio]);
+
   useEffect(
     () => () => {
       stopAllAudio();

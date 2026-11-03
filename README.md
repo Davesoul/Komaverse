@@ -31,9 +31,10 @@ started Oct 28, 2026.
   ruler, tenths timecode, zoom, drag-reorder, edge-trim with cue `end_sec`,
   undo/redo with Ctrl+Z / Ctrl+Shift+Z like Draw), every delete gated by
   a confirm pop-up. Clicking a sound cue selects it and opens the sound
-  inspector: volume (±0.1 steppers), fade in/out, speed (0.5/1/1.5/2×
-  presets + custom 0.25–4, previewed live with `playbackRate` and burned
-  into the export with `atempo`), and lane (A1–A8). The ＋ Lane menu adds
+  inspector: volume (slider + numeric field, one PATCH per gesture),
+  fade in/out, speed (0.5/1/1.5/2× presets + custom 0.25–4, previewed
+  live with `playbackRate` and burned into the export with `atempo`),
+  and lane (A1–A8). Timeline cue rows carry a speed-cycle button too. The ＋ Lane menu adds
   audio lanes (video overlap and extra subtitle lanes stay disabled until
   the renderer grows a compositor and multi-track subs),
   per-clip inspector (duration steppers, motion, lane V1–V4 + overlay
@@ -60,10 +61,12 @@ started Oct 28, 2026.
 - **AI:** pluggable providers — Meta Model API (Muse Spark/Wonder
   brain, Muse Image generation, Voice Transcribe takes, SAM 3.1
   segmentation), OpenRouter (chat, image + async video models),
-  ElevenLabs + vendored local TTS voices, generic cloud endpoint
-  (incl. hosted open weights), local ComfyUI, fake demo — background
-  jobs with polling; generations land in the Media gallery (frames only
-  on explicit request), videos preview in the Generate panel
+  ElevenLabs + vendored local TTS voices, ElevenLabs instant voice
+  cloning from 1–5 samples (clones join the Brain voice picker),
+  generic cloud endpoint (incl. hosted open weights), local ComfyUI,
+  fake demo — background jobs with polling; generations land in the
+  Media gallery (frames only on explicit request), videos preview in
+  the Generate panel
 - **Credits:** append-only ledger, per-operation costs, 402 enforcement,
   dev grants (no Stripe in v1)
 - **Usage dashboard:** Home tab section with requests/calls, estimated
