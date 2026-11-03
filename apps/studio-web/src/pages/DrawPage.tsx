@@ -358,6 +358,9 @@ export default function DrawPage() {
   }, [frames, sequenceId, sequences]);
   const zoomRef = useRef(zoom);
   zoomRef.current = zoom;
+  // True once the user zooms by hand (wheel, pinch, buttons, 1:1):
+  // resize refits only an untouched fit, never a deliberate zoom.
+  const manualZoomRef = useRef(false);
   const stashRef = useRef(new Map<string, SerializedLayer[]>());
   const saveTimerRef = useRef(0);
   const saveStateRef = useRef({ dirty: false, saving: false, queued: false });
@@ -486,15 +489,39 @@ export default function DrawPage() {
       200,
       document.documentElement.clientHeight * (tall ? 0.94 : 0.7) - pad,
     );
+    // Width budget accounts for the paper's own chrome: 32px breathing
+    // room on each side plus the canvas box padding/border. A 960px
+    // frame on a 360px phone fits exactly instead of spilling 48px
+    // into a horizontal scroll.
+    const widthBudget = Math.max(200, el.clientWidth - 80);
     const z = Math.min(
-      (el.clientWidth - pad) / engine.width,
+      widthBudget / engine.width,
       heightBudget / engine.height,
     );
     const nz = clamp(z > 0 && isFinite(z) ? z : 1, 0.1, 4);
+    manualZoomRef.current = false;
     zoomRef.current = nz;
     setZoom(nz);
     window.setTimeout(centerPaper, 50);
   }, [centerPaper]);
+
+  // Rotation/resize refits an untouched canvas so a turned phone never
+  // strands a zoom meant for the other axis. A deliberate hand zoom is
+  // never yanked: wheel, pinch, and the zoom buttons mark it manual.
+  useEffect(() => {
+    let t = 0;
+    const onResize = () => {
+      window.clearTimeout(t);
+      t = window.setTimeout(() => {
+        if (!manualZoomRef.current && frameIdRef.current) fitZoom(fullRef.current);
+      }, 150);
+    };
+    window.addEventListener("resize", onResize);
+    return () => {
+      window.clearTimeout(t);
+      window.removeEventListener("resize", onResize);
+    };
+  }, [fitZoom]);
 
   // Fullscreen canvas mode: the same panel restyles into a fixed overlay
   // (same canvas element + engine, so no state is lost), with a compact
@@ -654,6 +681,7 @@ export default function DrawPage() {
       const rect = el.getBoundingClientRect();
       const cx = e.clientX - rect.left;
       const cy = e.clientY - rect.top;
+      manualZoomRef.current = true;
       zoomRef.current = nz;
       setZoom(nz);
       el.scrollLeft = (el.scrollLeft + cx) * (nz / z) - cx;
@@ -896,6 +924,7 @@ export default function DrawPage() {
       const start = pinchStartRef.current;
       if (start.dist > 0) {
         const nz = clamp((start.zoom * pinchDist()) / start.dist, 0.1, 8);
+        manualZoomRef.current = true;
         zoomRef.current = nz;
         setZoom(nz);
       }
@@ -1488,14 +1517,14 @@ export default function DrawPage() {
               <IconBtn label="Download the composite as PNG" onClick={downloadPNG}>⤓</IconBtn>
             </div>
             <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
-              <IconBtn label="Zoom out" onClick={() => { const nz = clamp(zoomRef.current / 1.25, 0.1, 8); zoomRef.current = nz; setZoom(nz); }}>−</IconBtn>
+              <IconBtn label="Zoom out" onClick={() => { manualZoomRef.current = true; const nz = clamp(zoomRef.current / 1.25, 0.1, 8); zoomRef.current = nz; setZoom(nz); }}>−</IconBtn>
               <span className="kv-nums" style={{ minWidth: 48, textAlign: "center", fontSize: 13 }}>
                 {Math.round(zoom * 100)}%
               </span>
-              <IconBtn label="Zoom in" onClick={() => { const nz = clamp(zoomRef.current * 1.25, 0.1, 8); zoomRef.current = nz; setZoom(nz); }}>+</IconBtn>
+              <IconBtn label="Zoom in" onClick={() => { manualZoomRef.current = true; const nz = clamp(zoomRef.current * 1.25, 0.1, 8); zoomRef.current = nz; setZoom(nz); }}>+</IconBtn>
               <IconBtn label="Fit to view" onClick={() => fitZoom()}>⤢</IconBtn>
               <IconBtn label="Fullscreen canvas (F)" onClick={() => setFullMode(true)}>⛶</IconBtn>
-              <Btn small onClick={() => { zoomRef.current = 1; setZoom(1); }} title="Actual size">1:1</Btn>
+              <Btn small onClick={() => { manualZoomRef.current = true; zoomRef.current = 1; setZoom(1); }} title="Actual size">1:1</Btn>
               <span style={{ fontSize: 11, color: "var(--kv-faint)" }} title="Hold Ctrl (or pinch) while scrolling to zoom; plain scroll moves the page">
                 Ctrl+scroll zooms
               </span>
@@ -1954,9 +1983,9 @@ export default function DrawPage() {
                       </span>
                     ) : dirty ? "● Save" : "✓"}
                   </PrimaryBtn>
-                  <IconBtn label="Zoom out" onClick={() => { const nz = clamp(zoomRef.current / 1.25, 0.1, 8); zoomRef.current = nz; setZoom(nz); }}>−</IconBtn>
+                  <IconBtn label="Zoom out" onClick={() => { manualZoomRef.current = true; const nz = clamp(zoomRef.current / 1.25, 0.1, 8); zoomRef.current = nz; setZoom(nz); }}>−</IconBtn>
                   <IconBtn label="Fit to view" onClick={() => fitZoom(true)}>⤢</IconBtn>
-                  <IconBtn label="Zoom in" onClick={() => { const nz = clamp(zoomRef.current * 1.25, 0.1, 8); zoomRef.current = nz; setZoom(nz); }}>+</IconBtn>
+                  <IconBtn label="Zoom in" onClick={() => { manualZoomRef.current = true; const nz = clamp(zoomRef.current * 1.25, 0.1, 8); zoomRef.current = nz; setZoom(nz); }}>+</IconBtn>
                   <Btn
                     small
                     active={brushOpen}

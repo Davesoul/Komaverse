@@ -915,3 +915,23 @@ color-theory (cel shadow colors, light logic), manga-literacy
   stacked or scrolled correctly (grid collapses under 920px).
 - Live: `npx tsc --noEmit` clean, `npm run build` green
   (no backend change this round).
+
+
+## ADR-34: Intro portrait fit, canvas-aware Draw fit (accepted)
+
+- The ident page (150x118 vmin) bled off the sides on portrait
+  phones, cropping the side panels. `ident.html` now measures the
+  viewport and, only when it is narrower than the page, scales the
+  whole body down uniformly — wide screens never upscale and stay
+  pixel-identical, and the scale composes with the GSAP camera
+  instead of fighting it. Applies to the animated and static
+  fallbacks alike.
+- The Draw fit only truly budgeted height: its 24px pad ignored
+  the paper's 32px-per-side breathing room, so a 960px frame on a
+  360px phone still spilled ~48px into a horizontal scroll. The
+  width budget subtracts the real 80px chrome and the canvas
+  starts exactly fitted. Rotation or window resize refits an
+  untouched canvas; any hand zoom (wheel, pinch, buttons, 1:1)
+  marks it manual and is never yanked.
+- Live: `npx tsc --noEmit` clean, `npm run build` green
+  (no backend change this round).

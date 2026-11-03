@@ -222,6 +222,23 @@
   var qs = new URLSearchParams(location.search);
   var DEBUG = qs.has("debug");
   var CLEAN = qs.has("clean");
+  /* Responsive fit: the page is drawn 150x118 vmin and choreographed
+     to bleed top/bottom on wide screens — keep that exactly. Only when
+     the viewport is narrower than the page (portrait phones) shrink
+     the whole body uniformly so no panel crops off the sides.
+     transform on body composes with the GSAP transforms on #stage. */
+  function fit() {
+    var vw = window.innerWidth, vh = window.innerHeight;
+    var u = Math.min(vw, vh) / 100; /* 1vmin in px */
+    var s = u > 0 ? vw / (150 * u) : 1;
+    if (!isFinite(s) || s <= 0) s = 1;
+    s = Math.min(s, 1); /* never upscale: wide screens stay pixel-identical */
+    document.body.style.transform = s < 1 ? "scale(" + s + ")" : "";
+    document.body.style.transformOrigin = "center center";
+  }
+  window.addEventListener("resize", fit);
+  window.addEventListener("orientationchange", fit);
+  fit();
   if (!window.gsap) {
     // CDN blocked: rest on the final lockup instead of a black screen.
     document.body.classList.add("static");
