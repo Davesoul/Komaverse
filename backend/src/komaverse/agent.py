@@ -485,17 +485,20 @@ def _missing_style(prompt, style, genre, locked) -> str | None:
 
 
 def _ask_before_generating(tool: str, missing: list[tuple[str, str, str]]) -> str:
-    """Blocking question for underspecified generations (user-confirmed).
+    """Blocking question for subject-free generations (user-confirmed).
 
-    Lists every missing dimension with its suggestion in one round trip,
-    then makes the model wait for the answer instead of guessing.
+    Asked at most once per subject: one short question for the listed
+    pieces only — never re-ask answered or delegated pieces, and call
+    the tool on the next turn with defaults for anything still blank.
     """
     bits = "; ".join(f"{what} ({detail} — suggest {choices})" for what, detail, choices in missing)
     n = "one detail" if len(missing) == 1 else f"{len(missing)} details"
     return (
         f"Before generating I need {n}: {bits}. "
-        "Ask the user and wait for their reply. "
-        f"Do not call {tool} again until they answer."
+        "Ask ONE short question for these pieces only — nothing else, "
+        "and never re-ask pieces the conversation already answered. "
+        f"Call {tool} on the next turn with the answers, taking the "
+        "stated defaults for anything still blank."
     )
 
 
@@ -3846,7 +3849,13 @@ def demo_turn(
 
 _SYSTEM = (
     "You operate Komaverse, an anime studio. Use tools to act on the user's "
-    "project, then summarize briefly. Never invent IDs, counts, or URLs — "
+    "project, then summarize briefly. "
+    "When the user names an image or video subject, call "
+    "create_image/create_video ON THIS TURN — pass what the conversation "
+    "states, omit the rest. Blanks take defaults; 'decide', 'go ahead' "
+    "and 'whatever' mean every blank defaults. Ask a question only when "
+    "no subject exists at all. "
+    "Never invent IDs, counts, or URLs — "
     "only report what tools return. Earlier turns in this conversation are "
     "included before the latest message - use them as context. "
     "Greetings, thanks, and other smalltalk get a words-only reply — "
@@ -4093,7 +4102,11 @@ _TOOLS_SCHEMA = [
         "function": {
             "name": "create_image",
             "description": (
-                "Generate an image from a prompt into the media gallery. "
+                "Generate an image from the named subject ON THIS TURN - "
+                "call now, do not interview. Pass what the conversation "
+                "states; omit the rest (square, standard quality). "
+                "'Decide', 'go ahead' and 'whatever' mean every blank "
+                "takes its default. "
                 "Attach a reference only when the user asked to reuse one: "
                 "pass their @frame:/@panel:/@media:/@gen:/@sequence: mentions as "
                 "references, named entities as entity_ids - never paste "
@@ -4113,8 +4126,8 @@ _TOOLS_SCHEMA = [
                     "reference_frame_id": {"type": "string"},
                     "references": {"type": "array", "description": "[{kind, id}] for user-mentioned refs to reuse (frame|panel|media|gen|sequence). Style/subject guidance unless the user names a start/end frame role. Omit otherwise."},
                     "entity_ids": {"type": "array", "description": "Named entity ids to keep on-model. Omit otherwise."},
-                    "width": {"type": "number", "description": "Pixels; honor the thread's format answer (16:9→1280x720, 9:16→720x1280, 1:1→1024x1024)."},
-                    "height": {"type": "number", "description": "Pixels; honor the thread's quality answer (draft→512, standard→768, high→1024 longest side)."},
+                    "width": {"type": "number", "description": "Pixels (16:9→1280x720, 9:16→720x1280, 1:1→1024x1024). Pass the conversation's format when stated; otherwise omit."},
+                    "height": {"type": "number", "description": "Pixels (draft→512, standard→768, high→1024 longest side). Pass the conversation's quality when stated; otherwise omit."},
                     "attach_frame": {"type": "boolean", "description": "True only when the user explicitly asks for a draw frame. Omit otherwise."},
                 },
                 "required": ["prompt"],
@@ -4126,10 +4139,14 @@ _TOOLS_SCHEMA = [
         "function": {
             "name": "create_video",
             "description": (
-                "Start an async video render from a prompt. The job runs "
-                "in the background and the UI follows it live — answer "
-                "immediately with the [job id]; never call check_job "
-                "afterwards. "
+                "Render a video from the named subject ON THIS TURN - call "
+                "now, do not interview. Pass what the conversation states "
+                "(subject words, seconds, size, references); omit the "
+                "rest: blanks take defaults (4s, provider-default size, "
+                "silent) and 'decide', 'go ahead' and 'whatever' mean "
+                "every blank defaults. The job runs in the background and "
+                "the UI follows it live — answer immediately with the "
+                "[job id]; never call check_job afterwards. "
                 "Attach a reference only when the user asked to reuse one, "
                 "via references - never paste @-tokens into the prompt. "
                 "Frame roles come from the user's words, never position: "
@@ -4143,9 +4160,9 @@ _TOOLS_SCHEMA = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "prompt": {"type": "string", "description": "Clean scene text, no @-mentions. Fold the thread's framing answer into the scene words ('wide 16:9 framing' or 'vertical 9:16 framing')."},
-                    "seconds": {"type": "number", "description": "Honor the thread's duration answer in seconds (Seedance bills per second; default 4)."},
-                    "size": {"type": "string", "description": "Honor the thread's resolution answer as WxH (1280x720, 720x1280, 1920x1080...). Omit for the provider default (cheapest)."},
+                    "prompt": {"type": "string", "description": "Clean scene text, no @-mentions. Fold any framing words from the conversation into the scene ('wide 16:9 framing' or 'vertical 9:16 framing'); with none stated, describe the subject plainly."},
+                    "seconds": {"type": "number", "description": "Seconds of video (Seedance bills per second; default 4). Pass the conversation's number when stated - digits or words ('four seconds'); otherwise omit."},
+                    "size": {"type": "string", "description": "WxH (1280x720, 720x1280, 1920x1080...). Pass the conversation's value when stated; otherwise omit for the provider default (cheapest)."},
                     "generate_audio": {"type": "boolean", "description": "Always false or omitted: the video model renders silent. Dialogue and music come from synthesize_voice takes and timeline audio, never the video model."},
                     "model": {"type": "string"},
                     "genre": {"type": "string"},

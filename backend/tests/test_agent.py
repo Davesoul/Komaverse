@@ -1612,7 +1612,10 @@ def test_generation_guidance_reuses_context():
     }
     for name in ("create_video", "create_image", "look_at", "watch_video"):
         assert "already" in descs[name].lower()
+    for name in ("create_video", "create_image"):
+        assert "on this turn" in descs[name].lower()
     assert "once per conversation" in agent_mod._SYSTEM.lower()
+    assert "on this turn" in agent_mod._SYSTEM.lower()
 
 
 def test_cloud_loop_step_cap_terminates(factory, user, monkeypatch):

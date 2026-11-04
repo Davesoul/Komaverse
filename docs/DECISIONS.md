@@ -1267,3 +1267,32 @@ color-theory (cel shadow colors, light logic), manga-literacy
 - Live: 3 new tests (word numbers, delegation skips both gates and
   starts the job, reuse guidance present); suites 462 passed;
   `:8001` restarted for the new gates/guidance.
+## ADR-48: Generate-now prompts; the loop was model-side (accepted)
+
+- Live chat history proved the loop is model-side, not gate-side:
+  the 01:58 turn ("A four seconds video. and decide the other
+  details. from @gen:9824abd78eb1") restated the subject, the
+  length, and delegation — yet the model asked all three questions
+  in its own words without ever calling create_video, so no
+  server-side gate could fire. Prior turns show why it learned the
+  habit: old ask-texts ("Ask the user and wait...", "Reply with
+  e.g. ...") sit in history, and the schema phrased every parameter
+  as "Honor the thread's X answer", i.e. an interrogation script.
+- Fix is therefore prompt-layer (the skill itself never orders
+  asking — verified by reading it; left untouched). create_video /
+  create_image now lead with ON THIS TURN call-now + defaults and
+  name delegation explicitly; every parameter reads "from the
+  conversation when stated, otherwise omit". _SYSTEM front-loads the
+  generate-now rule (ask only with no subject at all).
+  _ask_before_generating is bounded to one short question, names no
+  re-asking, and orders the next-turn call with defaults.
+- Backstop kept and proven: bare "a short video" (no usable value,
+  no delegation) still blocks naming duration with no job created.
+- Live: guidance tests extended (on-this-turn in both tools +
+  system); agent/memory/consistency suites 129 passed; full suite
+  462 passed; `:8001` restarted for the new prompt layer.
+- Honest limit: model obedience cannot be proven without spending
+  real credits, so no live generation was run. If the model still
+  interviews after this, the named next step is server-side
+  auto-start on delegated turns (preamble launches the job from the
+  recovered subject instead of waiting for the call).
