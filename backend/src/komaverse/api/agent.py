@@ -144,7 +144,10 @@ def chat(
         refs=refs, history=history, current_frame_id=body.current_frame_id,
     )
     _remember(session, user, out.get("project_id"), "user", body.message)
-    _remember(session, user, out.get("project_id"), "agent", out.get("reply", ""))
+    _remember(
+        session, user, out.get("project_id"), "agent", out.get("reply", ""),
+        out.get("actions"),
+    )
     session.commit()
     return AgentReply(**out)
 
@@ -178,7 +181,10 @@ def chat_stream(
             yield f"data: {json.dumps(event)}\n\n"
         if final is not None:
             _remember(session, user, final.get("project_id"), "user", body.message)
-            _remember(session, user, final.get("project_id"), "agent", final.get("reply", ""))
+            _remember(
+                session, user, final.get("project_id"), "agent", final.get("reply", ""),
+                final.get("actions"),
+            )
             session.commit()
 
     return StreamingResponse(
@@ -215,17 +221,43 @@ def _load_history(session, user, project_id, limit=_HISTORY_LIMIT):
         .scalars()
         .all()
     )
-    return [{"role": r.role, "text": r.text} for r in reversed(rows)]
+    return [
+        {
+            "role": r.role,
+            "text": r.text,
+            "at": r.created_at.isoformat(timespec="minutes") if r.created_at else "",
+        }
+        for r in reversed(rows)
+    ]
 
 
-def _remember(session, user, project_id, role, text):
-    """Store one turn and prune the scope past the keep limit."""
+def _remember(session, user, project_id, role, text, actions=None):
+    """Store one turn and prune the scope past the keep limit.
+
+    Agent rows also keep the tool calls they ran (JSON), so the
+    history tool reports operations — not just words.
+    """
+    stored_actions = None
+    if actions:
+        try:
+            import json as _json
+
+            stored_actions = _json.dumps(
+                [
+                    {"tool": a.get("tool", ""), "summary": str(a.get("summary") or "")[:300]}
+                    for a in actions
+                    if isinstance(a, dict) and a.get("tool")
+                ][:12]
+            )
+        except (TypeError, ValueError):
+            stored_actions = None
     session.add(
         ChatTurnRow(
             user_id=user.id,
             project_id=project_id,
             role=role,
             text=(text or "")[:_MAX_TURN_CHARS],
+            actions=stored_actions,
         )
     )
     session.flush()

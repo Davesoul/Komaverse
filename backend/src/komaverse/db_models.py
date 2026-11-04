@@ -668,6 +668,10 @@ class ChatTurnRow(Base):
     role: Mapped[str] = mapped_column(String(8), default="user")
     text: Mapped[str] = mapped_column(Text, default="")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, index=True)
+    # JSON list of {tool, summary} the agent ran on this turn, so the
+    # history tool can report operations — not just words. NULL on rows
+    # written before the column existed.
+    actions: Mapped[str | None] = mapped_column(Text, default=None)
 
 
 class StudioSettingRow(Base):

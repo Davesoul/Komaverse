@@ -96,6 +96,7 @@ from komaverse.studio_settings import provider_for
 from komaverse.subtitles import SubSegment, segments_to_srt
 from komaverse.db_models import (
     AudioTakeRow,
+    ChatTurnRow,
     LayerRow,
     ExportReportRow,
     FrameRow,
@@ -105,6 +106,87 @@ from komaverse.db_models import (
     SequenceRow,
     UserRow,
 )
+
+
+def _fmt_when(dt) -> str:
+    """UTC 'YYYY-MM-DD HH:MM' stamp for history/observability lines."""
+    try:
+        if getattr(dt, "tzinfo", None):
+            return dt.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+        return dt.strftime("%Y-%m-%d %H:%M UTC")
+    except Exception:
+        return "unknown time"
+
+
+def tool_history(session: Session, user: UserRow, project_id: str | None, limit=10) -> str:
+    """Recent chat turns with dates and the tool actions each ran."""
+    try:
+        n = min(max(int(limit or 10), 1), 20)
+    except (TypeError, ValueError):
+        n = 10
+    cond = ChatTurnRow.user_id == user.id
+    cond = cond & (
+        ChatTurnRow.project_id == project_id
+        if project_id
+        else ChatTurnRow.project_id.is_(None)
+    )
+    rows = (
+        session.execute(
+            select(ChatTurnRow)
+            .where(cond)
+            .order_by(ChatTurnRow.created_at.desc(), ChatTurnRow.id.desc())
+            .limit(n)
+        )
+        .scalars()
+        .all()
+    )
+    rows = list(reversed(rows))
+    if not rows:
+        return "no history yet in this scope."
+    lines = [f"Last {len(rows)} turn(s):"]
+    for r in rows:
+        lines.append(
+            f"[{_fmt_when(r.created_at)}] {r.role}: {(r.text or '')[:200]}"
+        )
+        try:
+            acts = json.loads(r.actions) if r.actions else []
+        except (TypeError, ValueError):
+            acts = []
+        for a in acts[:6]:
+            if isinstance(a, dict) and a.get("tool"):
+                lines.append(f"  -> {a['tool']}: {str(a.get('summary') or '')[:120]}")
+    return "\n".join(lines)
+
+
+def tool_recent_jobs(session: Session, user: UserRow, project_id: str | None, limit=10) -> str:
+    """Recent operations (generations, exports, transcriptions) with dates."""
+    try:
+        n = min(max(int(limit or 10), 1), 20)
+    except (TypeError, ValueError):
+        n = 10
+    cond = JobRow.user_id == user.id
+    if project_id:
+        cond = cond & (JobRow.project_id == project_id)
+    rows = (
+        session.execute(
+            select(JobRow)
+            .where(cond)
+            .order_by(JobRow.created_at.desc(), JobRow.id.desc())
+            .limit(n)
+        )
+        .scalars()
+        .all()
+    )
+    if not rows:
+        return "no jobs yet in this scope."
+    lines = [f"Last {len(rows)} job(s):"]
+    for j in rows:
+        state = "ready" if j.status == "done" and j.result_url else j.status
+        lines.append(
+            f"[{_fmt_when(j.created_at)}] {j.kind} {state}: "
+            f"{(j.prompt or '')[:100]} [job {j.id}]"
+        )
+    return "\n".join(lines)
 from komaverse.security import limiter
 from komaverse.skills import SkillError, list_skills, read_skill
 from pydantic import BaseModel
@@ -3820,6 +3902,21 @@ def demo_turn(
         )
     elif any(k in text for k in ("cancel", "stop", "abort")) and "job" in text:
         reply = run("cancel_job", tool_cancel_job, session, user, parse_job_id(message))
+    elif any(
+        p in text for p in (
+            "show me the history", "show history", "chat history",
+            "what did we do", "what have you done", "recent actions",
+            "our chat so far",
+        )
+    ):
+        reply = run("history", tool_history, session, user, project_id, 10)
+    elif any(
+        p in text for p in (
+            "recent jobs", "job history", "show jobs", "show me the jobs",
+            "what did you generate", "past generations", "past jobs",
+        )
+    ):
+        reply = run("recent_jobs", tool_recent_jobs, session, user, project_id, 10)
     elif ("job" in text or "video" in text) and any(k in text for k in JOB_STATUS_WORDS):
         jid = parse_job_id(message)
         if not jid:
@@ -4083,7 +4180,9 @@ _SYSTEM = (
     "no subject exists at all. "
     "Never invent IDs, counts, or URLs — "
     "only report what tools return. Earlier turns in this conversation are "
-    "included before the latest message - use them as context. "
+    "included before the latest message - use them as context; turns carry "
+    "[date time UTC] stamps and 'Now:' states the current UTC time, so use "
+    "them when asked what happened when. "
     "Greetings, thanks, and other smalltalk get a words-only reply — "
     "call no tools unless the user asks for an action, a change, or "
     "information not already in context. Async jobs (create_video, "
@@ -4133,6 +4232,41 @@ _TOOLS_SCHEMA = [
             "name": "project_status",
             "description": "Summarize pages, panels, clips, and frames.",
             "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "history",
+            "description": (
+                "Recall recent chat turns with dates and the tool actions "
+                "each ran. Use when the user asks what was done, said, or "
+                "decided ('show the history', 'what did we do')."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "limit": {"type": "number", "description": "Max turns back (default 10, max 20)."},
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "recent_jobs",
+            "description": (
+                "List recent operations (image/video generations, "
+                "exports, transcriptions) with kind, status, date, and "
+                "[job id]. Use for 'show recent jobs', 'what did you "
+                "generate', past-operation questions."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "limit": {"type": "number", "description": "Max jobs back (default 10, max 20)."},
+                },
+            },
         },
     },
     {
@@ -4859,6 +4993,14 @@ def _exec_cloud_tool(
     try:
         if name == "project_status":
             result = tool_status(session, user, project_id)
+        elif name == "history":
+            result = tool_history(
+                session, user, args.get("project_id") or project_id, args.get("limit")
+            )
+        elif name == "recent_jobs":
+            result = tool_recent_jobs(
+                session, user, args.get("project_id") or project_id, args.get("limit")
+            )
         elif name == "create_project":
             result = tool_create_project(
                 session, user, str(args.get("name") or "Untitled")
@@ -5160,18 +5302,22 @@ def _cloud_loop(
     """
     context = tool_status(session, user, project_id)
     frame_line = f"\n\n{open_frame}" if open_frame else ""
-    user_content = f"Project: {context}{frame_line}\n\n{message}"
+    now_line = f"\nNow: {_fmt_when(datetime.now(timezone.utc))}"
+    user_content = f"Project: {context}{frame_line}{now_line}\n\n{message}"
     if ref_context:
         user_content = (
-            f"Project: {context}{frame_line}\n\nReferenced:\n{ref_context}\n\n{message}"
+            f"Project: {context}{frame_line}{now_line}\n\nReferenced:\n{ref_context}\n\n{message}"
         )
-    past = [
-        {
-            "role": "user" if h.get("role") == "user" else "assistant",
-            "content": str(h.get("text") or "")[:600],
-        }
-        for h in (history or [])[-8:]
-    ]
+    past = []
+    for h in (history or [])[-8:]:
+        stamp = str(h.get("at") or "").replace("T", " ")[:16]
+        prefix = f"[{stamp}] " if stamp else ""
+        past.append(
+            {
+                "role": "user" if h.get("role") == "user" else "assistant",
+                "content": prefix + str(h.get("text") or "")[:600],
+            }
+        )
     messages: list[dict] = [
         {"role": "system", "content": _SYSTEM},
         *past,

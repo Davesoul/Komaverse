@@ -1394,3 +1394,23 @@ color-theory (cel shadow colors, light logic), manga-literacy
 - New `test_detect_all_lists_panel_refs` locks roster ids (and page
   ids) against the seeded pages. Agent + scans suites green at
   commit time; full suite re-run below.
+
+## ADR-54: Agent history observability + date awareness (accepted)
+
+- The agent could not say what it did or when: turns were stored
+  without timestamps in context, actions were never persisted, and
+  no tool listed past operations. Fixed on the context side:
+  `chat_turns` gains an `actions` JSON column (ALTER backfill, NULL
+  on old rows), `_remember` stores each agent turn's tool calls,
+  and history items carry their UTC minute.
+- New tools: `history` (recent turns with `[YYYY-MM-DD HH:MM UTC]`
+  stamps plus each turn's `-> tool: summary` actions) and
+  `recent_jobs` (kind, status/ready, prompt, `[job id]`, date).
+  Both brains: cloud schema + exec wired, demo answers "show me
+  the history / recent jobs / what did you generate".
+- Date awareness: every cloud turn carries `Now: <UTC>` in context,
+  history turns are timestamp-prefixed, and `_SYSTEM` tells the
+  model to use them when asked what happened when.
+- 4 new tests (turns with dates, action persistence incl. a real
+  turn end-to-end, jobs listing, demo triggers); full suite 476
+  passed; `:8001` restarted (agent + models + api changed).

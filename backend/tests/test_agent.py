@@ -1642,6 +1642,71 @@ def test_generation_guidance_reuses_context():
     assert "on this turn" in agent_mod._SYSTEM.lower()
 
 
+def test_history_tool_lists_turns_with_dates(factory, user):
+    """The agent can recall what was said and when (observability)."""
+    import re
+
+    from komaverse.agent import tool_history
+
+    from komaverse.api.agent import _remember
+
+    with factory() as s:
+        _remember(s, user, None, "user", "remember the red cloak")
+        out = tool_history(s, user, None, limit=5)
+    assert "red cloak" in out
+    assert re.search(r"\[20\d\d-\d\d-\d\d \d\d:\d\d", out)
+
+
+def test_history_records_actions(factory, user):
+    """Tool calls persist with the turn so history shows operations."""
+    from komaverse.agent import tool_history
+    from komaverse.api.agent import AgentChatBody, _remember, chat
+
+    pid = seed_project(factory, user)
+    with factory() as s:
+        _remember(
+            s, user, pid, "agent", "status report",
+            [{"tool": "project_status", "summary": "3 pages"}],
+        )
+        out = tool_history(s, user, pid, limit=5)
+    assert "project_status" in out
+    # and a real turn persists its actions end to end
+    with factory() as s:
+        chat(AgentChatBody(message="report project status", project_id=pid), s, user)
+        out = tool_history(s, user, pid, limit=5)
+    assert "project_status" in out
+
+
+def test_recent_jobs_lists_operations(factory, user):
+    """Generations/exports show up with kind, status, and date."""
+    import re
+
+    from komaverse.agent import tool_recent_jobs
+
+    pid = seed_project(factory, user)
+    jid = seed_video_job(factory, user, pid)
+    with factory() as s:
+        out = tool_recent_jobs(s, user, pid, limit=5)
+    assert jid in out
+    assert "video" in out and ("ready" in out or "done" in out)
+    assert re.search(r"\[20\d\d-\d\d-\d\d", out)
+
+
+def test_demo_shows_history_and_jobs(factory, user):
+    """'Show me the history / recent jobs' answers from the record."""
+    from komaverse.api.agent import AgentChatBody, chat
+
+    pid = seed_project(factory, user)
+    jid = seed_video_job(factory, user, pid)
+    with factory() as s:
+        chat(AgentChatBody(message="remember the blue lantern", project_id=pid), s, user)
+        hist = chat(AgentChatBody(message="show me the history", project_id=pid), s, user)
+    assert "blue lantern" in hist.reply
+    with factory() as s:
+        jobs = chat(AgentChatBody(message="show recent jobs", project_id=pid), s, user)
+    assert jid in jobs.reply
+
+
 def test_generation_kind_render_tab_is_not_generation():
     """'Make a video in the render tab' edits the timeline — it must
     never route to media generation (no format questions, no job)."""
