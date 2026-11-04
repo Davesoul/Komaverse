@@ -1537,3 +1537,9 @@ color-theory (cel shadow colors, light logic), manga-literacy
 - Profiled a turn without LLM calls: `tool_status` ~40ms, `_resolve_turn` ~19ms — server overhead is negligible. Every slow second is model rounds × prompt size. So: cut what resends each step and stop refetching the project on every tab switch.
 - The craft-skill index (7.5k chars of full SKILL.md descriptions, resent every step) is now 12 curated taglines (~0.5k). `create_image`/`create_video` drop their duplicated freedom prose (the system prompt owns the ask rule). ~7.3k fewer chars per model round.
 - `api.getProject` caches 8s with in-flight dedupe; any write clears it. Same-tab mutations already update local state, so the window never shows stale UI. Skeleton/EmptyState placeholders already exist in the kit.
+
+## ADR-74: Blank TTS voice resolves from the Brain voice row (accepted)
+
+- Reported: "Use" on a clone visibly changed the Brain row, but Generate still spoke with the default female Kokoro voice. Root cause: the Generate box (and the agent's `synthesize_voice` with no voice) sends no voice, and `synthesize_take` treated blank as "default engine voice" — the saved `freetts_voice_model`/`elevenlabs_voice_model` was never consulted. With the row set to `xtts:<id>` the blank path didn't even reach the clone branch (it tried Kokoro instead).
+- `synthesize_take` now resolves a blank voice from the Brain row first: ElevenLabs provider → saved ElevenLabs id; otherwise the saved free-tts value (`xtts:<clone>` routes to the local clone flow regardless of provider, since a clone id is unambiguous). Explicit voices behave exactly as before.
+- Pinned by `test_synthesize_blank_voice_uses_brain_clone` (blank voice + Brain row on the clone → fake XTTS called with the clone's ref wav; failed before with a Kokoro attempt).

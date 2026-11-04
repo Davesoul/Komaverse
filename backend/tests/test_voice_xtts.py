@@ -167,6 +167,40 @@ class _FakeTTS:
             fh.writeframes(b"\x01\x00" * 2205)  # 0.1s of tone
 
 
+def test_synthesize_blank_voice_uses_brain_clone(factory, user, project_id, monkeypatch, no_stream):
+    """Blank voice = the Brain voice row: with the row set to a local clone,
+    Generate (which sends no voice) must speak with the clone, not the
+    default female Kokoro voice and not a 400."""
+    import komaverse.ai.voice_local as vl
+    from komaverse.studio_settings import apply_ai_overrides, set_ai_override
+
+    seen = {}
+
+    class _RecTTS(_FakeTTS):
+        def tts_to_file(self, text, speaker_wav, language, file_path):
+            seen["ref"] = speaker_wav
+            super().tts_to_file(text, speaker_wav, language, file_path)
+
+    monkeypatch.setattr(vl, "_get_xtts", lambda: _RecTTS())
+    with factory() as s:
+        vid = clone_voice("Local", [_sample()], s, user, engine="xtts").id
+    old_provider, old_model = settings.voice_provider, settings.freetts_voice_model
+    try:
+        with factory() as s:
+            set_ai_override(s, "voice_provider", "free-tts")
+            set_ai_override(s, "freetts_voice_model", f"xtts:{vid}")
+            apply_ai_overrides(s)
+        with factory() as s:
+            take = synthesize_take(
+                project_id, SynthCreate(text="hello village", voice=None), s, user
+            )
+        assert take.name.startswith("Voice: hello")
+        assert seen.get("ref", "").replace("\\", "/").endswith(f"voices/{vid}.wav")
+    finally:
+        settings.voice_provider = old_provider
+        settings.freetts_voice_model = old_model
+
+
 def test_synthesize_xtts_take(factory, user, project_id, monkeypatch, no_stream):
     import komaverse.ai.voice_local as vl
 

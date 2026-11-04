@@ -316,15 +316,25 @@ def synthesize_take(
             400, f"text too long ({len(text)} > {MAX_SYNTH_CHARS} chars)"
         )
     provider = provider_for("voice")
+    # Blank voice = the Brain voice row (the Generate box sends none): fall
+    # back to the saved per-provider voice so "Use" on a clone actually
+    # speaks with it instead of silently returning to the default voice.
+    voice = (body.voice or "").strip() or None
+    if voice is None:
+        voice = (
+            settings.elevenlabs_voice_model
+            if provider == "elevenlabs"
+            else settings.freetts_voice_model
+        ) or None
     try:
-        if provider == "elevenlabs":
-            data = ElevenLabsProvider().synthesize(text, voice=body.voice)
+        if provider == "elevenlabs" and not (voice or "").startswith("xtts:"):
+            data = ElevenLabsProvider().synthesize(text, voice=voice)
             model = settings.elevenlabs_tts_model
-        elif provider == "free-tts" and (body.voice or "").strip().startswith("xtts:"):
+        elif (voice or "").startswith("xtts:"):
             from komaverse.ai.voice_local import synthesize_xtts
             from komaverse.db_models import ClonedVoiceRow
 
-            clone_id = body.voice.strip()[len("xtts:") :]
+            clone_id = (voice or "").strip()[len("xtts:") :]
             row = session.get(ClonedVoiceRow, clone_id)
             if row is None or row.user_id != user.id or row.engine != "xtts" or not row.ref_audio:
                 raise HTTPException(404, "cloned voice not found")
@@ -338,7 +348,7 @@ def synthesize_take(
             data = synthesize_local(
                 text,
                 engine=(body.engine or "").strip() or None,
-                voice=body.voice,
+                voice=voice,
                 lang=body.lang,
             )
             model = settings.freetts_voice_model
