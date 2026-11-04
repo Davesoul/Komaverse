@@ -2,6 +2,12 @@
 
 [![CI](https://github.com/Davesoul/Komaverse/actions/workflows/ci.yml/badge.svg)](https://github.com/Davesoul/Komaverse/actions/workflows/ci.yml)
 
+<p align="center">
+  <img src="docs/assets/komaverse-logo.png" alt="Komaverse logo" width="360" />
+</p>
+
+![Komaverse render tab — 37-clip timeline playing](docs/assets/demo/03-render.png)
+
 Browser anime studio: scan a page, detect its panels, clean up the frames,
 generate the ones in between, animate and export — with no GPU on your machine.
 Built for the Cerebral Valley × Meta hackathon on Meta Model API models
