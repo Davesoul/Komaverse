@@ -3252,9 +3252,18 @@ JOB_STATUS_WORDS = ("check", "status", "done", "ready", "finished", "finish", "p
 
 
 def _wants_video(text: str) -> bool:
-    """A render request ("generate a video of ...") vs an export ("export the video")."""
-    return "video" in text and any(
-        k in text for k in ("generate", "create", "make me", "draw me")
+    """A render request ("generate a video of ...") vs an export ("export the video").
+
+    Mirrors _generation_kind: "make a video of X" generates, render-tab
+    work ("make a video in the render tab") does not.
+    """
+    if _RENDER_TAB_RE.search(text or "") and not any(
+        k in (text or "") for k in ("generate", "create")
+    ):
+        return False
+    return "video" in (text or "") and (
+        any(k in text for k in ("generate", "create", "make me", "draw me"))
+        or bool(_MAKE_VIDEO_GEN_RE.search(text or ""))
     )
 
 
@@ -3889,7 +3898,10 @@ _SYSTEM = (
     "For shot and panel staging, perspective, and framing that reads "
     "instantly, read the visual-composition skill (focal hierarchy, "
     "leading lines, depth, anime-cut staging); for panel flow, "
-    "reading order, and lettering/SFX placement, read manga-literacy. "
+    "reading order, and lettering/SFX placement, read manga-literacy; "
+    "for studied technique from the acknowledged masters, read the "
+    "masters-craft skill (manga, comics, and animation lineage, one "
+    "lens per job, prompt vocabulary). "
     "Skills and refs read once per conversation: reuse what earlier "
     "turns already read or saw — never re-read a skill or re-look at "
     "a ref already in context. "
@@ -5243,20 +5255,45 @@ def _resolve_turn(message, project_id, session, user, current_frame_id, refs):
     return {"message": message, "target": target, "refs": refs, "open_frame": open_frame, "ref_context": ref_context}
 
 
+#: Render-tab work: cutting, arranging, previewing or exporting the
+#: timeline — never new media, even when the words "make a video" appear.
+_RENDER_TAB_RE = re.compile(
+    r"\b(render(\s+tab)?|timeline|export|preview|trim(?:ming)?|cut(?:ting)?|arrang\w+)\b",
+    re.IGNORECASE,
+)
+#: "make a video of X" generates media; "make the video longer" edits it.
+_MAKE_VIDEO_GEN_RE = re.compile(
+    r"\bmake\s+(?:me\s+)?a\s+video\s+(of|about|featuring|with|showing|starring|where|in\s+which)\b",
+    re.IGNORECASE,
+)
+_EDIT_VIDEO_RE = re.compile(r"\bmake\s+(the|this|that|my)\s+video\b", re.IGNORECASE)
+
+
 def _generation_kind(message: str | None) -> str | None:
     """Image/video generation intent, or None.
 
     Conservative on purpose: draw/project/timeline ops are not
     generations, and the parameter-dimension check is the real guard —
-    this only picks which dimensions to test.
+    this only picks which dimensions to test. Making a video in the
+    render tab (cutting, arranging, exporting) is timeline work, while
+    "make a video of X" is media generation.
     """
     lowered = (message or "").lower()
-    if "video" in lowered and any(
-        k in lowered for k in ("generate", "create", "make me", "draw me")
+    if "video" in lowered and (
+        any(k in lowered for k in ("generate", "create", "make me", "draw me"))
+        or _MAKE_VIDEO_GEN_RE.search(message or "")
     ):
+        # Explicit generate/create verbs mean new media even when the
+        # render tab is mentioned; otherwise render-tab words win.
+        if _RENDER_TAB_RE.search(message or "") and not any(
+            k in lowered for k in ("generate", "create")
+        ):
+            return None
         return "video"
+    if _EDIT_VIDEO_RE.search(message or ""):
+        return None
     if re.search(r"\b(generate|generating|create|creating|make|making|draw|paint)\b", lowered) and not re.search(
-        r"\b(project|clip|subtitle|cue|frame|layer|sequence|timeline)\b", lowered
+        r"\b(project|clip|subtitle|cue|frame|layer|sequence|timeline|render|scene|export|preview)\b", lowered
     ):
         return "image"
     return None

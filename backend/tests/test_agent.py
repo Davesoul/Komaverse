@@ -1618,6 +1618,23 @@ def test_generation_guidance_reuses_context():
     assert "on this turn" in agent_mod._SYSTEM.lower()
 
 
+def test_generation_kind_render_tab_is_not_generation():
+    """'Make a video in the render tab' edits the timeline — it must
+    never route to media generation (no format questions, no job)."""
+    from komaverse import agent as agent_mod
+
+    assert agent_mod._generation_kind("make a video in the render tab") is None
+    assert agent_mod._generation_kind("help me finish this video on the timeline") is None
+    assert agent_mod._generation_kind("make the video longer") is None
+    assert agent_mod._generation_kind("export the video") is None
+    # Real media requests still route through.
+    assert agent_mod._generation_kind("make a video of a robot") == "video"
+    assert agent_mod._generation_kind("generate a 4 second video of a robot") == "video"
+    assert agent_mod._generation_kind("generate a moonlit robot") == "image"
+    assert agent_mod._wants_video("make a video of a robot") is True
+    assert agent_mod._wants_video("make a video in the render tab") is False
+
+
 def test_cloud_loop_step_cap_terminates(factory, user, monkeypatch):
     """A model that only calls tools must stop at the raised step cap
     instead of looping forever."""

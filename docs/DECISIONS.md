@@ -1296,3 +1296,27 @@ color-theory (cel shadow colors, light logic), manga-literacy
   interviews after this, the named next step is server-side
   auto-start on delegated turns (preamble launches the job from the
   recovered subject instead of waiting for the call).
+
+## ADR-49: Render-tab work is not generation; masters-craft skill (accepted)
+
+- "Make a video in the render tab" routed to media generation
+  (image branch: verb "make", no timeline exclusion), so render-tab
+  work got format questions or a job instead of timeline help.
+  `_generation_kind` now returns None for render-tab work (render /
+  timeline / export / preview / trim / cut / arrange words win
+  unless generate/create verbs are explicit), "make a video of X"
+  routes to video, and "make the video longer" edits instead of
+  generating. `_wants_video` mirrors the rule. Failing-first test
+  locks all six routes; intent suites green.
+- New `masters-craft` skill (manga: Tezuka, Otomo, Toriyama, Araki,
+  Urasawa, Inoue, Miura, Hagio/Ikeda, Tatsumi/Taniguchi; comics/BD:
+  Kirby, Eisner, Toth, Mignola, Herge, Moebius, Miller; animation:
+  Miyazaki, Takahata, Kon, Oshii, Shinkai, Kanada, Nakamura,
+  Tanaka, Keane/Kahl): technique-only lineage in original words,
+  one lens per job, prompt vocabulary, QC, and an original-
+  characters-only boundary. Canon corroborated by web research
+  (Kirby/Kanada/Otomo/Kon). `muse skills validate`: valid true,
+  zero diagnostics/warnings. Wired into `_SYSTEM`; the skill-registry
+  test now covers the new name plus content/IP-boundary checks.
+- Live: full suite 463 passed; `:8001` restarted (agent prompt +
+  routing changed).

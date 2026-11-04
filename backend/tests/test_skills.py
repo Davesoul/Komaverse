@@ -79,10 +79,15 @@ def test_agent_skill_names_resolve_in_repo(monkeypatch):
         pytest.skip("no repo skills checkout")
     names = {s["name"] for s in list_skills()}
     prompt = agent_mod._SYSTEM
-    for ref in ("anime-animation-production", "drawing-fundamentals"):
+    for ref in ("anime-animation-production", "drawing-fundamentals", "masters-craft"):
         assert ref in prompt, f"agent prompt should name {ref}"
         assert ref in names, f"skill {ref} missing from {root}"
         assert len(read_skill(ref)) > 500
+    masters = read_skill("masters-craft")
+    assert "## Manga masters" in masters and "## Animation masters" in masters
+    for name in ("Kirby", "Otomo", "Kanada", "Kon", "ligne claire"):
+        assert name in masters
+    assert "never reproduce protected characters" in masters.lower()
     anime = read_skill("anime-animation-production")
     assert "cel-shaded" in anime and "Shot planning" in anime
     drawing = read_skill("drawing-fundamentals")
