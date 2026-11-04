@@ -255,14 +255,33 @@ WIKI_JSON = [
 INSTANT_JSON = {
     "AbstractText": "Cel shading renders 3D as flat cartoon.",
     "AbstractURL": "https://example.com/abstract",
+    "Image": "/i/cel-shading.jpg",
     "RelatedTopics": [
         {"Text": "Outline control", "FirstURL": "https://example.com/outline"}
     ],
 }
 
+PAGEIMAGES_JSON = {
+    "query": {
+        "pages": {
+            "42": {
+                "pageid": 42,
+                "title": "Cel shading",
+                "thumbnail": {
+                    "source": "https://upload.wikimedia.org/cel-500.jpg",
+                    "width": 500,
+                    "height": 300,
+                },
+            }
+        }
+    }
+}
+
 
 def _fake_search_get(url="", params=None, **kwargs):
     url = str(url)
+    if isinstance(params, dict) and params.get("prop") == "pageimages":
+        return _FakeResp("", url=url, ctype="application/json", json_data=PAGEIMAGES_JSON)
     if "html.duckduckgo.com" in url:
         return _FakeResp(DDG_HTML, url=url)
     if "api.duckduckgo.com" in url:
@@ -307,6 +326,43 @@ def test_web_fetch_rejects_and_fails(monkeypatch):
     assert "truncated" in tool_web_fetch("https://example.com/x", max_chars=100)
 
 
+def test_web_images_wikipedia_thumbnails(monkeypatch):
+    """Image search returns keyless Wikipedia thumbnails with sources."""
+    import komaverse.agent as agent_mod
+    from komaverse.agent import tool_web_images
+
+    monkeypatch.setattr(agent_mod.httpx, "get", _fake_search_get)
+    out = tool_web_images("cel shading")
+    assert "https://upload.wikimedia.org/cel-500.jpg" in out
+    assert "en.wikipedia.org" in out
+    assert "bare https URLs" in out
+
+
+def test_web_images_uses_instant_image(monkeypatch):
+    """The DDG instant-answer image rides along when present."""
+    import komaverse.agent as agent_mod
+    from komaverse.agent import tool_web_images
+
+    monkeypatch.setattr(agent_mod.httpx, "get", _fake_search_get)
+    out = tool_web_images("cel shading")
+    assert "https://duckduckgo.com/i/cel-shading.jpg" in out
+
+
+def test_web_fetch_extracts_og_image(monkeypatch):
+    """Fetched pages name their main image so the chat can show it."""
+    import komaverse.agent as agent_mod
+
+    html = (
+        "<html><head>"
+        '<meta property="og:image" content="https://example.com/hero.jpg">'
+        "</head><body><p>Body text</p></body></html>"
+    )
+    monkeypatch.setattr(agent_mod.httpx, "get", lambda *a, **k: _FakeResp(html))
+    out = tool_web_fetch("https://example.com/x")
+    assert "Body text" in out
+    assert "[image: https://example.com/hero.jpg]" in out
+
+
 def test_web_fetch_rejects_binary(monkeypatch):
     import komaverse.agent as agent_mod
 
@@ -335,6 +391,20 @@ def test_demo_lists_tools_and_fetches(factory, monkeypatch):
             "fetch https://example.com/docs for me", project.id, s, user
         )
         assert "Docs body" in out["reply"]
+
+
+def test_demo_shows_images(factory, monkeypatch):
+    """'Show me images of X' answers with renderable thumbnails."""
+    import komaverse.agent as agent_mod
+
+    monkeypatch.setattr(agent_mod.httpx, "get", _fake_search_get)
+    with factory() as s:
+        user = create_user(s)
+        from komaverse.api.scans import ProjectCreate, create_project
+
+        project = create_project(ProjectCreate(name="S"), s, user)
+        out = run_agent_turn("show me images of cel shading", project.id, s, user)
+    assert "upload.wikimedia.org" in out["reply"]
 
 
 def test_web_search_prefers_web_hits(monkeypatch):

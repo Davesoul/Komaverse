@@ -48,6 +48,126 @@ const KIND_LABEL: Record<AgentRef["kind"], string> = {
 };
 
 const REF_TOKEN = /(@(?:frame|panel|media|take|gen|sequence):[A-Za-z0-9_-]+)/g;
+const REF_TOKEN_ONE = /@(frame|panel|media|take|gen|sequence):([A-Za-z0-9_-]+)/;
+
+/** Chat-bubble thumbnail for an @-reference. Frames and panels resolve
+synchronously; generations, scan pages, and sequences fetch once and are
+cached. Anything without art (takes, failures, deleted rows) keeps the
+plain token chip so a mention never renders blank. */
+const refThumbCache = new Map<string, string | null>();
+function RefToken({ kind, id }: { kind: AgentRef["kind"]; id: string }) {
+  const token = `@${kind}:${id}`;
+  const syncUrl =
+    kind === "frame"
+      ? api.frameThumbnailUrl(id)
+      : kind === "panel"
+        ? api.panelPreviewUrl(id)
+        : undefined;
+  const [url, setUrl] = useState<string | undefined>(syncUrl);
+  const [dead, setDead] = useState(false);
+  useEffect(() => {
+    if (syncUrl !== undefined || kind === "take") return;
+    const key = `${kind}:${id}`;
+    if (refThumbCache.has(key)) {
+      const hit = refThumbCache.get(key);
+      if (hit) setUrl(hit);
+      else setDead(true);
+      return;
+    }
+    let live = true;
+    (async () => {
+      try {
+        let found: string | null = null;
+        if (kind === "gen") {
+          const job = await api.getJob(id);
+          found = job.result_url || null;
+        } else if (kind === "media") {
+          const page = await api.getPage(id);
+          found = page.image_url || null;
+        } else if (kind === "sequence") {
+          const pid = getCurrentProject();
+          if (pid) {
+            const seqs = await api.listSequences(pid);
+            const seq = seqs.find((s) => s.id === id);
+            if (seq?.frames?.length) found = api.frameThumbnailUrl(seq.frames[0].id);
+          }
+        }
+        if (found && found.startsWith("/")) found = mediaUrl(found);
+        refThumbCache.set(key, found);
+        if (live) {
+          if (found) setUrl(found);
+          else setDead(true);
+        }
+      } catch {
+        refThumbCache.set(key, null);
+        if (live) setDead(true);
+      }
+    })();
+    return () => {
+      live = false;
+    };
+  }, [kind, id, syncUrl]);
+  if (!url || dead) {
+    return (
+      <code
+        title="Referenced studio item"
+        style={{
+          fontFamily: "var(--kv-mono)",
+          fontSize: 11,
+          background: "var(--kv-accent)",
+          color: "var(--kv-accent-ink)",
+          borderRadius: 4,
+          padding: "1px 5px",
+        }}
+      >
+        {kind === "take" ? `♪ ${token}` : token}
+      </code>
+    );
+  }
+  if (/\.(mp4|webm|mov)(\?|#|$)/i.test(url)) {
+    return (
+      <video
+        src={url}
+        title={token}
+        muted
+        playsInline
+        preload="none"
+        style={{ display: "block", maxWidth: 200, maxHeight: 130, borderRadius: 4, margin: "4px 0", background: "#000" }}
+      />
+    );
+  }
+  return (
+    <img
+      src={url}
+      alt={token}
+      title={token}
+      loading="lazy"
+      onError={() => setDead(true)}
+      style={{ display: "block", maxWidth: 200, maxHeight: 130, borderRadius: 4, margin: "4px 0", objectFit: "cover", background: "var(--kv-raised)" }}
+    />
+  );
+}
+
+/** Inline research art: bare image URLs render as pictures, not links. */
+function ChatImage({ src }: { src: string }) {
+  const [dead, setDead] = useState(false);
+  if (dead) {
+    return (
+      <a href={src} target="_blank" rel="noreferrer">
+        {src.length > 48 ? `${src.slice(0, 47)}…` : src}
+      </a>
+    );
+  }
+  return (
+    <img
+      src={src}
+      alt="Research image"
+      loading="lazy"
+      onError={() => setDead(true)}
+      style={{ display: "block", maxWidth: "100%", maxHeight: 260, borderRadius: 6, margin: "6px 0", objectFit: "contain", background: "var(--kv-raised)" }}
+    />
+  );
+}
 
 const CHIPS = [
   "Project status",
@@ -135,43 +255,38 @@ function JobCard({ job, onZoom }: { job: NonNullable<Msg["job"]>; onZoom?: (url:
 }
 
 /** Render text with clickable URLs and highlighted @kind:id mention tokens. */
+const CHAT_IMAGE_RE = /^https?:\/\/\S+\.(png|jpe?g|gif|webp|svg)(\?|#|$)/i;
+const WIKIMEDIA_RE = /^https?:\/\/upload\.wikimedia\.org\/\S+/i;
+
 function linked(text: string) {
   const parts = text.split(/(https?:\/\/\S+|\/(?:media|api)\/\S+)/g);
-  return parts.map((p, i) =>
-    /^(https?:\/\/\S+|\/(?:media|api)\/\S+)$/.test(p) ? (
-      <a
-        key={i}
-        href={p.startsWith("/") ? mediaUrl(p) : p}
-        target="_blank"
-        rel="noreferrer"
-      >
-        {p.length > 48 ? `${p.slice(0, 47)}…` : p}
-      </a>
-    ) : (
+  return parts.map((p, i) => {
+    if (/^(https?:\/\/\S+|\/(?:media|api)\/\S+)$/.test(p)) {
+      if (CHAT_IMAGE_RE.test(p) || WIKIMEDIA_RE.test(p)) {
+        return <ChatImage key={i} src={p} />;
+      }
+      return (
+        <a
+          key={i}
+          href={p.startsWith("/") ? mediaUrl(p) : p}
+          target="_blank"
+          rel="noreferrer"
+        >
+          {p.length > 48 ? `${p.slice(0, 47)}…` : p}
+        </a>
+      );
+    }
+    return (
       <span key={i}>
-        {p.split(REF_TOKEN).map((q, j) =>
-          j % 2 === 1 ? (
-            <code
-              key={j}
-              title="Referenced studio item"
-              style={{
-                fontFamily: "var(--kv-mono)",
-                fontSize: 11,
-                background: "var(--kv-accent)",
-                color: "var(--kv-accent-ink)",
-                borderRadius: 4,
-                padding: "1px 5px",
-              }}
-            >
-              {q}
-            </code>
-          ) : (
-            <span key={j}>{q}</span>
-          ),
-        )}
+        {p.split(REF_TOKEN).map((q, j) => {
+          if (j % 2 !== 1) return <span key={j}>{q}</span>;
+          const m = REF_TOKEN_ONE.exec(q);
+          if (!m) return <span key={j}>{q}</span>;
+          return <RefToken key={j} kind={m[1] as AgentRef["kind"]} id={m[2]} />;
+        })}
       </span>
-    ),
-  );
+    );
+  });
 }
 
 /** Tools-and-skills trace: open while streaming, collapsed when done. */

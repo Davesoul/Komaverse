@@ -653,6 +653,8 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(patch),
     }),
+  /** One scan page (image_url for chat thumbnails). */
+  getPage: (pageId: string) => req<Page>(`/api/v1/pages/${pageId}`),
   duplicateFrame: (frameId: string) =>
     req<DrawFrame>(`/api/v1/frames/${frameId}/duplicate`, { method: "POST" }),
   orderFrames: (projectId: string, frameIds: string[]) =>

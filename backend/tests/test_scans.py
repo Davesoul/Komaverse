@@ -61,6 +61,23 @@ def test_rename_page_and_panel(factory, user):
         full = get_project(project.id, s, user)
     assert full.pages[0].name == "Splash"
     assert full.pages[0].panels[0].name == "Koma close-up"
+
+
+def test_get_page(factory, user):
+    """Single scan pages read back with their image URL (chat thumbnails)."""
+    from komaverse.api.scans import get_page
+
+    with factory() as s:
+        project = create_project(ProjectCreate(name="N"), s, user)
+    with factory() as s:
+        page = upload(s, user, project.id, fake_page())
+    with factory() as s:
+        got = get_page(page.id, s, user)
+    assert got.id == page.id
+    assert got.image_url == page.image_url
+    with factory() as s, pytest.raises(HTTPException) as exc:
+        get_page("missing", s, user)
+    assert exc.value.status_code == 404
 from komaverse.config import settings
 from komaverse.db_models import Base, ClipRow, PanelRow, UserRow
 

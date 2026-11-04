@@ -543,6 +543,16 @@ class PagePatch(BaseModel):
     name: str | None = None
 
 
+@router.get("/pages/{page_id}", response_model=Page)
+def get_page(
+    page_id: str,
+    session: Session = Depends(get_session),
+    user: UserRow = Depends(get_current_user),
+):
+    """Read one scan page back (image URL for chat thumbnails)."""
+    return _get_page(session, user, page_id).to_schema()
+
+
 @router.patch("/pages/{page_id}", response_model=Page)
 def patch_page(
     page_id: str,

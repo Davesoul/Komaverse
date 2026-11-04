@@ -1338,3 +1338,27 @@ color-theory (cel shadow colors, light logic), manga-literacy
 - Live: `tsc` clean, `npm run build` green (frontend-only, no
   backend change, so `:8001` keeps running). No new maintained
   tests: three tiny UI tweaks verified by the typecheck + build.
+
+## ADR-51: Research shows pictures; chat shows thumbnails (accepted)
+
+- New `web_images` tool (keyless Wikipedia pageimages batched per
+  query + the DDG instant-answer image): returns thumbnail URLs and
+  instructs the model to paste them into its reply as bare https
+  URLs, one per line, naming each subject and linking its source.
+  `web_fetch` now appends the page's og:image/twitter:image
+  ([image: url], absolute only) with the same paste-to-show note.
+  Cloud schema + exec wired; demo brain answers "images of /
+  pictures of / what does X look like" (ref-bearing looks still go
+  to look_at).
+- Chat renders pictures ChatGPT-style: bare image URLs (extensions
+  + upload.wikimedia.org) become inline `<img>` with lazy load,
+  capped size, and link fallback on error. Every @-mention renders
+  a thumbnail chip: frames/panels sync, generations/scan-pages/
+  sequences fetch once and cache (video gens show a small player),
+  takes keep a ♪ chip since audio has no art, and anything missing
+  falls back to the plain token chip so mentions never go blank.
+- New `GET /api/v1/pages/{page_id}` (ownership-checked) backs media
+  thumbnails; `api.getPage` added. 5 new tests (wiki thumbs,
+  instant image, og:image, get page, demo image trigger).
+- Live: full suite 468 passed; `tsc` + build green; `:8001`
+  restarted (agent + scans changed).

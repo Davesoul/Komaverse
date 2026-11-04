@@ -413,6 +413,24 @@ def _parse_video_size(text: str) -> tuple[int, int] | None:
 
 def _size_str(size: tuple[int, int] | None) -> str | None:
     return f"{size[0]}x{size[1]}" if size else None
+#: Main image of a fetched page (og:image / twitter:image), either
+#: attribute order. Relative URLs stay out: only absolute http(s) art
+#: rides into chat replies.
+_OG_IMAGE_RE = re.compile(
+    r"<meta\s[^>]*?(?:property=[\"']og:image[\"']|name=[\"'](?:og:image|twitter:image)[\"'])[^>]*?content=[\"']([^\"']+)[\"']"
+    r"|<meta\s[^>]*?content=[\"']([^\"']+)[\"'][^>]*?(?:property=[\"']og:image[\"']|name=[\"'](?:og:image|twitter:image)[\"'])",
+    re.IGNORECASE,
+)
+
+
+def _page_main_image(html: str) -> str:
+    m = _OG_IMAGE_RE.search(html or "")
+    if not m:
+        return ""
+    url = (m.group(1) or m.group(2) or "").strip()
+    return url if url.startswith("http") else ""
+
+
 #: Style talk: "in the style of X" carries its value, the rest may not.
 STYLE_TALK_RE = re.compile(
     r"\bstyles?\b|\bstylish\b|\bstyliz(?:ed|ing)\b|\bstylis(?:ed|ing)\b",
@@ -627,7 +645,14 @@ def tool_web_fetch(url, max_chars=4000):
     text = body if "json" in ctype else _html_to_text(body)
     if len(text) > limit:
         text = text[:limit] + " ...[truncated]"
-    return text + " [from " + str(resp.url) + "]"
+    out = text + " [from " + str(resp.url) + "]"
+    main_image = _page_main_image(body) if "html" in ctype else ""
+    if main_image:
+        out += (
+            "\n[image: " + main_image + "] — the page's main image; paste "
+            "it into your reply as a bare URL to show it in chat."
+        )
+    return out
 
 
 def _unwrap_ddg(href):
@@ -743,7 +768,7 @@ def _search_wikipedia(query, limit=5):
 
 
 def _search_duckduckgo_instant(query, limit=5):
-    """Keyless DDG instant answers: abstract + related topics."""
+    """Keyless DDG instant answers: abstract + related topics + image."""
     try:
         resp = httpx.get(
             "https://api.duckduckgo.com/",
@@ -757,24 +782,70 @@ def _search_duckduckgo_instant(query, limit=5):
             headers={"User-Agent": "KomaverseStudio/1.0"},
         )
     except Exception:
-        return "", "", []
+        return "", "", [], ""
     if resp.status_code >= 400:
-        return "", "", []
+        return "", "", [], ""
     try:
         data = resp.json()
     except ValueError:
-        return "", "", []
+        return "", "", [], ""
     if not isinstance(data, dict):
-        return "", "", []
+        return "", "", [], ""
     abstract = str(data.get("AbstractText") or "")
     abstract_url = str(data.get("AbstractURL") or "")
+    image = str(data.get("Image") or "")
+    if image.startswith("/"):
+        image = "https://duckduckgo.com" + image
     topics = []
     for item in data.get("RelatedTopics") or []:
         if isinstance(item, dict) and item.get("Text") and item.get("FirstURL"):
             topics.append((str(item["Text"]), str(item["FirstURL"])))
         if len(topics) >= limit:
             break
-    return abstract, abstract_url, topics
+    return abstract, abstract_url, topics, image
+
+
+def _search_wikipedia_images(titles, limit=3):
+    """Keyless Wikipedia thumbnails: (title, thumb url, page url)."""
+    titles = [t for t in (titles or []) if t][:limit]
+    if not titles:
+        return []
+    try:
+        resp = httpx.get(
+            "https://en.wikipedia.org/w/api.php",
+            params={
+                "action": "query",
+                "prop": "pageimages",
+                "format": "json",
+                "pithumbsize": 500,
+                "titles": "|".join(titles),
+            },
+            timeout=20.0,
+            headers={"User-Agent": "KomaverseStudio/1.0"},
+        )
+    except Exception:
+        return []
+    if resp.status_code >= 400:
+        return []
+    try:
+        data = resp.json()
+    except ValueError:
+        return []
+    pages = ((data or {}).get("query") or {}).get("pages") or {}
+    out = []
+    for page in pages.values():
+        if not isinstance(page, dict):
+            continue
+        thumb = (page.get("thumbnail") or {}).get("source") or ""
+        if not thumb.startswith("http"):
+            continue
+        title = str(page.get("title") or "")
+        out.append((
+            title,
+            thumb,
+            "https://en.wikipedia.org/wiki/" + title.replace(" ", "_"),
+        ))
+    return out
 
 
 def tool_web_search(query, max_results=5):
@@ -792,7 +863,7 @@ def tool_web_search(query, max_results=5):
         if snippet:
             line += ": " + snippet[:200]
         lines.append(line)
-    abstract, abstract_url, topics = _search_duckduckgo_instant(cleaned, limit)
+    abstract, abstract_url, topics, _instant_image = _search_duckduckgo_instant(cleaned, limit)
     if abstract:
         line = "Answer: " + abstract[:300]
         if abstract_url:
@@ -814,6 +885,45 @@ def tool_web_search(query, max_results=5):
     return chr(10).join(lines)
 
 
+def tool_web_images(query, max_results=3):
+    """Keyless picture results: Wikipedia thumbnails + instant image.
+
+    Returns thumbnail URLs the chat renders inline — paste them into
+    the reply as bare https URLs (one per line), name what each shows,
+    and link each source page.
+    """
+    cleaned = (query or "").strip()
+    if not cleaned:
+        return "web_images needs a query, e.g. web_images Studio Ghibli background."
+    try:
+        limit = min(max(int(max_results or 3), 1), 5)
+    except (TypeError, ValueError):
+        limit = 3
+    found: list[tuple[str, str, str]] = []
+    _abstract, _abstract_url, _topics, instant_image = _search_duckduckgo_instant(cleaned, 1)
+    if instant_image.startswith("http"):
+        found.append(("Instant answer", instant_image, _abstract_url or "https://duckduckgo.com/"))
+    titles = [t for t, _u, _d in _search_wikipedia(cleaned, limit)]
+    found.extend(_search_wikipedia_images(titles, limit))
+    seen = set()
+    lines = ["Images for " + cleaned + ":"]
+    for title, thumb, page in found:
+        if thumb in seen:
+            continue
+        seen.add(thumb)
+        lines.append("- " + title[:120] + ": " + thumb + " [img] (source: " + page + ")")
+        if len(seen) >= limit:
+            break
+    if len(lines) == 1:
+        return "no images for " + cleaned + " (all sources empty)."
+    lines.append(
+        "Paste the thumbnail URLs into your reply as bare https URLs "
+        "(one per line) so the chat shows them; say what each one shows "
+        "and link its source page."
+    )
+    return chr(10).join(lines)
+
+
 def _parse_search_query(text):
     """Strip a leading search command, keep the natural question."""
     lowered = text.strip()
@@ -827,6 +937,17 @@ def _parse_search_query(text):
         if lowered.lower().startswith(prefix):
             return lowered[len(prefix):].strip(" .,!?")
     return lowered
+
+
+def _parse_image_query(text):
+    """Strip image-request phrasing, keep the subject to picture."""
+    cleaned = (text or "").strip()
+    cleaned = re.sub(
+        r"(?i)\b(show me |find |get |show )?(images?|pictures?|photos?)\s+of\b|\bwhat\s+does\b|\bwhat\s+do\b|\blooks?\s+like\b|\bshow\s+me\s+what\b",
+        " ",
+        cleaned,
+    )
+    return " ".join(cleaned.split(" .,!?")).strip(" .,!?")
 
 
 DETECTORS = ("heuristic", "yolo", "yolo-leoxs22", "cloud", "meta", "openrouter", "sam", "local")
@@ -3824,6 +3945,10 @@ def demo_turn(
             reply = run("web_fetch", tool_web_fetch, urls[0])
         else:
             reply = "Send a full http(s) link to fetch."
+    elif any(
+        k in text for k in ("images of", "pictures of", "picture of", "photos of", "photo of")
+    ) or ("look like" in text and not re.search(r"@(frame|panel|media|gen|sequence):", text)):
+        reply = run("web_images", tool_web_images, _parse_image_query(message))
     elif "search" in text and any(
         k in text for k in ("web", "online", "internet", "look up", "google")
     ):
@@ -3968,6 +4093,8 @@ _TOOLS_SCHEMA = [
             "description": (
                 "Fetch one http(s) page and return its text. Use for online "
                 "research: official docs, references, model catalogs. "
+                "The output names the page's main image ([image: url]) — "
+                "paste it into your reply as a bare URL to show it. "
                 "Never invent a URL; use user-supplied or fetched links."
             ),
             "parameters": {
@@ -3988,6 +4115,29 @@ _TOOLS_SCHEMA = [
                 "Search the open web without keys (DDG hits, instant "
                 "answers, Wikipedia fallback). Use for online research, "
                 "then read hits with web_fetch. Pass the natural question."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Natural-language question or terms."},
+                    "max_results": {"type": "number", "description": "Max hits per source (default 5)."},
+                },
+                "required": ["query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "web_images",
+            "description": (
+                "Find pictures of anything (people, places, characters, "
+                "art styles, objects): keyless Wikipedia thumbnails plus "
+                "the instant-answer image. Use when the user asks what "
+                "something looks like or wants visual references. Paste "
+                "the thumbnail URLs into your reply as bare https URLs, "
+                "one per line, so the chat shows them; say what each "
+                "shows and link its source page."
             ),
             "parameters": {
                 "type": "object",
@@ -4868,6 +5018,10 @@ def _exec_cloud_tool(
         elif name == "web_search":
             result = tool_web_search(
                 str(args.get("query") or ""), args.get("max_results")
+            )
+        elif name == "web_images":
+            result = tool_web_images(
+                str(args.get("query") or message), args.get("max_results")
             )
         else:
             result = f"unknown tool: {name}"
