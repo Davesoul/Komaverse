@@ -363,6 +363,48 @@ def test_web_fetch_extracts_og_image(monkeypatch):
     assert "[image: https://example.com/hero.jpg]" in out
 
 
+FANDOM_JSON = {
+    "query": {
+        "pages": {
+            "7": {
+                "title": "Roronoa Zoro",
+                "thumbnail": {
+                    "source": "https://static.wikia.nocookie.net/onepiece/images/zoro.png",
+                },
+            }
+        }
+    }
+}
+
+
+def test_web_images_uses_fandom_wiki_thumbnails(monkeypatch):
+    """Character wikis (no free lead image on Wikipedia) thumbnail via
+    their Fandom MediaWiki API."""
+    import komaverse.agent as agent_mod
+    from komaverse.agent import tool_web_images
+
+    def fake_get(url="", params=None, **kwargs):
+        if (
+            isinstance(params, dict)
+            and params.get("prop") == "pageimages"
+            and "fandom.com" in str(url)
+        ):
+            return _FakeResp("", url=url, ctype="application/json", json_data=FANDOM_JSON)
+        return _fake_search_get(url, params, **kwargs)
+
+    monkeypatch.setattr(agent_mod.httpx, "get", fake_get)
+    monkeypatch.setattr(
+        agent_mod,
+        "_search_duckduckgo_web",
+        lambda q, limit=3: [
+            ("Roronoa Zoro", "https://onepiece.fandom.com/wiki/Roronoa_Zoro", "swordsman")
+        ],
+    )
+    out = tool_web_images("Roronoa Zoro")
+    assert "static.wikia.nocookie.net" in out
+    assert "fandom.com/wiki/Roronoa_Zoro" in out
+
+
 def test_web_fetch_retries_browser_ua_on_403(monkeypatch):
     """Bot-walled pages (Fandom wiki) load on a browser-UA retry."""
     import komaverse.agent as agent_mod

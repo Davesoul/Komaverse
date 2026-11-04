@@ -897,6 +897,62 @@ def tool_web_search(query, max_results=5):
     return chr(10).join(lines)
 
 
+_FANDOM_URL_RE = re.compile(
+    r"https://([a-z0-9-]+)\.fandom\.com/wiki/([^?#]+)", re.IGNORECASE
+)
+
+
+def _search_fandom_images(wiki, title, limit=3):
+    """Character-wiki thumbnails via a Fandom MediaWiki pageimages API.
+
+    Wikipedia has no free lead image for most characters; the Fandom
+    infobox thumbnail fills exactly that gap.
+    """
+    from urllib.parse import unquote
+
+    title = unquote(title or "").replace("_", " ").strip()
+    if not wiki or not title:
+        return []
+    try:
+        resp = httpx.get(
+            f"https://{wiki}.fandom.com/api.php",
+            params={
+                "action": "query",
+                "prop": "pageimages",
+                "format": "json",
+                "pithumbsize": 500,
+                "titles": title,
+            },
+            timeout=20.0,
+            headers={"User-Agent": "KomaverseStudio/1.0"},
+        )
+    except Exception:
+        return []
+    if resp.status_code >= 400:
+        return []
+    try:
+        data = resp.json()
+    except ValueError:
+        return []
+    pages = ((data or {}).get("query") or {}).get("pages") or {}
+    out = []
+    for page in pages.values():
+        if not isinstance(page, dict):
+            continue
+        thumb = (page.get("thumbnail") or {}).get("source") or ""
+        if not thumb.startswith("http"):
+            continue
+        name = str(page.get("title") or title)
+        out.append((
+            name,
+            thumb,
+            f"https://{wiki}.fandom.com/wiki/" + name.replace(" ", "_"),
+        ))
+        if len(out) >= limit:
+            break
+    return out
+
+
 def tool_web_images(query, max_results=3):
     """Keyless picture results: Wikipedia thumbnails + instant image.
 
@@ -917,6 +973,11 @@ def tool_web_images(query, max_results=3):
         found.append(("Instant answer", instant_image, _abstract_url or "https://duckduckgo.com/"))
     titles = [t for t, _u, _d in _search_wikipedia(cleaned, limit)]
     found.extend(_search_wikipedia_images(titles, limit))
+    for _t, url, _s in _search_duckduckgo_web(cleaned, 3):
+        m = _FANDOM_URL_RE.match(url or "")
+        if m:
+            found.extend(_search_fandom_images(m.group(1), m.group(2), limit))
+            break
     seen = set()
     lines = ["Images for " + cleaned + ":"]
     for title, thumb, page in found:

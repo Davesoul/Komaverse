@@ -1370,6 +1370,7 @@ color-theory (cel shadow colors, light logic), manga-literacy
   pictures), and the Fandom fetch died with HTTP 403 (bot-walled).
 - `web_fetch` now retries once behind a plain browser UA on 403
   only — first request stays identified, other statuses unchanged.
+  (Live check: helps UA-gated sites, not Fandom page fetches — Fandom anti-bot is stricter — so web_images also pulls the character infobox thumbnail from the Fandom MediaWiki pageimages API.)
   `web_search` cross-references web_images for people, characters,
   places, and visual subjects so text research brings pictures.
 - 2 new tests (403-then-200 retry with UA assertion, description
