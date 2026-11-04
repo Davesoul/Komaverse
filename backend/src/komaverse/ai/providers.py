@@ -1311,6 +1311,28 @@ def _openrouter_headers() -> dict[str, str]:
     }
 
 
+_POLICY_RE = re.compile(
+    r"copyright|moderat|content.?polic|filter|block|inappropriate|"
+    r"flagg|infring|not.?allowed|prohibit|refus",
+    re.IGNORECASE,
+)
+
+
+def _policy_hint(err: str) -> str:
+    """Plain-language pointer appended to output-side policy refusals.
+
+    The provider's raw text is kept verbatim; this only adds the
+    diagnosed shape (named/IP content) and where the workarounds live.
+    """
+    if _POLICY_RE.search(err or ""):
+        return (
+            " — this looks like a content-policy refusal (often named "
+            "characters or published art): retry with original characters "
+            "and style descriptions; details in docs/MODEL_ERRORS.md"
+        )
+    return ""
+
+
 def _fetch_bytes(url: str) -> bytes:
     try:
         resp = httpx.get(url, headers=_openrouter_headers(), timeout=_CHAT_TIMEOUT)
@@ -1540,6 +1562,7 @@ class OpenRouterProvider:
             status = str(state.get("status", "")).lower()
             if status == "completed":
                 urls = state.get("unsigned_urls") or []
+                explicit = bool(urls)
                 first = urls[0] if urls else ""
                 url = (
                     first.get("url", "")
@@ -1553,15 +1576,26 @@ class OpenRouterProvider:
                     raise ProviderError(
                         f"video download failed: {exc}"
                     ) from exc
-                if resp.status_code >= 400:
+                if resp.status_code >= 400 or not resp.content:
+                    if not explicit:
+                        # completed with nothing downloadable and no
+                        # provider URLs: silent output-side filter.
+                        raise ProviderError(
+                            "openrouter video completed with no output "
+                            "(content may have been filtered) — if the "
+                            "prompt or references name third-party "
+                            "characters/art, retry with original content; "
+                            "see docs/MODEL_ERRORS.md"
+                        )
                     raise ProviderError(
                         f"video download failed ({resp.status_code})"
                     )
                 return resp.content
             if status in ("failed", "cancelled", "expired", "error"):
+                err = str(state.get("error"))[:200]
                 raise ProviderError(
-                    f"openrouter video {status}: "
-                    f"{str(state.get('error'))[:200]}"
+                    f"openrouter video {status}: {err}"
+                    f"{_policy_hint(err)}"
                 )
             time.sleep(10.0)
         raise ProviderError("openrouter video timed out after 10 minutes")

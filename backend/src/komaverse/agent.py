@@ -4638,7 +4638,10 @@ _TOOLS_SCHEMA = [
                 "@-tokens into the prompt, never invent references. "
                 "References are style/subject guidance only: look_at a ref "
                 "first when you must describe it, unless already seen in "
-                "this conversation; never claim pixels you have not seen."
+                "this conversation; never claim pixels you have not seen. "
+                "Named third-party characters or published art are often "
+                "refused on copyright grounds — after such a refusal, steer "
+                "toward original characters (docs/MODEL_ERRORS.md)."
             ),
             "parameters": {
                 "type": "object",
@@ -4680,7 +4683,10 @@ _TOOLS_SCHEMA = [
                 "else is style/subject guidance and never becomes a frame. "
                 "look_at an image ref or watch_video a video ref before "
                 "generating from it, unless already seen in this "
-                "conversation."
+                "conversation. Named third-party characters or published "
+                "art are often refused on copyright grounds — after such "
+                "a refusal, steer toward original characters "
+                "(docs/MODEL_ERRORS.md)."
             ),
             "parameters": {
                 "type": "object",

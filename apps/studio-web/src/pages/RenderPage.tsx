@@ -1893,6 +1893,12 @@ export default function RenderPage() {
               <PrimaryBtn disabled={!prompt.trim() || !!busy} onClick={doGenerate}>
                 Generate ({genKind === "video" ? "25" : "5"} credits)
               </PrimaryBtn>
+              <span style={{ fontSize: 12, color: "var(--kv-muted)" }}>
+                Original characters generate reliably — named third-party
+                characters or published art (e.g. manga pages) are often
+                refused on copyright grounds. Details in{" "}
+                <span style={{ fontFamily: "var(--kv-mono)" }}>docs/MODEL_ERRORS.md</span>.
+              </span>
               {genJob && genJob.status !== "done" && genJob.status !== "failed" && (
                 <>
                   <span className="kv-busy" style={{ fontSize: 13, color: "var(--kv-muted)", display: "inline-flex", alignItems: "center", gap: 8 }}>

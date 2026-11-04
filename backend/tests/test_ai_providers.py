@@ -405,6 +405,36 @@ def test_openrouter_video_failed(monkeypatch):
         OpenRouterProvider().generate_video("x", 1.0)
 
 
+def test_openrouter_video_copyright_refusal_points_to_docs(monkeypatch):
+    """The Zoro-shaped failure: raw text kept, hint + doc pointer appended."""
+    monkeypatch.setattr(settings, "openrouter_api_key", "or-test")
+    monkeypatch.setattr(httpx, "post", lambda *a, **k: _Resp(
+        202, {"id": "j", "polling_url": "https://x.test/videos/j"}))
+    monkeypatch.setattr(
+        httpx, "get",
+        lambda *a, **k: _Resp(200, {"status": "failed", "error":
+            "The request failed because the output video may be related "
+            "to copyright restrictions. Request id: 02179"}))
+    with pytest.raises(ProviderError) as exc:
+        OpenRouterProvider().generate_video("Zoro vs Mister One", 4.0)
+    assert "copyright restrictions" in str(exc.value)  # raw text kept
+    assert "docs/MODEL_ERRORS.md" in str(exc.value)  # hint appended
+
+
+def test_openrouter_video_silent_filter_explains_itself(monkeypatch):
+    """completed with no media AND a dead content URL = output-side filter."""
+    monkeypatch.setattr(settings, "openrouter_api_key", "or-test")
+    monkeypatch.setattr(httpx, "post", lambda *a, **k: _Resp(
+        202, {"id": "j", "polling_url": "https://x.test/videos/j"}))
+    calls = iter([
+        _Resp(200, {"status": "completed", "unsigned_urls": []}),
+        _Resp(404, None, content=b""),
+    ])
+    monkeypatch.setattr(httpx, "get", lambda *a, **k: next(calls))
+    with pytest.raises(ProviderError, match="no output.*filtered"):
+        OpenRouterProvider().generate_video("x", 1.0)
+
+
 def test_openrouter_video_expired(monkeypatch):
     monkeypatch.setattr(settings, "openrouter_api_key", "or-test")
     monkeypatch.setattr(httpx, "post", lambda *a, **k: _Resp(

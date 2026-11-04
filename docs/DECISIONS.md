@@ -1459,3 +1459,10 @@ color-theory (cel shadow colors, light logic), manga-literacy
 - Fix is mechanical, in _cloud_loop/_exec_cloud_tool only: repeat reads of the same (skill, section) in one turn answer with a pointer; skill bodies ride whole but only the newest stays (older ones collapse to pointers before each step); everything else keeps the 2000-char cap. Worst case halves to ~70k; typical 3-4 step turns drop ~48k to ~30k — with no paid model calls spent verifying, by construction (chars/4). Section-first guidance and once-per-conversation wording were already in the schema; now enforced.
 - 3 new tests (repeat-read pointer, new-section full read, stub-keeps-latest); skills suite 36 passed. One full-suite run showed a single StopIteration in test_openrouter_video_flow (exact-3 mock poll iterator consumed by a 4th GET under load); green alone, in pair, and on full re-run (492 passed) — recorded as flake, mock noted as fragile, providers.py untouched.
 - Full suite 492 passed; :8001 restarted (agent changed).
+
+
+## ADR-61: Copyright refusals surfaced with guidance (accepted)
+
+- Seedance refused a Zoro-vs-Mister-One page with a clear output-side message ('may be related to copyright restrictions'); researched the landscape (MPA-B dance Feb 2026 IP guardrails, Seedance prompt+face filters, commercial-model real-person rules, OpenRouter 403/422 moderation shapes) into docs/MODEL_ERRORS.md with an error catalog, per-model strictness notes, and a what-to-do ladder (originals first).
+- Code: failed jobs keep the raw provider text and append a policy hint + doc pointer on moderation signals; completed-with-no-media first tries the reconstructed content URL (old contract kept, existing retry test green), raising a 'filtered' explanation only when that is dead too; create_image/create_video descriptions steer the agent to originals after a refusal; Render Generate carries an original-content notice.
+- 2 new tests (copyright-refusal hint, silent-filter explanation); skills/agents suites unaffected; full suite 494 passed; web research + this build spent zero provider credits (suite is transport-mocked); :8001 restarted.
