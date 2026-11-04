@@ -1725,6 +1725,29 @@ def test_repeated_answer_without_specifics_generates(factory, user, monkeypatch)
     assert "Before generating I need" in asked
 
 
+def test_system_prompt_carries_skill_index(factory, user, monkeypatch):
+    """The turn system message inlines the skill index so the model can
+    skip the list_skills round trip on skill-heavy turns."""
+    from komaverse import agent as agent_mod
+
+    monkeypatch.setattr(
+        agent_mod, "get_chat_config", lambda *a, **k: ("http://x", "k", "m")
+    )
+    pid = seed_project(factory, user)
+    seen = {}
+
+    def step(messages, base_url, api_key, model):
+        seen["system"] = messages[0]["content"]
+        return {"content": "done", "tool_calls": []}, {"total": 1}, []
+
+    with factory() as s:
+        list(agent_mod._cloud_loop(
+            step, "hello", pid, s, user, factory, history=[],
+        ))
+    assert "Studio craft skills" in seen["system"]
+    assert "skip list_skills" in seen["system"]
+
+
 def test_early_gate_honors_pending_question(factory, user):
     """The stateless early path asks once, then treats a specifics-free
     answer as freedom granted — no phrase list involved."""
