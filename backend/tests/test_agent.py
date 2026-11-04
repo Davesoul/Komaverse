@@ -1560,6 +1560,61 @@ def test_cloud_video_start_answers_without_polling(factory, user, monkeypatch):
     assert "do not poll" in summary.lower()
 
 
+def test_parse_seconds_word_numbers():
+    """Spelled-out lengths count: 'four seconds' is 4.0, not a question."""
+    from komaverse.agent import parse_seconds
+
+    assert parse_seconds("a four seconds video of a robot") == 4.0
+    assert parse_seconds("ten seconds, landscape") == 10.0
+    assert parse_seconds("a two minute clip") == 30.0  # clamped like digits
+    assert parse_seconds("no timing here") is None
+
+
+def test_generation_delegation_skips_questions(factory, user, monkeypatch):
+    """'Decide the rest' delegates every blank dimension to defaults: the
+    answer turn must generate instead of asking the same questions again."""
+    from komaverse import agent as agent_mod
+    from komaverse.agent import tool_create_video
+
+    pid = seed_project(factory, user)
+    with factory() as s:
+        asked = agent_mod._resolve_turn(
+            "generate a video of a robot", pid, s, user, None, [],
+        )
+    assert "early" in asked and "duration" in asked["early"]["reply"]
+    with factory() as s:
+        delegated = agent_mod._resolve_turn(
+            "go ahead, use whatever you want — generate a video of a robot",
+            pid, s, user, None, [],
+        )
+    assert "early" not in delegated
+
+    monkeypatch.setattr(settings, "openrouter_api_key", "test-key")
+    with factory() as s:
+        summary = tool_create_video(
+            s, user, pid,
+            "go ahead, use whatever you want — generate a video of a robot",
+            4.0, None, factory,
+        )
+    assert "Video job started" in summary
+    assert "Before generating I need" not in summary
+
+
+def test_generation_guidance_reuses_context():
+    """Look/skill guidance must exempt what the conversation already saw:
+    re-reading the same ref or skill every turn burns steps for nothing."""
+    from komaverse import agent as agent_mod
+
+    descs = {
+        f["function"]["name"]: f["function"].get("description", "")
+        for f in agent_mod._TOOLS_SCHEMA
+        if f.get("type") == "function"
+    }
+    for name in ("create_video", "create_image", "look_at", "watch_video"):
+        assert "already" in descs[name].lower()
+    assert "once per conversation" in agent_mod._SYSTEM.lower()
+
+
 def test_cloud_loop_step_cap_terminates(factory, user, monkeypatch):
     """A model that only calls tools must stop at the raised step cap
     instead of looping forever."""

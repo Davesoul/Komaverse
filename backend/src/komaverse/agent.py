@@ -245,12 +245,50 @@ CAPABILITIES = (
 # Each tool calls the real endpoint functions. Returns a human summary.
 
 
+#: Spelled-out lengths ("four seconds") count like digits. Bare words
+#: stay out on purpose: "two heroes" names no length, only an explicit
+#: number word plus a time unit does.
+_WORD_NUMBERS = {
+    "one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6,
+    "seven": 7, "eight": 8, "nine": 9, "ten": 10, "eleven": 11,
+    "twelve": 12, "thirteen": 13, "fourteen": 14, "fifteen": 15,
+    "sixteen": 16, "seventeen": 17, "eighteen": 18, "nineteen": 19,
+    "twenty": 20, "thirty": 30,
+}
+_WORD_SECONDS_RE = re.compile(
+    r"\b(" + "|".join(_WORD_NUMBERS) + r")\s*(seconds?|secs?|s|minutes?|mins?)\b",
+    re.IGNORECASE,
+)
+
+
 def parse_seconds(text: str) -> float | None:
-    """Clip length from chat ("3s", "2.5 seconds") or None when absent."""
+    """Clip length from chat ("3s", "2.5 seconds", "four seconds")."""
     m = re.search(r"(\d+(?:\.\d+)?)\s*(?:s|sec|secs|second|seconds)\b", text.lower())
+    if m:
+        return min(max(float(m.group(1)), 0.1), 30.0)
+    m = _WORD_SECONDS_RE.search(text or "")
     if not m:
         return None
-    return min(max(float(m.group(1)), 0.1), 30.0)
+    value = float(_WORD_NUMBERS[m.group(1).lower()])
+    if m.group(2).lower().startswith("min"):
+        value *= 60.0
+    return min(max(value, 0.1), 30.0)
+
+
+#: The user handed blank dimensions to the agent ("decide the rest",
+#: "go"): documented defaults apply, no questions. Checked before every
+#: ask-gate so an answer turn can never re-ask what it was told to fill.
+_DELEGATED_RE = re.compile(
+    r"\bgo\b"
+    r"|\b(decide|whatever|you\s+choose|your\s+call|go\s+ahead|surprise\s+me|"
+    r"i\s+don'?t\s+mind|up\s+to\s+you|use\s+whatever|your\s+choice|"
+    r"you\s+decide|as\s+you\s+like|dealers?\s+choice)\b",
+    re.IGNORECASE,
+)
+
+
+def _delegates_decisions(text: str | None) -> bool:
+    return bool(_DELEGATED_RE.search(text or ""))
 
 
 def parse_motions(text: str) -> list[str] | None:
@@ -390,7 +428,6 @@ STYLE_VALUE_RE = re.compile(
 STYLE_CHANGE_RE = re.compile(
     r"\b(different|new|another|other|change|changing)\b", re.IGNORECASE
 )
-NUMBER_RE = re.compile(r"\d+")
 
 
 def _missing_orientation(prompt, width, height) -> str | None:
@@ -404,11 +441,15 @@ def _missing_orientation(prompt, width, height) -> str | None:
 
 
 def _missing_duration(prompt, seconds, default_seconds: float = 4.0) -> str | None:
-    """Duration word with no usable length: the matched word or None."""
+    """Duration word with no usable length: the matched word or None.
+
+    Digits and spelled-out numbers ("four seconds") both count, so a
+    stated length never asks.
+    """
     m = DURATION_RE.search(prompt or "")
     if not m:
         return None
-    if NUMBER_RE.search(prompt or ""):
+    if parse_seconds(prompt or "") is not None:
         return None
     if seconds != default_seconds:
         return None
@@ -1296,7 +1337,7 @@ def tool_generate(
             "the request names no style",
             "a style, e.g. shonen manga, photoreal, watercolor",
         ))
-    if missing:
+    if missing and not _delegates_decisions(raw):
         return _ask_before_generating("create_image", missing)
     refs = _generation_references(raw, references, fallback_references)
     snaps, notes = gather_reference_snapshots(session, user, project_id, prompt, refs, entity_ids)
@@ -1447,7 +1488,7 @@ def tool_create_video(
             "the request names no style",
             "a style, e.g. anime, cinematic, photorealistic",
         ))
-    if missing:
+    if missing and not _delegates_decisions(raw):
         return _ask_before_generating("create_video", missing)
     refs = _generation_references(raw, references, fallback_references)
     snaps, notes = gather_reference_snapshots(session, user, project_id, prompt, refs, entity_ids)
@@ -3839,7 +3880,10 @@ _SYSTEM = (
     "For shot and panel staging, perspective, and framing that reads "
     "instantly, read the visual-composition skill (focal hierarchy, "
     "leading lines, depth, anime-cut staging); for panel flow, "
-    "reading order, and lettering/SFX placement, read manga-literacy."
+    "reading order, and lettering/SFX placement, read manga-literacy. "
+    "Skills and refs read once per conversation: reuse what earlier "
+    "turns already read or saw — never re-read a skill or re-look at "
+    "a ref already in context. "
     "Research online with web_search, then read hits with web_fetch; "
     "list_tools shows every tool, list_skills shows every skill."
 )
@@ -4055,8 +4099,8 @@ _TOOLS_SCHEMA = [
                 "references, named entities as entity_ids - never paste "
                 "@-tokens into the prompt, never invent references. "
                 "References are style/subject guidance only: look_at a ref "
-                "first when you must describe it, never claim pixels you "
-                "have not seen."
+                "first when you must describe it, unless already seen in "
+                "this conversation; never claim pixels you have not seen."
             ),
             "parameters": {
                 "type": "object",
@@ -4093,7 +4137,8 @@ _TOOLS_SCHEMA = [
                 "end/last frame' or 'from X to Y' closes it, everything "
                 "else is style/subject guidance and never becomes a frame. "
                 "look_at an image ref or watch_video a video ref before "
-                "generating from it."
+                "generating from it, unless already seen in this "
+                "conversation."
             ),
             "parameters": {
                 "type": "object",
@@ -4185,7 +4230,9 @@ _TOOLS_SCHEMA = [
                 "about it. Call this before describing or generating from "
                 "a reference: never invent what an image shows. Frames "
                 "arrive with their layer inventory; sequences arrive as a "
-                "labeled contact sheet with per-frame layer counts."
+                "labeled contact sheet with per-frame layer counts. Skip "
+                "refs this conversation already saw — an earlier look_at "
+                "result or locked entity in context counts as seen."
             ),
             "parameters": {
                 "type": "object",
@@ -4206,7 +4253,8 @@ _TOOLS_SCHEMA = [
                 "its length go to the vision model together with a speech "
                 "transcript, timestamped. Call this to apprehend a video "
                 "reference before generating from it - never summarize a "
-                "video from its prompt text alone."
+                "video from its prompt text alone. Skip videos this "
+                "conversation already watched."
             ),
             "parameters": {
                 "type": "object",
@@ -5138,7 +5186,7 @@ def _resolve_turn(message, project_id, session, user, current_frame_id, refs):
                 missing.append(
                     "art style (e.g. shonen manga, photoreal, watercolor)"
                 )
-            if missing:
+            if missing and not _delegates_decisions(message):
                 # References resolved above ride the question: the early
                 # return drops message/refs, so without their names in the
                 # reply the next turn could not cite them back.

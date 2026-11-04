@@ -1243,3 +1243,27 @@ color-theory (cel shadow colors, light logic), manga-literacy
   start+offset persist, past-end offset rejected, export mixes the
   trimmed cue with AAC audio). Full suite 459 passed; `tsc` +
   build green. No backend source changed, so `:8001` keeps running.
+
+## ADR-47: Delegation ends the ask loop; seen refs/skills are reused (accepted)
+
+- "Decide the rest" looped: the ask-gates only read the current
+  message, so an answer turn ("go ahead, use whatever you want")
+  re-asked every question the previous turn had posed. Worse,
+  "four seconds" never parsed (digits only), so duration asked even
+  when stated. Both gates (demo preamble + tool missing checks) now
+  honor `_delegates_decisions` (go/decide/whatever/you choose/up to
+  you/...): delegated blanks take documented defaults (4s, provider
+  default, silent) instead of asking. `parse_seconds` takes number
+  words ("four seconds" = 4.0, minutes x60, same 0.1-30 clamp);
+  `_missing_duration` keys off it, so a stated length never asks.
+  Bare words still ask ("two heroes" is not a length); partial
+  answers without delegation still ask the rest (ADR-43 costs).
+- Re-reading: look/skill guidance was unconditional, so the model
+  re-read the same skill and re-looked at the same ref every turn.
+  `create_video`/`create_image`/`look_at`/`watch_video` now exempt
+  what the conversation already shows, and `_SYSTEM` reads skills
+  and refs once per conversation, reusing earlier turns' context.
+  `check_job` stays for explicit status questions only (ADR-45).
+- Live: 3 new tests (word numbers, delegation skips both gates and
+  starts the job, reuse guidance present); suites 462 passed;
+  `:8001` restarted for the new gates/guidance.
