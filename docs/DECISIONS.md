@@ -1224,3 +1224,22 @@ color-theory (cel shadow colors, light logic), manga-literacy
 - Live: 2 new agent tests (answer-without-polling guidance +
   cap termination); full suite 458 passed; `tsc` + build green;
   `:8001` restarted for the new loop/guidance.
+
+## ADR-46: Audio head-trim inspector parity (accepted)
+
+- The backend and timeline already head-trimmed audio: cues carry
+  `offset_sec` (skip into the take), the Timeline left handle drags
+  shift start+offset together with the tail pinned, the preview
+  plays from the offset, and the export seeks with `-ss
+  offset_sec`. Only the inspector had no control — video clips got
+  a Head-trim row in ADR-44, cues did not.
+- The selected-cue inspector now has the same Head-trim row:
+  -0.5s/+0.5s buttons plus a numeric field, all patching
+  `{offset_sec, start_sec}` together through the existing
+  optimistic `commitCuePatch` (timeline start slides right, tail
+  stays). The field clamps to take length - 0.1s; overshoot still
+  400s server-side. Hidden when the take is missing.
+- New `test_cue_head_trim` locks the contract (combined
+  start+offset persist, past-end offset rejected, export mixes the
+  trimmed cue with AAC audio). Full suite 459 passed; `tsc` +
+  build green. No backend source changed, so `:8001` keeps running.

@@ -2619,6 +2619,57 @@ export default function RenderPage() {
                       onCommit={(v) => void commitCuePatch(selectedCue.id, { rate: v })}
                     />
                   </div>
+                  {take && (
+                    <div style={{ display: "flex", gap: 6, alignItems: "center", marginTop: 10, flexWrap: "wrap" }}>
+                      <span style={{ fontSize: 12, color: "var(--kv-muted)" }}>Head trim</span>
+                      <Btn
+                        small
+                        title="Trim 0.5s less from the head"
+                        onClick={() => {
+                          const off = Math.max(0, Math.round(((selectedCue.offset_sec ?? 0) - 0.5) * 10) / 10);
+                          const restored = Math.round(((selectedCue.offset_sec ?? 0) - off) * 10) / 10;
+                          void commitCuePatch(selectedCue.id, {
+                            offset_sec: off,
+                            start_sec: Math.max(0, Math.round(((selectedCue.start_sec ?? 0) - restored) * 10) / 10),
+                          });
+                        }}
+                      >
+                        −
+                      </Btn>
+                      <span title="Seconds skipped from the take head — the timeline start slides right, the tail stays">
+                      <DurationInput
+                        value={selectedCue.offset_sec ?? 0}
+                        onCommit={(v) => {
+                          const maxOff = Math.max(take.duration_sec - 0.1, 0);
+                          const off = Math.min(Math.max(0, v), maxOff);
+                          const delta = Math.round((off - (selectedCue.offset_sec ?? 0)) * 10) / 10;
+                          void commitCuePatch(selectedCue.id, {
+                            offset_sec: off,
+                            start_sec: Math.max(0, Math.round(((selectedCue.start_sec ?? 0) + delta) * 10) / 10),
+                          });
+                        }}
+                      />
+                      </span>
+                      <Btn
+                        small
+                        title="Trim 0.5s more from the head"
+                        onClick={() => {
+                          const maxOff = Math.max(take.duration_sec - 0.1, 0);
+                          const off = Math.min(maxOff, Math.round(((selectedCue.offset_sec ?? 0) + 0.5) * 10) / 10);
+                          const shaved = Math.round((off - (selectedCue.offset_sec ?? 0)) * 10) / 10;
+                          void commitCuePatch(selectedCue.id, {
+                            offset_sec: off,
+                            start_sec: Math.round(((selectedCue.start_sec ?? 0) + shaved) * 10) / 10,
+                          });
+                        }}
+                      >
+                        +
+                      </Btn>
+                      <span style={{ fontSize: 11, color: "var(--kv-faint)" }}>
+                        Skips into the take {(selectedCue.offset_sec ?? 0) > 0 ? `(${(selectedCue.offset_sec ?? 0).toFixed(1)}s in)` : "(from the start)"} — or drag the clip's left edge.
+                      </span>
+                    </div>
+                  )}
                   <div style={{ display: "flex", gap: 6, alignItems: "center", marginTop: 10, flexWrap: "wrap" }}>
                     <span style={{ fontSize: 12, color: "var(--kv-muted)" }}>Lane</span>
                     <SelectInput

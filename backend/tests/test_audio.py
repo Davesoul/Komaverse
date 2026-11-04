@@ -307,6 +307,45 @@ def test_cue_end_trim(factory, user):
     assert exc.value.status_code == 400
 
 
+def test_cue_head_trim(factory, user):
+    """Head-trim skips into the take: patching offset_sec slides the
+    timeline start right with it, the end stays, and the export mixes
+    the cue from its offset."""
+    project_id, scene_id = _panel_project(factory, user)
+    with factory() as s:
+        take = upload(s, user, project_id, wav_bytes(seconds=4.0), duration=4.0)
+    with factory() as s:
+        cue = add_cue(
+            scene_id,
+            CueCreate(audio_id=take.id, start_sec=1.0),
+            s,
+            user,
+        )
+    assert (cue.start_sec, cue.offset_sec) == (1.0, 0.0)
+    # Shaving 1.5s off the head moves the start, never the tail.
+    with factory() as s:
+        trimmed = patch_cue(cue.id, CuePatch(start_sec=2.5, offset_sec=1.5), s, user)
+    assert (trimmed.start_sec, trimmed.offset_sec) == (2.5, 1.5)
+    # Skipping past the take end is rejected, never clamped silently.
+    with factory() as s, pytest.raises(HTTPException) as exc:
+        patch_cue(cue.id, CuePatch(offset_sec=99.0), s, user)
+    assert exc.value.status_code == 400
+    with factory() as s:
+        job = export_project(
+            project_id, ExportRequest(fps=5, width=320, height=240), BackgroundTasks(), s, user
+        )
+    run_export_job(job.id, factory)
+    with factory() as s:
+        done = get_job(job.id, s, user)
+    assert done.status == "done"
+    video = settings.media_dir / done.result_url.removeprefix("/media/")
+    streams = ffmpeg_streams(video)
+    assert "Audio: aac" in streams
+    with factory() as s:
+        report = get_export_report(job.id, s, user)
+    assert report.audio_cues == 1
+
+
 def test_cue_lane(factory, user):
     project_id, scene_id = _panel_project(factory, user)
     with factory() as s:
