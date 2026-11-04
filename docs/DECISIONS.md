@@ -1201,3 +1201,26 @@ color-theory (cel shadow colors, light logic), manga-literacy
   `test_clip_head_trim_offset_patch_and_export` (clamp + persist +
   export-with-audio); `tsc` + build green; full suite re-run at
   commit time; `:8001` restarted.
+
+## ADR-45: Agent answers async jobs now; Draw paper pans freely (accepted)
+
+- Root cause of "I ran out of steps" on video: `create_video`
+  returns at once ("check it with check_job") while the tool
+  description ordered the model to poll check_job until done — and
+  every poll burns one of 6 `_cloud_loop` steps. A 4s Seedance
+  render outlasts 6 polls, so the turn always died mid-render even
+  though the dock (`followJobs`) already follows [job id] live.
+- Fix: the model now answers immediately with the [job id] and
+  never calls check_job to wait. Changed the `create_video` /
+  `check_job` tool descriptions, the video/image/export start
+  strings, and `_SYSTEM`; check_job stays for explicit status
+  questions only ("is my video done?"). Safety net raised to
+  `CLOUD_MAX_STEPS = 12` for legit multi-tool turns.
+- Draw: the paper was scroll-panned, which has no room at fit zoom
+  (paper glued left). Pan is now a free translate offset at any
+  zoom: hold Space, the Pan tool (H), or the middle mouse button
+  and drag anywhere; Fit resets the view; middle-click autoscroll
+  suppressed. Cursor keeps grab/grabbing feedback.
+- Live: 2 new agent tests (answer-without-polling guidance +
+  cap termination); full suite 458 passed; `tsc` + build green;
+  `:8001` restarted for the new loop/guidance.

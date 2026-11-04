@@ -366,7 +366,16 @@ export default function DrawPage() {
   const stashRef = useRef(new Map<string, SerializedLayer[]>());
   const saveTimerRef = useRef(0);
   const saveStateRef = useRef({ dirty: false, saving: false, queued: false });
-  const panRef = useRef<{ x: number; y: number; sl: number; st: number } | null>(null);
+  const panRef = useRef<{ x: number; y: number; px: number; py: number } | null>(null);
+  // Free paper offset in CSS px: dragging the paper (Space, Pan tool,
+  // middle-drag) moves it anywhere at any zoom — unlike scrolling, which
+  // has no room when the paper fits the viewport.
+  const [pan, setPan] = useState({ x: 0, y: 0 });
+  const panValRef = useRef({ x: 0, y: 0 });
+  const setPanBoth = (p: { x: number; y: number }) => {
+    panValRef.current = p;
+    setPan(p);
+  };
   const pinchRef = useRef(new Map<number, { x: number; y: number }>());
   const pinchStartRef = useRef<{ dist: number; zoom: number } | null>(null);
   const spaceRef = useRef(false);
@@ -506,6 +515,9 @@ export default function DrawPage() {
     manualZoomRef.current = false;
     zoomRef.current = nz;
     setZoom(nz);
+    // Fit resets the whole view: zoom, paper offset, then center.
+    panValRef.current = { x: 0, y: 0 };
+    setPan({ x: 0, y: 0 });
     window.setTimeout(centerPaper, 50);
   }, [centerPaper]);
 
@@ -849,10 +861,15 @@ export default function DrawPage() {
       pinchStartRef.current = { dist: pinchDist(), zoom: zoomRef.current };
       return;
     }
-    // Dragging the paper is hotkey-only: hold Space, or the Pan tool
-    // (H). A plain brush drag never moves the paper.
-    if (spaceRef.current || engine.tool === "pan") {
-      panRef.current = { x: e.clientX, y: e.clientY, sl: el.scrollLeft, st: el.scrollTop };
+    // Dragging the paper never draws: hold Space, the Pan tool (H), or
+    // the middle mouse button. A plain brush drag never moves the paper.
+    if (spaceRef.current || engine.tool === "pan" || e.button === 1) {
+      panRef.current = {
+        x: e.clientX,
+        y: e.clientY,
+        px: panValRef.current.x,
+        py: panValRef.current.y,
+      };
       setPanning(true);
       try {
         e.currentTarget.setPointerCapture(e.pointerId);
@@ -934,9 +951,11 @@ export default function DrawPage() {
       }
       return;
     }
-    if (panRef.current && el) {
-      el.scrollLeft = panRef.current.sl - (e.clientX - panRef.current.x);
-      el.scrollTop = panRef.current.st - (e.clientY - panRef.current.y);
+    if (panRef.current) {
+      setPanBoth({
+        x: Math.round(panRef.current.px + (e.clientX - panRef.current.x)),
+        y: Math.round(panRef.current.py + (e.clientY - panRef.current.y)),
+      });
       return;
     }
     engine?.pointerMove(e.nativeEvent);
@@ -2123,8 +2142,9 @@ export default function DrawPage() {
                     boxSizing: "border-box",
                     // Small breathing room around the paper edge (.kv-paper
                     // halves it on phones so the fit stays maximal).
-                    // Dragging the paper around stays on its hotkeys
-                    // (hold Space, or the Pan tool via H).
+                    // Free pan offset: hold Space, the Pan tool (H), or the
+                    // middle mouse button, then drag the paper anywhere.
+                    transform: `translate(${pan.x}px, ${pan.y}px)`,
                   }}
                 >
                 <canvas
@@ -2138,6 +2158,10 @@ export default function DrawPage() {
                   }}
                   onPointerDown={onPointerDown}
                   onPointerMove={onPointerMove}
+                  onMouseDown={(e) => {
+                    // Middle-click autoscroll would fight the pan drag.
+                    if (e.button === 1) e.preventDefault();
+                  }}
                   onPointerUp={(e) => endPointer(e, false)}
                   onPointerCancel={(e) => endPointer(e, true)}
                   onPointerLeave={() => {

@@ -1529,3 +1529,61 @@ def test_agent_video_stores_size(factory, user, monkeypatch):
     with factory() as s:
         job = s.get(JobRow, jid)
     assert (job.width, job.height) == (1280, 720)
+
+
+def test_cloud_video_start_answers_without_polling(factory, user, monkeypatch):
+    """Starting a video must send the model straight back to the user:
+    the dock follows [job id] live, so polling check_job only burns the
+    step budget (a 4s Seedance render outlasted the old 6-step loop)."""
+    from komaverse import agent as agent_mod
+    from komaverse.agent import tool_create_video
+
+    descs = {
+        f["function"]["name"]: f["function"].get("description", "")
+        for f in agent_mod._TOOLS_SCHEMA
+        if f.get("type") == "function"
+    }
+    for name in ("create_video", "check_job"):
+        assert "poll" not in descs[name].lower()
+    assert "never call check_job" in descs["create_video"].lower()
+    assert "answer" in descs["create_video"].lower()
+
+    monkeypatch.setattr(settings, "openrouter_api_key", "test-key")
+    pid = seed_project(factory, user)
+    with factory() as s:
+        summary = tool_create_video(
+            s, user, pid,
+            "a 4 second 16:9 720p anime video of a robot", 4.0,
+            size="1280x720", job_factory=factory,
+        )
+    assert "[job " in summary
+    assert "do not poll" in summary.lower()
+
+
+def test_cloud_loop_step_cap_terminates(factory, user, monkeypatch):
+    """A model that only calls tools must stop at the raised step cap
+    instead of looping forever."""
+    from komaverse import agent as agent_mod
+
+    monkeypatch.setattr(settings, "ai_provider", "openrouter")
+    monkeypatch.setattr(settings, "openrouter_api_key", "test-key")
+    pid = seed_project(factory, user)
+
+    def always_status(**kw):
+        yield ("message", (
+            {"role": "assistant", "content": None, "tool_calls": [
+                {"id": "c1", "type": "function",
+                 "function": {"name": "project_status", "arguments": "{}"}},
+            ]},
+            {"total": 1},
+        ))
+
+    monkeypatch.setattr(agent_mod, "chat_complete_stream", always_status)
+    with factory() as s:
+        events = list(agent_mod._cloud_loop(
+            agent_mod._complete_stream, "status", pid, s, user, None,
+        ))
+    assert events[-1]["type"] == "result"
+    assert "ran out of steps" in events[-1]["reply"]
+    assert agent_mod.CLOUD_MAX_STEPS > 6
+    assert len(events[-1]["actions"]) == agent_mod.CLOUD_MAX_STEPS

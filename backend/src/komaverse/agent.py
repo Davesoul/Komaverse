@@ -981,7 +981,7 @@ def tool_export(
     session.commit()
     if background:
         threading.Thread(target=run_export_job, args=(job.id, job_factory), daemon=True).start()
-        return f"{chained}Export started ({clips} clips) [job {job.id}] - check it with check_job."
+        return f"{chained}Export started ({clips} clips) [job {job.id}] - reply now with the job id; the UI follows it live, do not poll check_job."
     run_export_job(job.id, job_factory)
     session.refresh(job)
     if job.status != "done":
@@ -1358,7 +1358,7 @@ def tool_generate(
         threading.Thread(target=run_ai_job, args=(job.id, job_factory), daemon=True).start()
         ref_bit = f" with {len(snaps)} reference(s)" if snaps else ""
         note_bit = (" " + " ".join(notes)) if notes else ""
-        return f"Image job started [job {job.id}]{ref_bit} - check it with check_job.{note_bit}"
+        return f"Image job started [job {job.id}]{ref_bit} - reply now with the job id; the UI follows it live, do not poll check_job.{note_bit}"
     run_ai_job(job.id, job_factory)
     session.refresh(job)
     if job.status == "done":
@@ -1491,7 +1491,7 @@ def tool_create_video(
     note_bit = (" " + " ".join(notes)) if notes else ""
     return (
         f"Video job started [job {job.id}]{ref_bit}{size_bit}, silent by design - "
-        f"check it with check_job.{note_bit} Add sound with a voiceover take "
+        f"reply now with the job id; the UI follows it live, do not poll check_job.{note_bit} Add sound with a voiceover take "
         f"(synthesize_voice) or timeline audio."
     )
 
@@ -3810,7 +3810,11 @@ _SYSTEM = (
     "included before the latest message - use them as context. "
     "Greetings, thanks, and other smalltalk get a words-only reply — "
     "call no tools unless the user asks for an action, a change, or "
-    "information not already in context. Reference images attach only "
+    "information not already in context. Async jobs (create_video, "
+    "background create_image, export_video) answer immediately with the "
+    "[job id] — the UI follows the job live and shows it when done. "
+    "Never call check_job to wait; call it only when the user explicitly "
+    "asks for a job's status. Reference images attach only "
     "when the user asked to reuse a frame, panel, scan, generation, sequence, "
     "or entity — never assume one. References are style/subject guidance "
     "unless the user names a frame role: 'as the start/first frame' opens "
@@ -4079,7 +4083,9 @@ _TOOLS_SCHEMA = [
             "name": "create_video",
             "description": (
                 "Start an async video render from a prompt. The job runs "
-                "in the background — use check_job to see when it is done. "
+                "in the background and the UI follows it live — answer "
+                "immediately with the [job id]; never call check_job "
+                "afterwards. "
                 "Attach a reference only when the user asked to reuse one, "
                 "via references - never paste @-tokens into the prompt. "
                 "Frame roles come from the user's words, never position: "
@@ -4233,8 +4239,10 @@ _TOOLS_SCHEMA = [
         "function": {
             "name": "check_job",
             "description": (
-                "Report one job's status and result URL. Poll this after "
-                "create_video until the job is done."
+                "Report one job's status and result URL. Only for explicit "
+                "user status questions ('is it done yet?') — never call "
+                "this after create_video: answer with the [job id] and the "
+                "UI follows the job live."
             ),
             "parameters": {
                 "type": "object",
@@ -4806,6 +4814,11 @@ def _job_visible(session, user, job_id) -> bool:
     return row is not None and row.user_id == user.id
 
 
+CLOUD_MAX_STEPS = 12
+"""Model rounds per cloud turn: async jobs answer immediately (the UI
+follows [job id] live), so polling check_job must never be needed."""
+
+
 def _cloud_loop(
     step, message, project_id, session, user, job_factory,
     ref_context="", history=None, open_frame=None, turn_references=None,
@@ -4837,7 +4850,7 @@ def _cloud_loop(
     actions: list[dict] = []
     base_url, api_key, model = get_chat_config()
     total_tokens = 0
-    for _ in range(6):
+    for _ in range(CLOUD_MAX_STEPS):
         msg, usage, tokens = step(messages, base_url, api_key, model)
         for text in tokens:
             yield {"type": "token", "text": text}
