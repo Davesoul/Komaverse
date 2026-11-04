@@ -87,8 +87,13 @@ export function AudioDeck({
         const res = await fetch(mediaUrl(take.url), { credentials: "include" });
         if (!res.ok) throw new Error(`take fetch ${res.status}`);
         const blob = await res.blob();
-        const ext = (take.name.split(".").pop() || "wav").slice(0, 8);
-        staged.unshift(new File([blob], `${take.name}.${ext}`, { type: blob.type || "audio/wav" }));
+        const mime = (blob.type || "").toLowerCase();
+        const mimeExt = mime.includes("webm") ? "webm" : mime.includes("ogg") ? "ogg" : mime.includes("mp4") || mime.includes("m4a") ? "m4a" : mime.includes("mpeg") ? "mp3" : mime.includes("wav") || mime.includes("wave") ? "wav" : mime.includes("flac") ? "flac" : "";
+        const urlExt = (take.url.split("?")[0].split(".").pop() || "").toLowerCase();
+        const okExt = (e: string) => ["mp3", "wav", "m4a", "ogg", "flac", "webm"].includes(e);
+        const ext = mimeExt || (okExt(urlExt) ? urlExt : "wav");
+        const base = take.name.replace(/\.[a-z0-9]{1,5}$/i, "") || "take";
+        staged.unshift(new File([blob], `${base}.${ext}`, { type: blob.type || "audio/wav" }));
       } catch (e) {
         notify(`Couldn't read that take: ${(e as Error).message}`);
         return;
@@ -110,9 +115,7 @@ export function AudioDeck({
       setCloneTake("");
       setCloneFiles([]);
       notify(
-        `Voice "${v.name}" cloned — pick it in the Brain voice row (${
-          cloneEngine === "xtts" ? "free-tts" : "elevenlabs"
-        }).`,
+        `Voice "${v.name}" cloned — hit Use next to it to generate with it right here.`,
       );
     } catch (err) {
       notify(`Couldn't clone the voice: ${(err as Error).message}`);
@@ -494,6 +497,20 @@ export function AudioDeck({
                     · {local ? "local" : "elevenlabs"} · {c.sample_count} sample{c.sample_count === 1 ? "" : "s"}
                   </span>
                 </span>
+                <Btn
+                  small
+                  onClick={() => {
+                    const body = local
+                      ? { voice_provider: "free-tts", voice_model: `xtts:${c.id}` }
+                      : { voice_provider: "elevenlabs", voice_model: c.voice_id };
+                    void api.agentConfig(body)
+                      .then(() => notify(`"${c.name}" is now the generation voice — type above and hit Generate.`))
+                      .catch((e) => notify(`Couldn't select the voice: ${(e as Error).message}`));
+                  }}
+                  title={`Generate with "${c.name}" — sets the Brain voice row to this clone`}
+                >
+                  Use
+                </Btn>
                 <IconBtn
                   danger
                   onClick={() => {

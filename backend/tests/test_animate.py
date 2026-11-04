@@ -613,11 +613,13 @@ def test_export_reports_clamps_and_skips(factory, user):
     with factory() as s:
         out = render_project(project.id, s, fps=60, width=641, height=481)
     assert (out["fps"], out["width"], out["height"]) == (30, 640, 480)
-    assert out["clips"] == 1
+    # Dangling sources keep their slot as blank paper (preview parity) —
+    # the timeline is the contract, so nothing compresses.
+    assert out["clips"] == 2
     assert any("fps" in w for w in out["warnings"])
     assert any("even" in w for w in out["warnings"])
-    assert any("skipped" in w for w in out["warnings"])
-    assert out["duration_sec"] == pytest.approx(0.4, abs=0.15)
+    assert any("blank paper holds its" in w for w in out["warnings"])
+    assert out["duration_sec"] == pytest.approx(0.8, abs=0.15)
 
 
 def test_export_rejects_empty_timeline(factory, user):
@@ -629,6 +631,8 @@ def test_export_rejects_empty_timeline(factory, user):
 
 
 def test_export_job_failure(factory, user):
+    # A fully dangling timeline no longer fails the job: the slot holds as
+    # blank paper with a warning, so the MP4 still matches the preview.
     project_id, scene_id, panels = _scene_with_panels(factory, user, name="Fail")
     with factory() as s:
         add_clips_batch(
@@ -648,8 +652,10 @@ def test_export_job_failure(factory, user):
     run_export_job(job.id, factory)
     with factory() as s:
         done = get_job(job.id, s, user)
-    assert done.status == "failed"
-    assert "resolve" in (done.error or "")
+    assert done.status == "done"
+    with factory() as s:
+        report = get_export_report(job.id, s, user)
+    assert any("blank paper holds its" in w for w in report.warnings)
 
 
 def test_export_report_isolation(factory, user):

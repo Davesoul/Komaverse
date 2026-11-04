@@ -1583,7 +1583,7 @@ export default function MediaPage() {
               src={mediaUrl(lightbox.job.result_url)}
               controls
               playsInline
-              style={{ width: "100%", maxHeight: "76vh", display: "block", background: "#000" }}
+              style={{ width: "100%", maxHeight: "76vh", objectFit: "contain", display: "block", background: "#000" }}
             />
           ) : (
             <img

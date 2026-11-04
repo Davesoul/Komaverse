@@ -249,6 +249,10 @@ export function PreviewPlayer({
   // Declared up here so the dissolve cover below hard-cuts for motionOff.
   const [forceMotion, setForceMotion] = useState(false);
   const motionOff = reduceMotion && !forceMotion;
+  /** Clip ids whose artwork 404s (deleted page/panel/frame): the export
+   * holds the slot as blank paper, so the stage shows the same paper
+   * with the clip label instead of a black hole. */
+  const [brokenArt, setBrokenArt] = useState<Set<string>>(new Set());
   useEffect(() => {
     if (typeof window.matchMedia !== "function") return;
     const mq = window.matchMedia("(prefers-reduced-motion: reduce)");
@@ -572,6 +576,24 @@ export function PreviewPlayer({
               onReady={() => setBaseReady(true)}
               onError={() => setBaseReady(true)}
             />
+          ) : brokenArt.has(base.id) || !base.image ? (
+            <div
+              key={base.id}
+              style={{
+                width: "100%",
+                height: "100%",
+                background: "#fdf6e3",
+                color: "#8a7a5c",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                fontSize: 13,
+                textAlign: "center",
+                padding: 16,
+              }}
+            >
+              {base.label} — source deleted, blank paper holds this slot in the export.
+            </div>
           ) : (
             <img
               key={base.id}
@@ -579,7 +601,10 @@ export function PreviewPlayer({
               src={base.image}
               alt={base.label}
               onLoad={() => setBaseReady(true)}
-              onError={() => setBaseReady(true)}
+              onError={() => {
+                setBaseReady(true);
+                setBrokenArt((s) => new Set(s).add(base.id));
+              }}
               style={{
                 width: "100%",
                 height: "100%",

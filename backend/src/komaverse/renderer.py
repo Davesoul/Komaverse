@@ -626,24 +626,35 @@ def render_project(
     if total > MAX_TOTAL_SEC:
         raise ValueError(f"project too long ({total:.0f}s > {MAX_TOTAL_SEC:.0f}s)")
 
-    # Pass 1: resolve everything up front so skips are warned, never silent.
-    # Stills resolve to one image; videos resolve to (tag, file, duration).
+    # Pass 1: resolve everything up front. A dangling source (deleted
+    # page/panel/frame/job) keeps its slot as blank paper with a warning —
+    # dropping it would compress the timeline so the MP4 no longer matches
+    # the preview, which holds the slot (black stage + "missing" label).
+    paper = np.full((h, w, 3), PAPER_RGB[::-1], dtype=np.uint8)
     resolved: list[tuple[ClipRow, object]] = []
     for clip in clips:
         if clip.kind == "video":
             vid = resolve_clip_video(clip, session)
             if vid is None:
-                msg = f"skipped clip {clip.id} (video): unresolvable source"
+                msg = (
+                    f"clip {clip.id} (video): unresolvable source — "
+                    f"blank paper holds its {clip.duration}s slot"
+                )
                 logger.warning(msg)
                 warnings.append(msg)
+                resolved.append((clip, paper.copy()))
                 continue
             resolved.append((clip, ("video", *vid)))
             continue
         src = resolve_clip_image(clip, session)
         if src is None or src.size == 0:
-            msg = f"skipped clip {clip.id} ({clip.kind}): unresolvable source"
+            msg = (
+                f"clip {clip.id} ({clip.kind}): unresolvable source — "
+                f"blank paper holds its {clip.duration}s slot"
+            )
             logger.warning(msg)
             warnings.append(msg)
+            resolved.append((clip, paper.copy()))
             continue
         resolved.append((clip, src))
     if not resolved:
