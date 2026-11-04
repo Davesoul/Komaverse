@@ -19,6 +19,7 @@ import {
   Btn,
   ChapterHeader,
   Chip,
+  DestinationDialog,
   ImpactFlash,
   EmptyState,
   IconBtn,
@@ -897,15 +898,21 @@ export default function RenderPage() {
     }
   };
 
-  const addAllPanels = async () => {
+  // Auto-direct asks for its destination: current timeline or a fresh one.
+  const [autoDirectOpen, setAutoDirectOpen] = useState(false);
+  const addAllPanels = async (dest: string | "new") => {
     if (!project || !scene || busy) return;
+    setAutoDirectOpen(false);
     pushClipHistory();
     setBusy("add-all");
     try {
       // One server path for UI + agent: dedupe, motion cycling, scene choice.
       const before = scene.id;
       const beforeCount = scene.clips.length;
-      const target = await api.autoDirect(project.id, { seconds: 2 });
+      const target = await api.autoDirect(
+        project.id,
+        dest === "new" ? { seconds: 2, new_scene: true } : { seconds: 2, scene_id: dest },
+      );
       await refresh(project.id, target.id);
       const added =
         target.id === before ? target.clips.length - beforeCount : target.clips.length;
@@ -1284,9 +1291,26 @@ export default function RenderPage() {
           <div>
             <SectionTitle>Add to timeline</SectionTitle>
             <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-              <PrimaryBtn disabled={!!busy} onClick={addAllPanels}>
+              <PrimaryBtn disabled={!!busy} onClick={() => setAutoDirectOpen(true)}>
                 {busy === "add-all" ? "Adding…" : "Auto-direct timeline"}
               </PrimaryBtn>
+              {autoDirectOpen && scene ? (
+                <DestinationDialog
+                  title="Auto-direct where?"
+                  subtitle="Add every panel as a 2s clip"
+                  options={[...scenes]
+                    .sort((a, b) => a.order - b.order)
+                    .map((s) => ({
+                      id: s.id,
+                      name: s.name,
+                      detail: `${s.clips.length} clip${s.clips.length === 1 ? "" : "s"}`,
+                    }))}
+                  currentId={scene.id}
+                  newLabel="+ New timeline"
+                  onPick={addAllPanels}
+                  onClose={() => setAutoDirectOpen(false)}
+                />
+              ) : null}
               <TextInput
                 value={frameQuery}
                 onChange={(e) => setFrameQuery(e.target.value)}

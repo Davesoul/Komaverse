@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { api, mediaUrl, type Page, type Panel, type Project } from "../api";
-import { getCurrentProject, gotoTab, setCurrentProject, setCurrentScene } from "../lib/studio";
+import { api, mediaUrl, type Page, type Panel, type Project, type Scene } from "../api";
+import { getCurrentProject, getCurrentScene, gotoTab, setCurrentProject, setCurrentScene } from "../lib/studio";
 import {
   Btn,
   ChapterHeader,
+  DestinationDialog,
   EmptyState,
   IconBtn,
   Notice,
@@ -557,18 +558,32 @@ export default function ScanPage() {
   // Panels → render handoff: same server path as Render's Auto-direct
   // (dedupe + reading order + scene choice), then jump to the Render tab —
   // the project is already published, so Render restores it on mount.
-  const doSendToAnimate = async () => {
+  // The popup names the destination: current timeline or a fresh one.
+  const [destScenes, setDestScenes] = useState<Scene[] | null>(null);
+  const openSendDestination = async () => {
     if (!project || panels.length === 0 || busy) return;
+    setBusy("Loading timelines…");
+    try {
+      setDestScenes(await api.listScenes(project.id));
+    } catch (e) {
+      toast(`Couldn't load timelines: ${(e as Error).message}`, "error");
+    } finally {
+      setBusy("");
+    }
+  };
+  const doSendToAnimate = async (dest: string | "new") => {
+    if (!project) return;
+    setDestScenes(null);
     setBusy("Sending panels…");
     try {
-      const target = await api.autoDirect(project.id, { seconds: 2 });
+      const target = await api.autoDirect(
+        project.id,
+        dest === "new" ? { seconds: 2, new_scene: true } : { seconds: 2, scene_id: dest },
+      );
       toast(
         `Sent ${target.clips.length} clip${target.clips.length === 1 ? "" : "s"} into '${target.name}' — opening Render.`,
       );
-      // Land Render on the scene that actually received the clips: later
-      // sends create a fresh scene (the first one already has clips), and
-      // without this Render reopens the previously stored scene, hiding
-      // the new frames.
+      // Land Render on the scene that actually received the clips.
       setCurrentScene(project.id, target.id);
       gotoTab("render");
     } catch (e) {
@@ -839,12 +854,27 @@ export default function ScanPage() {
                 ×
               </IconBtn>
               <PrimaryBtn
-                onClick={doSendToAnimate}
+                onClick={openSendDestination}
                 disabled={!!busy || panels.length === 0}
-                title="Add every panel to the timeline, then open the Render tab"
+                title="Choose a timeline, add every panel, then open the Render tab"
               >
                 Send to Render →
               </PrimaryBtn>
+              {project && destScenes ? (
+                <DestinationDialog
+                  title="Send panels where?"
+                  subtitle={`${panels.length} detected panel${panels.length === 1 ? "" : "s"} from this page`}
+                  options={destScenes.map((s) => ({
+                    id: s.id,
+                    name: s.name,
+                    detail: `${s.clips.length} clip${s.clips.length === 1 ? "" : "s"}`,
+                  }))}
+                  currentId={getCurrentScene(project.id)}
+                  newLabel="+ New timeline"
+                  onPick={doSendToAnimate}
+                  onClose={() => setDestScenes(null)}
+                />
+              ) : null}
               <Btn
                 disabled={!!busy || !page}
                 onClick={async () => {

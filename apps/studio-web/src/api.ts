@@ -952,7 +952,10 @@ export const api = {
       method: "DELETE",
     });
   },
-  autoDirect: (projectId: string, body?: { seconds?: number; motions?: string[] }) =>
+  autoDirect: (
+    projectId: string,
+    body?: { seconds?: number; motions?: string[]; scene_id?: string; new_scene?: boolean },
+  ) =>
     req<Scene>(`/api/v1/projects/${projectId}/auto-direct`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },

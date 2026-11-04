@@ -778,3 +778,107 @@ export function StatusBar({ items }: { items: string[] }) {
     </div>
   );
 }
+
+export interface DestinationOption {
+  id: string;
+  name: string;
+  detail?: string;
+}
+
+/** Current-vs-new destination popup for every send handoff (timelines and
+ * sequences alike). Existing entries list with clip/frame counts, the stored
+ * current one badged, plus an explicit New action — no silent routing.
+ * Esc/backdrop closes; nothing fires until a choice is picked. */
+export function DestinationDialog({
+  title,
+  subtitle,
+  options,
+  currentId,
+  newLabel,
+  onPick,
+  onClose,
+}: {
+  title: string;
+  subtitle?: string;
+  options: DestinationOption[];
+  currentId: string | null;
+  newLabel: string;
+  onPick: (id: string | "new") => void;
+  onClose: () => void;
+}) {
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+  return (
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-label={title}
+      onClick={onClose}
+      style={{
+        position: "fixed",
+        inset: 0,
+        zIndex: 80,
+        background: "rgba(0,0,0,0.6)",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        padding: 16,
+      }}
+    >
+      <div
+        onClick={(e) => e.stopPropagation()}
+        style={{
+          width: "min(420px, 100%)",
+          background: "var(--kv-surface)",
+          border: "1px solid var(--kv-border-strong)",
+          borderRadius: "var(--kv-radius)",
+          boxShadow: "var(--kv-shadow-hard)",
+        }}
+      >
+        <div style={{ padding: "14px 16px 8px" }}>
+          <div style={{ fontWeight: 900, fontSize: 15 }}>{title}</div>
+          {subtitle ? (
+            <div style={{ fontSize: 12, color: "var(--kv-muted)", marginTop: 2 }}>{subtitle}</div>
+          ) : null}
+        </div>
+        <div style={{ display: "flex", flexDirection: "column", gap: 6, padding: "4px 16px 8px", maxHeight: 280, overflowY: "auto" }}>
+          {options.map((o) => (
+            <Btn
+              key={o.id}
+              onClick={() => onPick(o.id)}
+              active={o.id === currentId}
+              style={{ justifyContent: "flex-start", gap: 8, textAlign: "left" }}
+            >
+              <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                {o.name}
+              </span>
+              {o.id === currentId ? (
+                <span style={{ fontFamily: "var(--kv-mono)", fontSize: 11, color: "var(--kv-accent)" }}>
+                  current
+                </span>
+              ) : null}
+              {o.detail ? (
+                <span style={{ fontFamily: "var(--kv-mono)", fontSize: 11, color: "var(--kv-muted)" }}>
+                  {o.detail}
+                </span>
+              ) : null}
+            </Btn>
+          ))}
+        </div>
+        <div style={{ display: "flex", gap: 8, padding: "4px 16px 16px" }}>
+          <PrimaryBtn small onClick={() => onPick("new")}>
+            {newLabel}
+          </PrimaryBtn>
+          <Btn small onClick={onClose}>
+            Cancel
+          </Btn>
+        </div>
+      </div>
+    </div>
+  );
+}

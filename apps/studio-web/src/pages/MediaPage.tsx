@@ -9,6 +9,7 @@ import {
   type Job,
   type Page,
   type Project,
+  type Scene,
   type Sequence,
   type StorageUsage,
 } from "../api";
@@ -16,6 +17,7 @@ import { getCurrentProject, getCurrentScene, getCurrentSequence, gotoTab, setCur
 import {
   Btn,
   ChapterHeader,
+  DestinationDialog,
   EmptyState,
   IconBtn,
   Notice,
@@ -35,6 +37,11 @@ const fmtBytes = (n: number) =>
       : `${(n / 1024 / 1024).toFixed(1)} MB`;
 
 type MediaSectionKey = "pages" | "takes" | "gens" | "frames" | "renders";
+
+type TimelineSend =
+  | { kind: "page"; page: Page }
+  | { kind: "gen"; job: Job }
+  | { kind: "video"; job: Job };
 
 const COLLAPSED_KEY = "komaverse.mediaCollapsed";
 // Most-recent rows per section before "Show all". Takes honor the sort
@@ -534,17 +541,6 @@ export default function MediaPage() {
     }
   };
 
-  // Cohesion: resolve the stored current timeline, else the first one.
-  const resolveScene = async () => {
-    if (!project) return null;
-    const scenes = await api.listScenes(project.id);
-    if (scenes.length === 0) return null;
-    const stored = getCurrentScene(project.id);
-    const pick = scenes.find((s) => s.id === stored) ?? scenes[0];
-    setCurrentScene(project.id, pick.id);
-    return pick;
-  };
-
   // Generations live in the gallery: framing one stages it for Draw or Render.
   const frameGen = async (job: Job) => {
     if (!project) throw new Error("no project");
@@ -604,40 +600,111 @@ export default function MediaPage() {
     }
   };
 
-  const doAddVideoToTimeline = async (job: Job) => {
+  // Every timeline send (scan page still, generation frame, video clip)
+  // goes through one destination popup: current timeline or a fresh one.
+  const [timelineSend, setTimelineSend] = useState<TimelineSend | null>(null);
+  const [timelineScenes, setTimelineScenes] = useState<Scene[]>([]);
+  const openTimelineSend = async (send: TimelineSend) => {
     if (!project) return;
-    setBusy("Adding to timeline…");
+    setBusy("Loading timelines…");
     try {
-      const scenes = await api.listScenes(project.id);
-      if (scenes.length === 0) {
-        toast("No timelines yet — create one in Render first.", "warn");
+      setTimelineScenes(await api.listScenes(project.id));
+      setTimelineSend(send);
+    } catch (e) {
+      toast(`Couldn't load timelines: ${(e as Error).message}`, "error");
+    } finally {
+      setBusy("");
+    }
+  };
+  const deliverTimelineSend = async (dest: string | "new") => {
+    if (!project || !timelineSend) return;
+    const send = timelineSend;
+    setTimelineSend(null);
+    setBusy("Sending…");
+    try {
+      const target =
+        dest === "new"
+          ? await api.createScene(project.id, `Timeline ${timelineScenes.length + 1}`)
+          : (timelineScenes.find((s) => s.id === dest) ?? timelineScenes[0]);
+      if (!target) {
+        toast("No timeline available.", "warn");
         return;
       }
-      const stored = getCurrentScene(project.id);
-      const target = scenes.find((s) => s.id === stored) ?? scenes[0];
-      await api.addClipsBatch(target.id, [
-        { kind: "video", source_id: job.id, duration: job.seconds > 0 ? job.seconds : 2 },
-      ]);
+      if (send.kind === "page") {
+        await api.addClip(target.id, { kind: "media", source_id: send.page.id, duration: 2 });
+        toast(`Page sent to "${target.name}" — open Render to cut.`);
+      } else if (send.kind === "gen") {
+        const f = await frameGen(send.job);
+        await api.addClip(target.id, { kind: "frame", source_id: f.id, duration: 2 });
+        toast(`Generation sent to "${target.name}" — open Render to cut.`);
+      } else {
+        await api.addClipsBatch(target.id, [
+          { kind: "video", source_id: send.job.id, duration: send.job.seconds > 0 ? send.job.seconds : 2 },
+        ]);
+        toast(`Video added to "${target.name}" — open it in Render.`);
+      }
+      setCurrentScene(project.id, target.id);
       await refresh(project.id);
-      toast(`Video added to "${target.name}" — open it in Render.`);
     } catch (e) {
-      toast(`Add failed: ${(e as Error).message}`, "error");
+      toast(`Send failed: ${(e as Error).message}`, "error");
     } finally {
       setBusy("");
     }
   };
 
-  const doVideoToFrames = async (job: Job) => {
-    if (!project) return;
-    const stored = getCurrentSequence(project.id);
-    const target = sequences.find((s) => s.id === stored) ?? sequences[0];
-    if (!target) {
-      toast("Create a sequence first — then explode the video into it.", "warn");
-      return;
+  // Framing (page/gen → draw frame) also names its sequence: stage it in
+  // the current one or a fresh one, then optionally open Draw on it.
+  type FrameSend = { source: string; label: string; then: "stage" | "open" };
+  const [frameSend, setFrameSend] = useState<FrameSend | null>(null);
+  const deliverFrameSend = async (dest: string | "new") => {
+    if (!project || !frameSend) return;
+    const send = frameSend;
+    setFrameSend(null);
+    setBusy("Framing…");
+    try {
+      const target =
+        dest === "new"
+          ? await api.createSequence(project.id, `Sequence ${sequences.length + 1}`)
+          : (sequences.find((s) => s.id === dest) ?? sequences[0]);
+      if (!target) {
+        toast("No sequence available.", "warn");
+        return;
+      }
+      const f = await api.frameFromMedia(project.id, send.source, undefined, target.id);
+      setFrames(await api.listFrames(project.id));
+      setCurrentSequence(project.id, target.id);
+      if (send.then === "open") {
+        setDrawFrame(project.id, f.id);
+        gotoTab("draw");
+      } else {
+        setNotice(`Framed as '${f.name}' in "${target.name}" — open it in Draw.`);
+      }
+    } catch (e) {
+      toast(`Frame failed: ${(e as Error).message}`, "error");
+    } finally {
+      setBusy("");
     }
+  };
+
+  // Same choice for sequences: explode a video into draw frames inside the
+  // current sequence or a fresh one.
+  const [framesJob, setFramesJob] = useState<Job | null>(null);
+  const deliverVideoToFrames = async (dest: string | "new") => {
+    if (!project || !framesJob) return;
+    const job = framesJob;
+    setFramesJob(null);
     setBusy("Extracting frames…");
     try {
+      const target =
+        dest === "new"
+          ? await api.createSequence(project.id, `Sequence ${sequences.length + 1}`)
+          : (sequences.find((s) => s.id === dest) ?? sequences[0]);
+      if (!target) {
+        toast("No sequence available.", "warn");
+        return;
+      }
       const made = await api.videoToFrames(job.id, { sequence_id: target.id, max_frames: 12 });
+      setCurrentSequence(project.id, target.id);
       await refresh(project.id);
       toast(`${made.length} frames added to "${target.name}" — open it in Draw.`);
     } catch (e) {
@@ -949,40 +1016,14 @@ export default function MediaPage() {
                       </div>
                       <div style={{ marginTop: 6, display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
                         <IconBtn
-                          label="Send to Draw: create a new draw frame from this page"
-                          onClick={async () => {
-                            if (!project) return;
-                            setBusy("Sending…");
-                            try {
-                              const f = await api.frameFromMedia(project.id, `@media:${pg.id}`);
-                              setFrames(await api.listFrames(project.id));
-                              setDrawFrame(project.id, f.id);
-                              gotoTab("draw");
-                            } catch (e) {
-                              setNotice(`Send failed: ${(e as Error).message}`);
-                            } finally {
-                              setBusy("");
-                            }
-                          }}
+                          label="Send to Draw: create a new draw frame from this page (choose the sequence)"
+                          onClick={() => setFrameSend({ source: `@media:${pg.id}`, label: `Page "${pg.name || "scan"}" as a draw frame`, then: "open" })}
                         >
                           ✎
                         </IconBtn>
                         <IconBtn
-                          label="Send to timeline: add this page as a still on the current timeline"
-                          onClick={async () => {
-                            if (!project) return;
-                            try {
-                              const scene = await resolveScene();
-                              if (!scene) {
-                                toast("No timeline yet — create one on the Render tab first.", "warn");
-                                return;
-                              }
-                              await api.addClip(scene.id, { kind: "media", source_id: pg.id, duration: 2 });
-                              toast(`Page sent to "${scene.name}" — open Render to cut.`);
-                            } catch (e) {
-                              toast(`Send failed: ${(e as Error).message}`, "error");
-                            }
-                          }}
+                          label="Send to timeline: add this page as a still (choose the timeline)"
+                          onClick={() => void openTimelineSend({ kind: "page", page: pg })}
                         >
                           ⤵
                         </IconBtn>
@@ -1258,62 +1299,22 @@ export default function MediaPage() {
                           <>
                           <IconBtn
                             disabled={busy !== ""}
-                            label="Frame it: stage as a draw frame in the current sequence"
-                            onClick={async () => {
-                              if (!project) return;
-                              setBusy("Framing…");
-                              try {
-                                const f = await frameGen(j);
-                                setNotice(`Framed as '${f.name}' — open it in Draw.`);
-                              } catch (e) {
-                                setNotice(`Frame failed: ${(e as Error).message}`);
-                              } finally {
-                                setBusy("");
-                              }
-                            }}
+                            label="Frame it: stage as a draw frame (choose the sequence)"
+                            onClick={() => setFrameSend({ source: `@gen:${j.id}`, label: "Generation as a draw frame", then: "stage" })}
                           >
                             ▣
                           </IconBtn>
                           <IconBtn
                             disabled={busy !== ""}
-                            label="Send to timeline: frame it and add the frame to the current timeline"
-                            onClick={async () => {
-                              if (!project) return;
-                              setBusy("Sending…");
-                              try {
-                                const scene = await resolveScene();
-                                if (!scene) {
-                                  toast("No timeline yet — create one on the Render tab first.", "warn");
-                                  return;
-                                }
-                                const f = await frameGen(j);
-                                await api.addClip(scene.id, { kind: "frame", source_id: f.id, duration: 2 });
-                                toast(`Generation sent to "${scene.name}" — open Render to cut.`);
-                              } catch (e) {
-                                toast(`Send failed: ${(e as Error).message}`, "error");
-                              } finally {
-                                setBusy("");
-                              }
-                            }}
+                            label="Send to timeline: frame it and add the frame (choose the timeline)"
+                            onClick={() => void openTimelineSend({ kind: "gen", job: j })}
                           >
                             ⤵
                           </IconBtn>
                           <IconBtn
                             disabled={busy !== ""}
-                            label="Send to Draw: frame it and open it in the Draw tab"
-                            onClick={async () => {
-                              if (!project) return;
-                              setBusy("Sending…");
-                              try {
-                                const f = await frameGen(j);
-                                setDrawFrame(project.id, f.id);
-                                gotoTab("draw");
-                              } catch (e) {
-                                setNotice(`Send failed: ${(e as Error).message}`);
-                              } finally {
-                                setBusy("");
-                              }
-                            }}
+                            label="Send to Draw: frame it and open it in the Draw tab (choose the sequence)"
+                            onClick={() => setFrameSend({ source: `@gen:${j.id}`, label: "Generation as a draw frame", then: "open" })}
                           >
                             ✎
                           </IconBtn>
@@ -1345,10 +1346,10 @@ export default function MediaPage() {
                       )}
                       {j.status === "done" && j.kind === "video" && (
                         <div style={{ marginTop: 6, display: "flex", gap: 6, flexWrap: "wrap" }}>
-                          <IconBtn onClick={() => void doAddVideoToTimeline(j)} label="Send to the current timeline as a clip">
+                          <IconBtn onClick={() => void openTimelineSend({ kind: "video", job: j })} label="Send to a timeline as a clip (choose the timeline)">
                             ⤵
                           </IconBtn>
-                          <IconBtn onClick={() => void doVideoToFrames(j)} label="Explode into draw frames in the current sequence">
+                          <IconBtn onClick={() => setFramesJob(j)} label="Explode into draw frames (choose the sequence)">
                             ▦
                           </IconBtn>
                           <IconBtn onClick={() => void doVideoToScan(j)} label="Send to Scan: import the opening frame as a scan page">
@@ -1477,6 +1478,63 @@ export default function MediaPage() {
         </div>
       )}
 
+      {project && timelineSend ? (
+        <DestinationDialog
+          title={
+            timelineSend.kind === "page"
+              ? "Send page where?"
+              : timelineSend.kind === "gen"
+                ? "Send generation where?"
+                : "Send video where?"
+          }
+          subtitle={
+            timelineSend.kind === "page"
+              ? `Page "${timelineSend.page.name || "scan"}" as a 2s still`
+              : timelineSend.kind === "gen"
+                ? `Generation as a 2s still`
+                : `${timelineSend.job.seconds > 0 ? timelineSend.job.seconds : 2}s clip with its audio`
+          }
+          options={timelineScenes.map((s) => ({
+            id: s.id,
+            name: s.name,
+            detail: `${s.clips.length} clip${s.clips.length === 1 ? "" : "s"}`,
+          }))}
+          currentId={getCurrentScene(project.id)}
+          newLabel="+ New timeline"
+          onPick={deliverTimelineSend}
+          onClose={() => setTimelineSend(null)}
+        />
+      ) : null}
+      {project && frameSend ? (
+        <DestinationDialog
+          title="Frame where?"
+          subtitle={frameSend.label}
+          options={sequences.map((s) => ({
+            id: s.id,
+            name: s.name,
+            detail: `${s.frames.length} frame${s.frames.length === 1 ? "" : "s"}`,
+          }))}
+          currentId={getCurrentSequence(project.id)}
+          newLabel="+ New sequence"
+          onPick={deliverFrameSend}
+          onClose={() => setFrameSend(null)}
+        />
+      ) : null}
+      {project && framesJob ? (
+        <DestinationDialog
+          title="Explode video where?"
+          subtitle="Extract up to 12 frames into Draw"
+          options={sequences.map((s) => ({
+            id: s.id,
+            name: s.name,
+            detail: `${s.frames.length} frame${s.frames.length === 1 ? "" : "s"}`,
+          }))}
+          currentId={getCurrentSequence(project.id)}
+          newLabel="+ New sequence"
+          onPick={deliverVideoToFrames}
+          onClose={() => setFramesJob(null)}
+        />
+      ) : null}
       {lightbox?.kind === "page" && (
         <Lightbox
           title={lightbox.page.name || `PG ${lightbox.index + 1}`}

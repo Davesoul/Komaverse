@@ -142,6 +142,8 @@ class ThreadIdOut(BaseModel):
 class AutoDirectBody(BaseModel):
     seconds: float = 2.0
     motions: list[str] | None = None
+    scene_id: str | None = None
+    new_scene: bool = False
 
 
 @router.post("/agent/chat", response_model=AgentReply)
@@ -577,5 +579,8 @@ def auto_direct(
     user: UserRow = Depends(get_current_user),
 ):
     seconds = min(max(body.seconds, 0.1), 30.0)
-    scene, _ = auto_direct_core(session, user, project_id, seconds, body.motions)
+    scene, _ = auto_direct_core(
+        session, user, project_id, seconds, body.motions,
+        scene_id=body.scene_id, new_scene=body.new_scene,
+    )
     return scene

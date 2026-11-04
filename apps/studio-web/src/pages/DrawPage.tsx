@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { api, mediaUrl, type DrawFrame, type Page, type Project, type Sequence } from "../api";
+import { api, mediaUrl, type DrawFrame, type Page, type Project, type Scene, type Sequence } from "../api";
 import {
   Btn,
   BusyDots,
   ChapterHeader,
+  DestinationDialog,
   EmptyState,
   IconBtn,
   LoadingLine,
@@ -1180,17 +1181,8 @@ export default function DrawPage() {
     }
   };
 
-  // Cohesion: send frames to the timeline without leaving Draw. Resolves
-  // the stored current timeline, else the first one.
-  const resolveScene = async () => {
-    if (!projectId) return null;
-    const scenes = await api.listScenes(projectId);
-    if (scenes.length === 0) return null;
-    const stored = getCurrentScene(projectId);
-    const pick = scenes.find((s) => s.id === stored) ?? scenes[0];
-    setCurrentScene(projectId, pick.id);
-    return pick;
-  };
+  // (Destination popup replaced resolveScene: openDrawSend lists the
+  // timelines, deliverDrawSend records the chosen current one.)
 
   // Insert a fresh frame id right after `afterId` in the current
   // sequence (new/duplicate land after the cursor, not the strip end).
@@ -1222,35 +1214,46 @@ export default function DrawPage() {
     }
   };
 
-  const sendFrameToRender = async (id: string) => {
-    const f = frames.find((x) => x.id === id);
-    if (!f) return;
+  // Frame + sequence sends share one destination popup: current timeline
+  // or a fresh one. The pending payload decides what gets delivered.
+  type DrawSend = { kind: "frame"; id: string } | { kind: "sequence" };
+  const [drawSend, setDrawSend] = useState<DrawSend | null>(null);
+  const [drawScenes, setDrawScenes] = useState<Scene[]>([]);
+  const openDrawSend = async (send: DrawSend) => {
+    if (!projectId) return;
+    if (send.kind === "sequence" && seqFrames.length === 0) return;
     try {
-      const scene = await resolveScene();
-      if (!scene) {
-        toast("No timeline yet — create one on the Render tab first.", "warn");
-        return;
-      }
-      await api.addClip(scene.id, { kind: "frame", source_id: id, duration: 2 });
-      toast(`Sent "${f.name || "frame"}" to "${scene.name}" — open Render to cut.`);
+      setDrawScenes(await api.listScenes(projectId));
+      setDrawSend(send);
     } catch (e) {
-      toast(`Send failed: ${(e as Error).message}`, "error");
+      toast(`Couldn't load timelines: ${(e as Error).message}`, "error");
     }
   };
-
-  const sendSequenceToRender = async () => {
-    if (seqFrames.length === 0) return;
+  const deliverDrawSend = async (dest: string | "new") => {
+    if (!projectId || !drawSend) return;
+    const send = drawSend;
+    setDrawSend(null);
     try {
-      const scene = await resolveScene();
-      if (!scene) {
-        toast("No timeline yet — create one on the Render tab first.", "warn");
+      const target =
+        dest === "new"
+          ? await api.createScene(projectId, `Timeline ${drawScenes.length + 1}`)
+          : (drawScenes.find((s) => s.id === dest) ?? drawScenes[0]);
+      if (!target) {
+        toast("No timeline available.", "warn");
         return;
       }
-      await api.addClipsBatch(
-        scene.id,
-        seqFrames.map((f) => ({ kind: "frame", source_id: f.id, duration: 2 })),
-      );
-      toast(`Sent ${seqFrames.length} frames to "${scene.name}" — open Render to cut.`);
+      if (send.kind === "frame") {
+        const f = frames.find((x) => x.id === send.id);
+        await api.addClip(target.id, { kind: "frame", source_id: send.id, duration: 2 });
+        toast(`Sent "${f?.name || "frame"}" to "${target.name}" — open Render to cut.`);
+      } else {
+        await api.addClipsBatch(
+          target.id,
+          seqFrames.map((f) => ({ kind: "frame", source_id: f.id, duration: 2 })),
+        );
+        toast(`Sent ${seqFrames.length} frames to "${target.name}" — open Render to cut.`);
+      }
+      setCurrentScene(projectId, target.id);
     } catch (e) {
       toast(`Send failed: ${(e as Error).message}`, "error");
     }
@@ -2424,9 +2427,28 @@ export default function DrawPage() {
                 </IconBtn>
                 <IconBtn onClick={newFrame} label="New frame">＋</IconBtn>
                 <IconBtn disabled={!frame} onClick={duplicateFrame} label="Duplicate frame">⧉</IconBtn>
-                <IconBtn disabled={seqFrames.length === 0} onClick={() => void sendSequenceToRender()} label="Send this sequence to the current timeline as clips">▸▸</IconBtn>
+                <IconBtn disabled={seqFrames.length === 0} onClick={() => void openDrawSend({ kind: "sequence" })} label="Send this sequence to a timeline as clips (choose the timeline)">▸▸</IconBtn>
                 <IconBtn danger disabled={!frame} onClick={removeFrame} label="Delete frame">×</IconBtn>
               </div>
+              {projectId && drawSend ? (
+                <DestinationDialog
+                  title={drawSend.kind === "frame" ? "Send frame where?" : "Send sequence where?"}
+                  subtitle={
+                    drawSend.kind === "frame"
+                      ? "One frame as a 2s still"
+                      : `${seqFrames.length} frames as 2s stills`
+                  }
+                  options={drawScenes.map((s) => ({
+                    id: s.id,
+                    name: s.name,
+                    detail: `${s.clips.length} clip${s.clips.length === 1 ? "" : "s"}`,
+                  }))}
+                  currentId={getCurrentScene(projectId)}
+                  newLabel="+ New timeline"
+                  onPick={deliverDrawSend}
+                  onClose={() => setDrawSend(null)}
+                />
+              ) : null}
               <div style={{ display: "flex", alignItems: "center", gap: 8, rowGap: 6, flexWrap: "wrap", marginBottom: 8, fontSize: 13 }}>
                 <Btn
                   small
@@ -2594,16 +2616,16 @@ export default function DrawPage() {
                         <span
                           role="button"
                           tabIndex={0}
-                          title="Send this frame to the current timeline"
+                          title="Send this frame to a timeline (choose the timeline)"
                           aria-label={`Send ${f.name || `frame ${i + 1}`} to the timeline`}
                           onClick={(e) => {
                             e.stopPropagation();
-                            void sendFrameToRender(f.id);
+                            void openDrawSend({ kind: "frame", id: f.id });
                           }}
                           onKeyDown={(e) => {
                             if (e.key === "Enter") {
                               e.stopPropagation();
-                              void sendFrameToRender(f.id);
+                              void openDrawSend({ kind: "frame", id: f.id });
                             }
                           }}
                           style={{ cursor: "pointer", fontSize: 13, padding: "0 2px", color: "var(--kv-accent)" }}

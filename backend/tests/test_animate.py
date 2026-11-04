@@ -360,6 +360,27 @@ def _scene_with_panels(factory, user, name="Batch"):
     return project.id, scenes[0].id, [p.id for p in detected.panels]
 
 
+def test_auto_direct_targets_scene(factory, user):
+    """Destination control: named scene appends, new_scene forces fresh,
+    foreign ids 404, legacy behavior unchanged."""
+    from komaverse.agent import auto_direct_core
+
+    project_id, _, _ = _scene_with_panels(factory, user)
+    with factory() as s:
+        first, added = auto_direct_core(s, user, project_id, 2.0)
+    assert added > 0
+    with factory() as s:
+        same, added_again = auto_direct_core(s, user, project_id, 2.0, scene_id=first.id)
+    assert same.id == first.id and added_again == 0  # all placed, no dupes
+    with factory() as s:
+        fresh, added_fresh = auto_direct_core(s, user, project_id, 2.0, new_scene=True)
+    # A fresh timeline starts complete: it carries every panel so far.
+    assert fresh.id != first.id and added_fresh == added
+    with factory() as s, pytest.raises(HTTPException) as exc:
+        auto_direct_core(s, user, project_id, 2.0, scene_id="missing0000")
+    assert exc.value.status_code == 404
+
+
 def test_add_clips_batch(factory, user):
     project_id, scene_id, panels = _scene_with_panels(factory, user)
     assert len(panels) >= 2

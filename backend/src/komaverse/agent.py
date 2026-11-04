@@ -1325,8 +1325,15 @@ def auto_direct_core(
     project_id: str,
     seconds: float = 2.0,
     motions: list[str] | None = None,
+    scene_id: str | None = None,
+    new_scene: bool = False,
 ):
-    """All panels → timeline clips in reading order. Returns the Scene."""
+    """All panels → timeline clips in reading order. Returns the Scene.
+
+    Destination control for the UI's current/new popup: scene_id appends
+    to that timeline (404 when foreign), new_scene forces a fresh one,
+    and neither keeps the legacy first-empty-else-new behavior.
+    """
     from komaverse.api.animate import MOTIONS
 
     motions = motions or DEFAULT_MOTIONS
@@ -1341,12 +1348,16 @@ def auto_direct_core(
     if not panels:
         raise HTTPException(400, "no panels to direct — detect or upload first")
     scenes = list_scenes(project_id, session, user)
-    if scenes and not scenes[0].clips:
-        target = scenes[0]
-    else:
+    if scene_id:
+        target = next((s for s in scenes if s.id == scene_id), None)
+        if target is None:
+            raise HTTPException(404, "timeline not found")
+    elif new_scene or not scenes or scenes[0].clips:
         target = create_scene(
             project_id, SceneCreate(name="Auto cut"), session, user
         )
+    else:
+        target = scenes[0]
     existing = {c.source_id for c in target.clips if c.kind == "panel"}
     added = 0
     for i, (_, _, panel) in enumerate(panels):
