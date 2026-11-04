@@ -27,3 +27,19 @@ backend (`:8001`) + studio (`:5173`).
 goku petit, SAM-detected, 37 panels total) plus the 2 original art pages;
 `Opening Shot` sequence (8 frames, one per page); `Auto cut` timeline
 (37 clips — the original 7 kept, 30 appended from the refs — ~74s).
+
+## Earlier demo generations (original character Kyo Rengoku — copyright-safe)
+
+Recovered from the first `Demo` projects (`6159c575056e`, `5bf6c79cd832`)
+and mirrored into `D:\Downloads\refs\kyo-*` for reuse. The `duel at dawn`
+take (`5ea842c5457d`) rendered blank and is excluded.
+
+| File | What it is | Demo job |
+|---|---|---|
+| `gen-kyo-model-sheet.png` | Fighter model sheet: front/side/back, fighting stance, 6 expressions | `79ccec954aa5` |
+| `gen-kyo-ref-sheet.png` | Polished character reference sheet | `9824abd78eb1` |
+| `gen-kyo-mid-punch.png` | Mid-punch key visual, dojo, impact frame | `e2ccb621569e` |
+| `gen-kyo-comet-fist-punch.mp4` | Punch video (drifts into Comet Fist motif abstraction) | `285b402c2d95` |
+| `gen-kyo-straight-punch.mp4` | Straight-punch video from the sheet | `e14d44d29df0` |
+| `gen-kyo-sakuga-fight.mp4` | Sakuga fight video | `73e640a585d2` |
+| `gen-kyo-lunge-punch.mp4` | Lunge-into-punch video | `3d89cd4d78dd` |
