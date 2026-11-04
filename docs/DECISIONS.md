@@ -1485,3 +1485,8 @@ color-theory (cel shadow colors, light logic), manga-literacy
 - "Fit page to view" only reset width to 100%, so tall pages still scrolled — it looked dead. Fit is now a real contain: a `ResizeObserver` measures the preview box and the page renders at `min(1, height-limited width)`, centered, no scroll. Fit is the default on page switch; +/−/1:1 leave it (zoom steps start from the fitted size), ⤢ and `0` return to it, and the readout shows `Fit` / `%` / `1:1`.
 - First attempt measured nothing: the observer was attached on mount, before any page (and its box) existed. Fixed with a callback ref that observes once the box mounts. Panel drag/draw math is unaffected (it uses `getScreenCTM`, not the zoom state); strokes now divide by the true rendered px-per-image-px so they stay constant on screen.
 - Verified in headless Chromium against the Demo project: default 434×542 in a 966×574 box (fits, `Fit`), +/+ steps to 73%, ⤢ returns to fit. Gates: tsc + build green (no frontend harness exists, so no new test framework).
+
+## ADR-65: Page-scoped auto-direct (accepted)
+
+- Bug: `auto_direct_core` always collected every page's panels, so Scan's "send this page" dropped the whole project onto the new timeline. The route now takes `page_id` (404 when foreign); the Scan sender always passes the open page, so a new timeline carries only that page's panels. Render's auto-direct and the agent tool stay unscoped — whole-project cuts are their purpose.
+- Test `test_auto_direct_page_scope` pins it: two detected pages, scoped send lands exactly page 2's panels, unscoped still covers both, foreign page 404s.

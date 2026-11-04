@@ -144,6 +144,7 @@ class AutoDirectBody(BaseModel):
     motions: list[str] | None = None
     scene_id: str | None = None
     new_scene: bool = False
+    page_id: str | None = None
 
 
 @router.post("/agent/chat", response_model=AgentReply)
@@ -582,5 +583,6 @@ def auto_direct(
     scene, _ = auto_direct_core(
         session, user, project_id, seconds, body.motions,
         scene_id=body.scene_id, new_scene=body.new_scene,
+        page_id=body.page_id,
     )
     return scene

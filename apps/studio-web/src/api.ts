@@ -954,7 +954,7 @@ export const api = {
   },
   autoDirect: (
     projectId: string,
-    body?: { seconds?: number; motions?: string[]; scene_id?: string; new_scene?: boolean },
+    body?: { seconds?: number; motions?: string[]; scene_id?: string; new_scene?: boolean; page_id?: string },
   ) =>
     req<Scene>(`/api/v1/projects/${projectId}/auto-direct`, {
       method: "POST",

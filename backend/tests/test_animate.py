@@ -381,6 +381,31 @@ def test_auto_direct_targets_scene(factory, user):
     assert exc.value.status_code == 404
 
 
+def test_auto_direct_page_scope(factory, user):
+    """Page-scoped sends only carry that page: a new timeline from the
+    Scan tab must not drag in panels from previously viewed pages."""
+    from komaverse.agent import auto_direct_core
+
+    project_id, _, page1_panels = _scene_with_panels(factory, user)
+    assert len(page1_panels) >= 2
+    with factory() as s:
+        page2_id = upload(s, user, project_id)
+    with factory() as s:
+        det2 = detect_panels(page2_id, DetectRequest(detector="heuristic"), s, user)
+    assert len(det2.panels) > 0
+    with factory() as s:
+        scoped, added = auto_direct_core(s, user, project_id, 2.0, new_scene=True, page_id=page2_id)
+    assert added == len(det2.panels)
+    assert {c.source_id for c in scoped.clips} == {p.id for p in det2.panels}
+    # Unscoped still cuts the whole project; foreign pages 404.
+    with factory() as s:
+        _, added_all = auto_direct_core(s, user, project_id, 2.0, new_scene=True)
+    assert added_all == len(page1_panels) + len(det2.panels)
+    with factory() as s, pytest.raises(HTTPException) as exc:
+        auto_direct_core(s, user, project_id, 2.0, page_id="missing0000")
+    assert exc.value.status_code == 404
+
+
 def test_add_clips_batch(factory, user):
     project_id, scene_id, panels = _scene_with_panels(factory, user)
     assert len(panels) >= 2

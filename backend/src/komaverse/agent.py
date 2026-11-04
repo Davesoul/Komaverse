@@ -1327,12 +1327,16 @@ def auto_direct_core(
     motions: list[str] | None = None,
     scene_id: str | None = None,
     new_scene: bool = False,
+    page_id: str | None = None,
 ):
     """All panels → timeline clips in reading order. Returns the Scene.
 
     Destination control for the UI's current/new popup: scene_id appends
     to that timeline (404 when foreign), new_scene forces a fresh one,
     and neither keeps the legacy first-empty-else-new behavior.
+    page_id scopes the send to one page (404 when foreign) so the Scan
+    tab's "send this page" never drags in other pages' panels; omitted
+    keeps the whole-project cut used by Render and the agent.
     """
     from komaverse.api.animate import MOTIONS
 
@@ -1341,8 +1345,15 @@ def auto_direct_core(
         if motion not in MOTIONS:
             raise HTTPException(400, f"unknown motion: {motion}")
     p = get_project(project_id, session, user)
+    if page_id is not None:
+        scoped = next((pg for pg in p.pages if pg.id == page_id), None)
+        if scoped is None:
+            raise HTTPException(404, "page not found")
+        pages = [scoped]
+    else:
+        pages = sorted(p.pages, key=lambda pg: pg.index)
     panels: list[tuple[int, int, object]] = []
-    for page in sorted(p.pages, key=lambda pg: pg.index):
+    for page in pages:
         for panel in sorted(page.panels, key=lambda pn: pn.reading_order):
             panels.append((page.index, panel.reading_order, panel))
     if not panels:

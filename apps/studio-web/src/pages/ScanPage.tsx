@@ -626,13 +626,17 @@ export default function ScanPage() {
     }
   };
   const doSendToAnimate = async (dest: string | "new") => {
-    if (!project) return;
+    // Scoped to the open page: a new timeline must carry only this page's
+    // panels, never the rest of the project.
+    if (!project || !page) return;
     setDestScenes(null);
     setBusy("Sending panels…");
     try {
       const target = await api.autoDirect(
         project.id,
-        dest === "new" ? { seconds: 2, new_scene: true } : { seconds: 2, scene_id: dest },
+        dest === "new"
+          ? { seconds: 2, new_scene: true, page_id: page.id }
+          : { seconds: 2, scene_id: dest, page_id: page.id },
       );
       toast(
         `Sent ${target.clips.length} clip${target.clips.length === 1 ? "" : "s"} into '${target.name}' — opening Render.`,
