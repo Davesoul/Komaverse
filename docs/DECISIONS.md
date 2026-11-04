@@ -1437,3 +1437,10 @@ color-theory (cel shadow colors, light logic), manga-literacy
 - Export fit: preview shows contain (whole picture, letterboxed) but the exporter cover-cropped every still and video frame, cutting portrait stills/panel crops, with 2x-window motion unlike the stage. finish_frame now contain-fits on black, then canvas-space Ken Burns with the exact preview factors (zoom <= 1.18, +/-4% pans, black borders), so the MP4 matches the stage. cover_resize removed (dead); motion_frame kept (tested helper). 2 new tests lock letterbox geometry + motion factors.
 - Agent memory is per conversation, awareness per turn: history loads/persists by (user, project, thread) with a thread bar in the dock (dropdown + New/Delete with confirm, active thread saved per project, default thread preserves old behavior). project_id/refs/open frame ride every turn independently of the thread, so switching conversations never blinds the agent to the current project or Draw frame. Root causes fixed: the widget loaded history once globally with a global localStorage cache, and null-scope requests resolved-then-stored under different projects. thread_id column added with ALTER backfill for existing DBs. 2 new tests (scope isolation, in-thread chat).
 - Full suite 487 passed; tsc + build green; :8001 restarted (agent + models + renderer changed).
+
+
+## ADR-58: Vision defaults to muse-spark-1.3-contributor when Meta is keyed (accepted)
+
+- The contributor model was already the Meta vision default, but it never took effect: vision followed the global AI_PROVIDER (cloud/openrouter), so look_at, page reading, and the widget Vision row all ran on the chat brain instead of the multimodal model.
+- provider_for(vision) now prefers meta whenever META_API_KEY is set (env or widget-pasted key) and falls back to the global brain when unkeyed, so vision keeps working without a Meta key. Explicit vision_provider overrides still win. Verified live in config (no network): keyed resolves meta/muse-spark-1.3-contributor, unkeyed resolves the global provider.
+- 1 new test (meta-when-keyed + override-wins); config suite 20 passed; :8001 restarted.

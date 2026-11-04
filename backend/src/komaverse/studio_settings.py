@@ -89,6 +89,16 @@ def provider_for(kind: str) -> str:
         return "openrouter"
     if kind == "transcribe":
         return "meta"
+    if kind == "vision":
+        # The contributor model is multimodal and the chosen vision
+        # default: prefer Meta whenever keyed (env or widget-pasted key),
+        # otherwise stay on the global brain so vision keeps working.
+        specific = getattr(settings, "vision_provider", None)
+        if specific:
+            return specific
+        if getattr(settings, "meta_api_key", None):
+            return "meta"
+        return settings.ai_provider
     if kind == "voice":
         # Selectable, but needs a working default with no override: cloud
         # voices when keyed, otherwise the local free-tts server.

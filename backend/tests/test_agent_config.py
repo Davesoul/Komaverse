@@ -287,10 +287,21 @@ def test_provider_for_falls_back_to_global(factory, user):
     from komaverse.studio_settings import provider_for
 
     assert provider_for("chat") == "cloud"
-    assert provider_for("vision") == "cloud"
+    assert provider_for("vision") == "cloud"  # no Meta key in tests
     assert provider_for("image") == "cloud"
     assert provider_for("video") == "openrouter"
     assert provider_for("voice") == "free-tts"
+
+
+def test_provider_for_vision_prefers_meta_when_keyed(factory, user, saved_settings, monkeypatch):
+    """Vision defaults to the multimodal contributor model when keyed."""
+    from komaverse.studio_settings import provider_for
+
+    monkeypatch.setattr(settings, "vision_provider", None)
+    monkeypatch.setattr(settings, "meta_api_key", "mk-test")
+    assert provider_for("vision") == "meta"
+    monkeypatch.setattr(settings, "vision_provider", "openrouter")
+    assert provider_for("vision") == "openrouter"
 
 
 def test_agent_config_mixed_per_kind_routing(factory, user, saved_settings):
