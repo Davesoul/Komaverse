@@ -1136,7 +1136,9 @@ def tool_web_images(query, max_results=3):
 
     Returns thumbnail URLs the chat renders inline — paste them into
     the reply as bare https URLs (one per line), name what each shows,
-    and link each source page.
+    and link each source page. Each picture carries a +Media button
+    that saves it into the project as a @gen: reference — mention it
+    when the user may want to reuse one.
     """
     cleaned = (query or "").strip()
     if not cleaned:
@@ -4478,7 +4480,9 @@ _TOOLS_SCHEMA = [
                 "something looks like or wants visual references. Paste "
                 "the thumbnail URLs into your reply as bare https URLs, "
                 "one per line, so the chat shows them; say what each "
-                "shows and link its source page."
+                "shows and link its source page. Each picture has a "
+                "+Media button that saves it as a @gen: reference — "
+                "mention it when the user may want to reuse one."
             ),
             "parameters": {
                 "type": "object",

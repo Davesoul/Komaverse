@@ -867,6 +867,13 @@ export const api = {
   cancelJob: (jobId: string) =>
     req<Job>(`/api/v1/ai/jobs/${jobId}/cancel`, { method: "POST" }),
   listJobs: () => req<Job[]>("/api/v1/ai/jobs"),
+  /** Save a web research image into a project's Media (returns a done @gen:-able job). */
+  importImageToMedia: (projectId: string, url: string, title?: string) =>
+    req<Job>("/api/v1/ai/jobs/import-url", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ project_id: projectId, url, title: title ?? "" }),
+    }),
   listAiModels: () => req<AiModelCatalog>("/api/v1/ai/models"),
   listVoices: (provider: string) =>
     req<VoiceCatalog>(`/api/v1/ai/voices?provider=${encodeURIComponent(provider)}`),

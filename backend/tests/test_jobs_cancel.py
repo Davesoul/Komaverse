@@ -114,3 +114,77 @@ def test_tool_cancel_job_unknown(factory, user):
         pid = create_project(ProjectCreate(name="Cancel"), s, user).id
     with factory() as s:
         assert "not found" in tool_cancel_job(s, user, "missing000000")
+
+
+class _FakeStream:
+    def __init__(self, status=200, ctype="image/png", chunks=(b"\x89PNG" + b"0" * 100,)):
+        self.status_code = status
+        self.headers = {"content-type": ctype}
+        self._chunks = chunks
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+    def iter_bytes(self, _size=1024 * 1024):
+        yield from self._chunks
+
+
+def _seed_project(factory, user, name="Import"):
+    from komaverse.api.scans import ProjectCreate, create_project
+
+    with factory() as s:
+        return create_project(ProjectCreate(name=name), s, user).id
+
+
+def test_import_image_from_url_saves_done_job(factory, user, monkeypatch, tmp_path):
+    """Research art lands in Media as a finished image job (@gen:-able)."""
+    import komaverse.api.ai as ai_mod
+    from komaverse.api.ai import ImportImageBody, import_image_from_url
+
+    pid = _seed_project(factory, user)
+    monkeypatch.setattr(
+        ai_mod.httpx, "stream", lambda *a, **k: _FakeStream()
+    )
+    with factory() as s:
+        job = import_image_from_url(
+            ImportImageBody(project_id=pid, url="https://example.com/zoro.png", title="Zoro"),
+            s,
+            user,
+        )
+    assert job.kind == "image" and job.status == "done"
+    assert (job.result_url or "").startswith("/media/")
+    with factory() as s:
+        row = s.get(JobRow, job.id)
+        assert row.provider == "web" and row.progress == 1.0
+        assert (tmp_path / "media" / row.result_url[len("/media/"):]).exists()
+
+
+def test_import_image_rejects_non_image(factory, user, monkeypatch):
+    import komaverse.api.ai as ai_mod
+    from komaverse.api.ai import ImportImageBody, import_image_from_url
+
+    pid = _seed_project(factory, user)
+    monkeypatch.setattr(
+        ai_mod.httpx, "stream", lambda *a, **k: _FakeStream(ctype="text/html", chunks=(b"<p>no</p>",))
+    )
+    with factory() as s:
+        with pytest.raises(HTTPException) as exc:
+            import_image_from_url(ImportImageBody(project_id=pid, url="https://example.com/x"), s, user)
+    assert exc.value.status_code == 415
+
+
+def test_import_image_rejects_bad_url_and_foreign_project(factory, user):
+    from komaverse.api.ai import ImportImageBody, import_image_from_url
+
+    with factory() as s:
+        with pytest.raises(HTTPException) as exc:
+            import_image_from_url(ImportImageBody(project_id="nope00000000", url="https://example.com/x.png"), s, user)
+    assert exc.value.status_code == 404
+    pid = _seed_project(factory, user)
+    with factory() as s:
+        with pytest.raises(HTTPException) as exc2:
+            import_image_from_url(ImportImageBody(project_id=pid, url="ftp://example.com/x.png"), s, user)
+    assert exc2.value.status_code == 400

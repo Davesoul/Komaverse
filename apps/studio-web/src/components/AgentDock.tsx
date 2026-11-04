@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import {
   api,
   apiBase,
@@ -10,7 +10,7 @@ import {
 } from "../api";
 import { getCurrentProject, getDrawFrame } from "../lib/studio";
 import { probeDuration } from "../lib/audio/peaks";
-import { Btn, BusyDots, LoadingLine, MicMeter, PrimaryBtn, SelectInput, Skeleton, Spinner, StageText, TextInput } from "./ui";
+import { Btn, BusyDots, IconBtn, LoadingLine, MicMeter, PrimaryBtn, SelectInput, Skeleton, Spinner, StageText, TextInput, toast } from "./ui";
 import { prefersReducedMotion } from "./Reveal";
 
 interface Msg {
@@ -148,9 +148,49 @@ function RefToken({ kind, id }: { kind: AgentRef["kind"]; id: string }) {
   );
 }
 
-/** Inline research art: bare image URLs render as pictures, not links. */
-function ChatImage({ src }: { src: string }) {
+/** Clipboard copy with a textarea fallback (Draw ⧉ copy-ref pattern). */
+async function copyText(token: string): Promise<boolean> {
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(token);
+      return true;
+    }
+    const ta = document.createElement("textarea");
+    ta.value = token;
+    document.body.appendChild(ta);
+    ta.select();
+    document.execCommand("copy");
+    ta.remove();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Save a chat research picture into the open project's Media library.
+ * The import returns a finished image job, so the agent can reuse it
+ * as @gen:<id> anywhere: generations, look_at, draw layers, timeline. */
+async function saveResearchImage(src: string) {
+  const pid = getCurrentProject();
+  if (!pid) {
+    toast("Open a project first — research images save into its Media.", "warn");
+    return;
+  }
+  try {
+    const job = await api.importImageToMedia(pid, src, "Research image");
+    const token = `@gen:${job.id}`;
+    const copied = await copyText(token);
+    toast(copied ? `Saved to Media as ${token} — ref copied, @ it anywhere.` : `Saved to Media as ${token} — @ it anywhere.`);
+  } catch (e) {
+    toast(`Save failed: ${(e as Error).message}`, "error");
+  }
+}
+
+/** Inline research art: bare image URLs render as pictures with
++Media (save into the project library) and copy-link actions. */
+function ChatImage({ src, save, zoom }: { src: string; save?: (src: string) => void; zoom?: (src: string) => void }) {
   const [dead, setDead] = useState(false);
+  const [busy, setBusy] = useState(false);
   if (dead) {
     return (
       <a href={src} target="_blank" rel="noreferrer">
@@ -159,13 +199,59 @@ function ChatImage({ src }: { src: string }) {
     );
   }
   return (
-    <img
-      src={src}
-      alt="Research image"
-      loading="lazy"
-      onError={() => setDead(true)}
-      style={{ display: "block", maxWidth: "100%", maxHeight: 260, borderRadius: 6, margin: "6px 0", objectFit: "contain", background: "var(--kv-raised)" }}
-    />
+    <span style={{ display: "inline-block", position: "relative", maxWidth: "100%" }} className="kv-chatimg">
+      <button
+        type="button"
+        onClick={() => zoom?.(src)}
+        title={zoom ? "Open full size" : undefined}
+        aria-label={zoom ? "Open image full size" : "Research image"}
+        style={{
+          display: "block",
+          width: "100%",
+          padding: 0,
+          border: "none",
+          background: "none",
+          cursor: zoom ? "zoom-in" : "default",
+        }}
+      >
+        <img
+          src={src}
+          alt="Research image"
+          loading="lazy"
+          onError={() => setDead(true)}
+          style={{ display: "block", maxWidth: "100%", maxHeight: 260, borderRadius: 6, margin: "6px 0", objectFit: "contain", background: "var(--kv-raised)", pointerEvents: "none" }}
+        />
+      </button>
+      <span style={{ position: "absolute", right: 6, bottom: 10, display: "flex", gap: 4, opacity: 0, transition: "opacity 120ms" }} className="kv-chatimg-actions">
+        <IconBtn
+          label="Copy image link"
+          onClick={(e) => {
+            e.stopPropagation();
+            void copyText(src).then((ok) =>
+              toast(ok ? "Image link copied." : "Copy failed.", ok ? "info" : "error"),
+            );
+          }}
+        >
+          ⧉
+        </IconBtn>
+        {save ? (
+          <IconBtn
+            label="Save to Media (reuse as @gen: reference)"
+            onClick={(e) => {
+              e.stopPropagation();
+              if (busy) return;
+              setBusy(true);
+              void Promise.resolve()
+                .then(() => save(src))
+                .finally(() => setBusy(false));
+            }}
+          >
+            {busy ? "…" : "＋"}
+          </IconBtn>
+        ) : null}
+      </span>
+      <style>{`.kv-chatimg:hover .kv-chatimg-actions, .kv-chatimg:focus-within .kv-chatimg-actions { opacity: 1; }`}</style>
+    </span>
   );
 }
 
@@ -259,12 +345,12 @@ const CHAT_IMAGE_RE = /^https?:\/\/\S+\.(png|jpe?g|gif|webp|svg)([\?#\/]|$)/i;
 const WIKIMEDIA_RE = /^https?:\/\/upload\.wikimedia\.org\/\S+/i;
 const WIKIA_RE = /^https?:\/\/static\.wikia\.nocookie\.net\/\S+/i;
 
-function linked(text: string) {
+function linked(text: string, save?: (src: string) => void, zoom?: (src: string) => void) {
   const parts = text.split(/(https?:\/\/\S+|\/(?:media|api)\/\S+)/g);
   return parts.map((p, i) => {
     if (/^(https?:\/\/\S+|\/(?:media|api)\/\S+)$/.test(p)) {
       if (CHAT_IMAGE_RE.test(p) || WIKIMEDIA_RE.test(p) || WIKIA_RE.test(p)) {
-        return <ChatImage key={i} src={p} />;
+        return <ChatImage key={i} src={p} save={save} zoom={zoom} />;
       }
       return (
         <a
@@ -288,6 +374,143 @@ function linked(text: string) {
       </span>
     );
   });
+}
+
+/** Minimal chat markdown: fences, headings, lists, quotes, bold/italic/code.
+ * XSS-safe by construction — React elements only, never raw HTML.
+ * URLs and @kind:id tokens still route through linked(). */
+function inlineMd(text: string, save?: (src: string) => void, key = "", zoom?: (src: string) => void) {
+  const parts = text.split(/(`[^`\n]+`|\*\*[^*\n]+\*\*|\*[^*\n]+\*)/g);
+  return parts.map((p, i) => {
+    const k = `${key}i${i}`;
+    if (p.length > 2 && p.startsWith("`") && p.endsWith("`")) {
+      return (
+        <code key={k} style={{ background: "var(--kv-raised)", borderRadius: 4, padding: "0 4px", fontSize: "0.92em" }}>
+          {p.slice(1, -1)}
+        </code>
+      );
+    }
+    if (p.length > 4 && p.startsWith("**") && p.endsWith("**")) {
+      return <strong key={k}>{linked(p.slice(2, -2), save, zoom)}</strong>;
+    }
+    if (p.length > 2 && p.startsWith("*") && p.endsWith("*")) {
+      return <em key={k}>{linked(p.slice(1, -1), save, zoom)}</em>;
+    }
+    return <span key={k}>{linked(p, save, zoom)}</span>;
+  });
+}
+
+function md(text: string, save?: (src: string) => void, zoom?: (src: string) => void) {
+  const out: ReactNode[] = [];
+  let k = 0;
+  const chunks = text.split(/(```[\s\S]*?(?:```|$))/g);
+  for (const c of chunks) {
+    if (c.startsWith("```")) {
+      const body = c
+        .replace(/^```[a-zA-Z0-9_-]*\n?/, "")
+        .replace(/```\s*$/, "")
+        .replace(/\n$/, "");
+      out.push(
+        <pre
+          key={k++}
+          style={{ background: "var(--kv-inset)", borderRadius: 6, padding: "8px 10px", overflowX: "auto", fontSize: "0.9em", margin: "6px 0" }}
+        >
+          <code>{body}</code>
+        </pre>,
+      );
+      continue;
+    }
+    const lines = c.split("\n");
+    let i = 0;
+    const para: string[] = [];
+    const flushPara = () => {
+      if (para.length === 0) return;
+      out.push(
+        <p key={k++} style={{ margin: "4px 0" }}>
+          {para.map((ln, li) => (
+            <span key={li}>
+              {li > 0 ? <br /> : null}
+              {inlineMd(ln, save, `${k}-${li}-`, zoom)}
+            </span>
+          ))}
+        </p>,
+      );
+      para.length = 0;
+    };
+    while (i < lines.length) {
+      const line = lines[i];
+      if (/^\s*$/.test(line)) {
+        flushPara();
+        i++;
+        continue;
+      }
+      let m: RegExpExecArray | null;
+      if ((m = /^(#{1,3})\s+(.*)$/.exec(line))) {
+        flushPara();
+        const size = m[1].length === 1 ? "1.05em" : m[1].length === 2 ? "1em" : "0.95em";
+        out.push(
+          <div key={k++} style={{ fontWeight: 700, fontSize: size, margin: "8px 0 4px" }}>
+            {inlineMd(m[2], save, `${k}-h-`, zoom)}
+          </div>,
+        );
+        i++;
+      } else if (/^\s*([-*])\s+/.test(line)) {
+        flushPara();
+        const items: string[] = [];
+        while (i < lines.length && /^\s*([-*])\s+/.test(lines[i])) {
+          items.push(lines[i].replace(/^\s*([-*])\s+/, ""));
+          i++;
+        }
+        out.push(
+          <ul key={k++} style={{ margin: "4px 0", paddingLeft: 20 }}>
+            {items.map((it, ii) => (
+              <li key={ii}>{inlineMd(it, save, `${k}-u${ii}-`, zoom)}</li>
+            ))}
+          </ul>,
+        );
+      } else if (/^\s*\d+[.)]\s+/.test(line)) {
+        flushPara();
+        const items: string[] = [];
+        while (i < lines.length && /^\s*\d+[.)]\s+/.test(lines[i])) {
+          items.push(lines[i].replace(/^\s*\d+[.)]\s+/, ""));
+          i++;
+        }
+        out.push(
+          <ol key={k++} style={{ margin: "4px 0", paddingLeft: 20 }}>
+            {items.map((it, ii) => (
+              <li key={ii}>{inlineMd(it, save, `${k}-o${ii}-`, zoom)}</li>
+            ))}
+          </ol>,
+        );
+      } else if (/^>\s?/.test(line)) {
+        flushPara();
+        const items: string[] = [];
+        while (i < lines.length && /^>\s?/.test(lines[i])) {
+          items.push(lines[i].replace(/^>\s?/, ""));
+          i++;
+        }
+        out.push(
+          <div key={k++} style={{ borderLeft: "3px solid var(--kv-accent)", paddingLeft: 8, margin: "4px 0", color: "var(--kv-muted)" }}>
+            {items.map((it, ii) => (
+              <span key={ii}>
+                {ii > 0 ? <br /> : null}
+                {inlineMd(it, save, `${k}-q${ii}-`, zoom)}
+              </span>
+            ))}
+          </div>,
+        );
+      } else if (/^\s*---\s*$/.test(line)) {
+        flushPara();
+        out.push(<hr key={k++} style={{ border: "none", borderTop: "1px solid var(--kv-border-strong)", margin: "8px 0" }} />);
+        i++;
+      } else {
+        para.push(line);
+        i++;
+      }
+    }
+    flushPara();
+  }
+  return out;
 }
 
 /** Tools-and-skills trace: open while streaming, collapsed when done. */
@@ -1949,7 +2172,7 @@ export default function AgentDock() {
                     <Skeleton width={120} height={12} />
                   </span>
                 ) : (
-                  linked(m.text)
+                  md(m.text, saveResearchImage, setLightbox)
                 )}
                 {m.role === "agent" && (m.brain || m.cloud_error) && (
                   <div

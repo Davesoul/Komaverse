@@ -4,6 +4,7 @@ frames are scoped to the current user."""
 from __future__ import annotations
 
 import base64
+import httpx
 import io
 import json
 import logging
@@ -631,6 +632,89 @@ def cancel_job(
     row.status = "cancelled"
     session.commit()
     return row.to_schema()
+
+
+#: Cap for research-image imports: chat art is reference material, and
+#: the downloader bounds RAM to cap + one chunk either way.
+MAX_IMPORT_IMAGE_BYTES = 10 * 1024 * 1024
+
+_IMPORT_EXT = {
+    "image/png": ".png",
+    "image/jpeg": ".jpg",
+    "image/webp": ".webp",
+    "image/gif": ".gif",
+    "image/svg+xml": ".svg",
+    "image/avif": ".avif",
+}
+
+
+class ImportImageBody(BaseModel):
+    project_id: str = ""
+    url: str = ""
+    title: str = ""
+
+
+@router.post("/ai/jobs/import-url", response_model=Job, status_code=201)
+def import_image_from_url(
+    body: ImportImageBody,
+    session: Session = Depends(get_session),
+    user: UserRow = Depends(get_current_user),
+):
+    """Save a web research image into the project's media library.
+
+    Downloads the URL server-side (capped, image/* only) and records a
+    finished image job (provider "web"), so the picture shows in Media
+    and is referenceable as @gen:<id> like any other generation.
+    """
+    ensure_owner(session, user, (body.project_id or "").strip())
+    cleaned = (body.url or "").strip()
+    if not cleaned.startswith("http://") and not cleaned.startswith("https://"):
+        raise HTTPException(400, "import needs an http(s) image URL")
+    try:
+        with httpx.stream(
+            "GET",
+            cleaned,
+            timeout=30.0,
+            follow_redirects=True,
+            headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36"},
+        ) as resp:
+            if resp.status_code >= 400:
+                raise HTTPException(400, f"download failed: HTTP {resp.status_code}")
+            ctype = (resp.headers.get("content-type") or "").split(";")[0].strip().lower()
+            if not ctype.startswith("image/"):
+                raise HTTPException(415, f"not an image ({ctype or 'unknown type'})")
+            buf = bytearray()
+            for piece in resp.iter_bytes(1024 * 1024):
+                buf += piece
+                if len(buf) > MAX_IMPORT_IMAGE_BYTES:
+                    raise HTTPException(413, "image too large (max 10 MB)")
+            data = bytes(buf)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(400, f"download failed: {type(exc).__name__}") from exc
+    if not data:
+        raise HTTPException(400, "download failed: empty body")
+    from urllib.parse import urlparse
+
+    stem = urlparse(cleaned).path.rsplit("/", 1)[-1][:60] or "research-image"
+    if "." not in stem:
+        stem += _IMPORT_EXT.get(ctype, ".img")
+    _rel, url = storage.save_upload(body.project_id.strip(), stem, data)
+    title = (body.title or "").strip()[:160] or f"Research image ({urlparse(cleaned).netloc})"
+    job = JobRow(
+        user_id=user.id,
+        project_id=body.project_id.strip(),
+        kind="image",
+        prompt=title,
+        provider="web",
+        status="done",
+        progress=1.0,
+        result_url=url,
+    )
+    session.add(job)
+    session.commit()
+    return job.to_schema()
 
 
 @router.get("/ai/models")
