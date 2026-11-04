@@ -1444,3 +1444,10 @@ color-theory (cel shadow colors, light logic), manga-literacy
 - The contributor model was already the Meta vision default, but it never took effect: vision followed the global AI_PROVIDER (cloud/openrouter), so look_at, page reading, and the widget Vision row all ran on the chat brain instead of the multimodal model.
 - provider_for(vision) now prefers meta whenever META_API_KEY is set (env or widget-pasted key) and falls back to the global brain when unkeyed, so vision keeps working without a Meta key. Explicit vision_provider overrides still win. Verified live in config (no network): keyed resolves meta/muse-spark-1.3-contributor, unkeyed resolves the global provider.
 - 1 new test (meta-when-keyed + override-wins); config suite 20 passed; :8001 restarted.
+
+
+## ADR-59: Delegation rides the turn, not the subject line (ask-loop fix)
+
+- The loop returned: user says 'go', the model says 'generating now', then the create_video tool answers 'I need 3 details' because the ask gate only read the tool prompt (bare subject, no 'go' in it). Asking is now the turn layer's job alone: both create tools take a delegated flag, set from the user's turn message by the demo callers and the cloud executor, so a delegated turn generates with defaults on every path and an undelegated one still asks (contract kept, existing tests untouched).
+- 'defaults' itself is now a delegation word ('use defaults', 'go means defaults'), matching the ask copy that already offers per-piece defaults.
+- 1 new test replays the exact loop (subject-only tool call + 'go' turn message generates via tool and via _exec_cloud_tool; same subject without delegation still asks); agent + memory suites 122 passed, full suite 489 passed; :8001 restarted.

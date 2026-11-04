@@ -375,7 +375,7 @@ _DELEGATED_RE = re.compile(
     r"\bgo\b"
     r"|\b(decide|whatever|you\s+choose|your\s+call|go\s+ahead|surprise\s+me|"
     r"i\s+don'?t\s+mind|up\s+to\s+you|use\s+whatever|your\s+choice|"
-    r"you\s+decide|as\s+you\s+like|dealers?\s+choice)\b",
+    r"you\s+decide|as\s+you\s+like|dealers?\s+choice|defaults?)\b",
     re.IGNORECASE,
 )
 
@@ -1735,6 +1735,7 @@ def tool_generate(
     width=None,
     height=None,
     attach_frame: bool = False,
+    delegated: bool = False,
 ) -> str:
     raw = prompt or ""
     prompt = clean_prompt_text(raw)
@@ -1757,7 +1758,7 @@ def tool_generate(
             "the request names no style",
             "a style, e.g. shonen manga, photoreal, watercolor",
         ))
-    if missing and not _delegates_decisions(raw):
+    if missing and not (delegated or _delegates_decisions(raw)):
         return _ask_before_generating("create_image", missing)
     refs = _generation_references(raw, references, fallback_references)
     snaps, notes = gather_reference_snapshots(session, user, project_id, prompt, refs, entity_ids)
@@ -1853,6 +1854,7 @@ def tool_create_video(
     genre: str = "none",
     fallback_references=None,
     size: str | None = None,
+    delegated: bool = False,
 ) -> str:
     """Start an async OpenRouter video job; watch it with check_job.
 
@@ -1908,7 +1910,7 @@ def tool_create_video(
             "the request names no style",
             "a style, e.g. anime, cinematic, photorealistic",
         ))
-    if missing and not _delegates_decisions(raw):
+    if missing and not (delegated or _delegates_decisions(raw)):
         return _ask_before_generating("create_video", missing)
     refs = _generation_references(raw, references, fallback_references)
     snaps, notes = gather_reference_snapshots(session, user, project_id, prompt, refs, entity_ids)
@@ -4073,6 +4075,7 @@ def demo_turn(
             job_factory,
             fallback_references=fallback_references,
             size=_size_str(_parse_video_size(message)),
+            delegated=_delegates_decisions(message),
         )
         if any(k in text for k in TIMELINE_WORDS):
             reply += " When it is done, say 'add the video to the timeline'."
@@ -4086,7 +4089,7 @@ def demo_turn(
         if not prompt:
             reply = 'Tell me what to generate and add - e.g. "generate a moonlit robot and add it to the timeline".'
         else:
-            reply = run("create_image", tool_generate, session, user, project_id, prompt, job_factory, fallback_references=fallback_references, attach_frame=True)
+            reply = run("create_image", tool_generate, session, user, project_id, prompt, job_factory, fallback_references=fallback_references, attach_frame=True, delegated=_delegates_decisions(message))
             m = re.search(r"\[frame ([A-Za-z0-9_-]+)\]", actions[-1]["summary"])
             if not m:
                 reply += " I could not place it on the timeline - say which frame to add."
@@ -5221,6 +5224,7 @@ def _exec_cloud_tool(
                 fallback_references=turn_references,
                 width=args.get("width"), height=args.get("height"),
                 attach_frame=bool(args.get("attach_frame")),
+                delegated=_delegates_decisions(message),
             )
         elif name == "create_video":
             try:
@@ -5240,6 +5244,7 @@ def _exec_cloud_tool(
                 str(args.get("genre") or "none"),
                 fallback_references=turn_references,
                 size=args.get("size") if isinstance(args.get("size"), str) else None,
+                delegated=_delegates_decisions(message),
             )
             if args.get("generate_audio"):
                 result += " (Model sound stays off even when asked: the video renders silent.)"

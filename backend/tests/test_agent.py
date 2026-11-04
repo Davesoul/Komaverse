@@ -1624,6 +1624,43 @@ def test_generation_delegation_skips_questions(factory, user, monkeypatch):
     assert "Before generating I need" not in summary
 
 
+def test_generation_loop_delegation_rides_the_turn(factory, user, monkeypatch):
+    """The reported loop: user says 'go', the model calls create_video with
+    the bare subject, and the tool re-asks because 'go' is not in the
+    subject line. Delegation must ride the turn message, not the prompt."""
+    from komaverse import agent as agent_mod
+    from komaverse.agent import tool_create_video
+
+    assert agent_mod._delegates_decisions("go means defaults — generating it now")
+    assert agent_mod._delegates_decisions("use defaults")
+    pid = seed_project(factory, user)
+    monkeypatch.setattr(settings, "openrouter_api_key", "test-key")
+    # Subject-only prompt + delegated turn message: generates, never asks.
+    with factory() as s:
+        summary = tool_create_video(
+            s, user, pid, "colored video of the page", 4.0, None, factory,
+            delegated=True,
+        )
+    assert "Video job started" in summary
+    assert "Before generating I need" not in summary
+    # Same subject, no delegation anywhere: still asks (contract kept).
+    with factory() as s:
+        asked = tool_create_video(
+            s, user, pid, "colored video of the page", 4.0, None, factory,
+        )
+    assert "Before generating I need" in asked
+    # Cloud executor path: the user's 'go' authorizes the model's
+    # subject-only tool call.
+    with factory() as s:
+        out = agent_mod._exec_cloud_tool(
+            "create_video", {"prompt": "colored video of the page"},
+            message="go", session=s, user=user, project_id=pid,
+            job_factory=factory,
+        )
+    assert "Video job started" in out
+    assert "Before generating I need" not in out
+
+
 def test_generation_guidance_reuses_context():
     """Look/skill guidance must exempt what the conversation already saw:
     re-reading the same ref or skill every turn burns steps for nothing."""
