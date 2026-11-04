@@ -281,6 +281,15 @@ def test_model_catalog_serves_chat_options(factory, user):
     # Existing sections untouched.
     assert [m["id"] for m in out["image"]][0] == "black-forest-labs/flux-3-image-klein"
     assert [m["id"] for m in out["video"]][0] == "bytedance/seedance-2.0"
+    for wanted in (
+        "heygen/heygen-video-1",
+        "minimax/hailuo-3-max",
+        "alibaba/wan-3.0-prime",
+        "bytedance/seedance-2.0-mini",
+        "bytedance/seedance-2.0-fast",
+        "alibaba/wan-2.6",
+    ):
+        assert wanted in [m["id"] for m in out["video"]], wanted
 
 
 def test_provider_for_falls_back_to_global(factory, user):

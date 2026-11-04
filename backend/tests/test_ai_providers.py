@@ -608,6 +608,11 @@ def test_ai_models_catalog(factory, user):
         "bytedance/seedance-2.0",
         "google/veo-3.1",
         "alibaba/wan-2.6",
+        "bytedance/seedance-2.0-mini",
+        "bytedance/seedance-2.0-fast",
+        "alibaba/wan-3.0-prime",
+        "minimax/hailuo-3-max",
+        "heygen/heygen-video-1",
     ]
     assert out["defaults"]["image"] == settings.openrouter_image_model
 

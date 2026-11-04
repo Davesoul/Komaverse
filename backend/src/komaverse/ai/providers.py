@@ -1226,6 +1226,11 @@ OPENROUTER_VIDEO_MODELS = (
     {"id": "bytedance/seedance-2.0", "label": "Seedance 2.0", "badge": "popular", "maker": "ByteDance"},
     {"id": "google/veo-3.1", "label": "Veo 3.1", "badge": "popular", "maker": "Google"},
     {"id": "alibaba/wan-2.6", "label": "Wan 2.6", "badge": "cheap", "maker": "Alibaba"},
+    {"id": "bytedance/seedance-2.0-mini", "label": "Seedance 2.0 Mini", "badge": "fast", "maker": "ByteDance"},
+    {"id": "bytedance/seedance-2.0-fast", "label": "Seedance 2.0 Fast", "badge": "fast", "maker": "ByteDance"},
+    {"id": "alibaba/wan-3.0-prime", "label": "Wan 3.0 Prime", "badge": "new", "maker": "Alibaba"},
+    {"id": "minimax/hailuo-3-max", "label": "Hailuo 3 Max", "badge": "new", "maker": "MiniMax"},
+    {"id": "heygen/heygen-video-1", "label": "HeyGen Video 1", "badge": "new", "maker": "HeyGen"},
 )
 
 # Verified chat/vision options per provider: ids confirmed against the live
