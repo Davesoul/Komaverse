@@ -333,6 +333,48 @@ DURATION_RE = re.compile(
     r"\b(short|shorter|long|longer|brief|quick|duration|seconds?|minutes?|extended|condensed)\b",
     re.IGNORECASE,
 )
+#: Sound words in a video request. The video model renders silent — sound
+#: is a voiceover take or timeline audio instead, so these always ask.
+SOUND_RE = re.compile(
+    r"\b(with|with\s+the|add|include|including)\s+(sound|music|audio|song|narration|voiceover|voices?|dialogue|sfx)\b"
+    r"|\b(soundtrack|background\s+music|theme\s+song|talking|speaking|saying\s+something)\b",
+    re.IGNORECASE,
+)
+#: Resolution tiers + explicit WxH for video size (None = provider default).
+VIDEO_RES_RE = re.compile(r"\b(480p|720p|1080p|full\s*hd|4k|uhd)\b", re.IGNORECASE)
+VIDEO_SIZE_RE = re.compile(r"\b(\d{3,4})\s*[x×]\s*(\d{3,4})\b")
+
+
+def _parse_video_size(text: str) -> tuple[int, int] | None:
+    """(w, h) from explicit WxH or a res tier + orientation.
+
+    None means provider default (cheapest): the call sends no size.
+    """
+    m = VIDEO_SIZE_RE.search(text or "")
+    if m:
+        w, h = int(m.group(1)), int(m.group(2))
+        if 64 <= w <= 3840 and 64 <= h <= 3840:
+            return (w, h)
+        return None
+    m = VIDEO_RES_RE.search(text or "")
+    if not m:
+        return None
+    tier = m.group(1).lower().replace(" ", "")
+    if tier == "fullhd":
+        tier = "1080p"
+    t = (text or "").lower()
+    if "1:1" in t or "square" in t:
+        return {"480p": (480, 480), "720p": (720, 720), "1080p": (1080, 1080),
+                "4k": (2160, 2160), "uhd": (2160, 2160)}[tier]
+    if bool(_TALL_HINT_RE.search(text or "")) or "9:16" in t:
+        return {"480p": (480, 854), "720p": (720, 1280), "1080p": (1080, 1920),
+                "4k": (2160, 3840), "uhd": (2160, 3840)}[tier]
+    return {"480p": (854, 480), "720p": (1280, 720), "1080p": (1920, 1080),
+            "4k": (3840, 2160), "uhd": (3840, 2160)}[tier]
+
+
+def _size_str(size: tuple[int, int] | None) -> str | None:
+    return f"{size[0]}x{size[1]}" if size else None
 #: Style talk: "in the style of X" carries its value, the rest may not.
 STYLE_TALK_RE = re.compile(
     r"\bstyles?\b|\bstylish\b|\bstyliz(?:ed|ing)\b|\bstylis(?:ed|ing)\b",
@@ -1349,8 +1391,13 @@ def tool_create_video(
     entity_ids=None,
     genre: str = "none",
     fallback_references=None,
+    size: str | None = None,
 ) -> str:
-    """Start an async OpenRouter video job; watch it with check_job."""
+    """Start an async OpenRouter video job; watch it with check_job.
+
+    Video renders silent by design (sound comes from voiceover takes
+    or timeline audio); size is WxH or None for the provider default.
+    """
     raw = prompt or ""
     prompt = clean_prompt_text(raw)
     if not prompt:
@@ -1365,6 +1412,34 @@ def tool_create_video(
             "duration",
             f"the request says '{dur}' but no length",
             "a number of seconds, e.g. 2, 4, or 8",
+        ))
+    elif seconds == 4.0 and parse_seconds(raw) is None:
+        missing.append((
+            "duration",
+            "the request names no length (default 4 seconds)",
+            "a number of seconds, e.g. 2, 4, or 8",
+        ))
+    if size is None and _parse_ratio(raw) is None:
+        orient = _missing_orientation(raw, None, None)
+        detail = "the request names no framing"
+        if orient:
+            detail = f"the request says '{orient}' but no usable format"
+        missing.append((
+            "ratio",
+            detail,
+            "16:9 landscape, 9:16 portrait, or 1:1 square",
+        ))
+    if size is None and _parse_video_size(raw) is None and not VIDEO_RES_RE.search(raw):
+        missing.append((
+            "resolution",
+            "the request names no resolution",
+            "provider default (cheapest), 720p, or 1080p",
+        ))
+    if SOUND_RE.search(raw):
+        missing.append((
+            "sound",
+            "the request mentions sound, but the video model renders silent",
+            "no model sound: a voiceover take (synthesize_voice) or timeline audio instead",
         ))
     if _missing_style(raw, "none", genre, locked):
         missing.append((
@@ -1393,6 +1468,7 @@ def tool_create_video(
         if get_balance(session, user.id) < cost:
             return f"Not enough credits (need {cost})."
         add_entry(session, user.id, -cost, "video generation")
+    dims = _parse_video_size(size or "") or _parse_video_size(raw) or (0, 0)
     job = JobRow(
         user_id=user.id,
         project_id=project_id,
@@ -1401,8 +1477,8 @@ def tool_create_video(
         provider=provider,
         model=model,
         seconds=seconds,
-        width=320,
-        height=240,
+        width=dims[0],
+        height=dims[1],
         attach_frame=False,
         genre=genre or "none",
         entities_json=json.dumps(snaps),
@@ -1411,8 +1487,13 @@ def tool_create_video(
     session.commit()
     threading.Thread(target=run_ai_job, args=(job.id, job_factory), daemon=True).start()
     ref_bit = f" with {len(snaps)} reference(s)" if snaps else ""
+    size_bit = f" at {_size_str(dims)}" if dims != (0, 0) else " at provider-default resolution"
     note_bit = (" " + " ".join(notes)) if notes else ""
-    return f"Video job started [job {job.id}]{ref_bit} - check it with check_job.{note_bit}"
+    return (
+        f"Video job started [job {job.id}]{ref_bit}{size_bit}, silent by design - "
+        f"check it with check_job.{note_bit} Add sound with a voiceover take "
+        f"(synthesize_voice) or timeline audio."
+    )
 
 
 def tool_check_job(session: Session, user: UserRow, job_id: str) -> str:
@@ -2160,7 +2241,8 @@ def tool_transcribe_audio(
     except ProviderError as exc:
         return f"Transcription failed: {exc}"
     record_usage(
-        session, user.id, "transcribe", settings.meta_transcribe_model, len(res.get("transcript") or "") // 4
+        session, user.id, "transcribe", settings.meta_transcribe_model, len(res.get("transcript") or "") // 4,
+        project_id=project_id or "",
     )
     transcript = (res.get("transcript") or "").strip()
     turns = [t for t in (res.get("turns") or []) if str(t.get("transcript") or "").strip()]
@@ -3505,6 +3587,7 @@ def demo_turn(
             None,
             job_factory,
             fallback_references=fallback_references,
+            size=_size_str(_parse_video_size(message)),
         )
         if any(k in text for k in TIMELINE_WORDS):
             reply += " When it is done, say 'add the video to the timeline'."
@@ -4010,7 +4093,9 @@ _TOOLS_SCHEMA = [
                 "type": "object",
                 "properties": {
                     "prompt": {"type": "string", "description": "Clean scene text, no @-mentions. Fold the thread's framing answer into the scene words ('wide 16:9 framing' or 'vertical 9:16 framing')."},
-                    "seconds": {"type": "number", "description": "Honor the thread's duration answer in seconds."},
+                    "seconds": {"type": "number", "description": "Honor the thread's duration answer in seconds (Seedance bills per second; default 4)."},
+                    "size": {"type": "string", "description": "Honor the thread's resolution answer as WxH (1280x720, 720x1280, 1920x1080...). Omit for the provider default (cheapest)."},
+                    "generate_audio": {"type": "boolean", "description": "Always false or omitted: the video model renders silent. Dialogue and music come from synthesize_voice takes and timeline audio, never the video model."},
                     "model": {"type": "string"},
                     "genre": {"type": "string"},
                     "references": {"type": "array", "description": "[{kind, id}] for user-mentioned refs to reuse. Omit otherwise."},
@@ -4551,7 +4636,10 @@ def _exec_cloud_tool(
                 args.get("entity_ids"),
                 str(args.get("genre") or "none"),
                 fallback_references=turn_references,
+                size=args.get("size") if isinstance(args.get("size"), str) else None,
             )
+            if args.get("generate_audio"):
+                result += " (Model sound stays off even when asked: the video renders silent.)"
         elif name == "list_takes":
             result = tool_list_takes(session, user, project_id)
         elif name == "add_cue":
@@ -4765,7 +4853,7 @@ def _cloud_loop(
                     "\n\n[The model hit its response limit \u2014 say 'continue' "
                     "and I'll pick up where I left off.]"
                 )
-            record_usage(session, user.id, "chat", model, total_tokens or (len(message) + len(reply_text)) // 4)
+            record_usage(session, user.id, "chat", model, total_tokens or (len(message) + len(reply_text)) // 4, project_id=project_id or "")
             yield {"type": "result", "reply": reply_text, "actions": actions}
             return
         messages.append(msg)
@@ -4797,7 +4885,7 @@ def _cloud_loop(
                     "content": result[:2000],
                 }
             )
-    record_usage(session, user.id, "chat", model, total_tokens or (len(message) + 40) // 4)
+    record_usage(session, user.id, "chat", model, total_tokens or (len(message) + 40) // 4, project_id=project_id or "")
     yield {"type": "result", "reply": "I ran out of steps \u2014 try a smaller request.", "actions": actions}
 
 def _resolve_turn(message, project_id, session, user, current_frame_id, refs):
@@ -4824,7 +4912,7 @@ def _resolve_turn(message, project_id, session, user, current_frame_id, refs):
                         cname = get_project(created, session, user).name
                     except HTTPException:
                         created = None
-                record_usage(session, user.id, "chat", "demo", (len(message) + len(summary)) // 4)
+                record_usage(session, user.id, "chat", "demo", (len(message) + len(summary)) // 4, project_id=created or "")
                 return {"early": {
                     "reply": summary,
                     "project_id": created,
@@ -4980,7 +5068,8 @@ def _resolve_turn(message, project_id, session, user, current_frame_id, refs):
         # not to media generation — never interrogate those.
         if gen_kind and not _wants_draw_shape((message or "").lower()):
             # Cost-relevant dimensions are always confirmed when blank:
-            # format + quality for images, duration + framing for video.
+            # format + quality for images, duration + framing + resolution
+            # + sound for video (sound defaults off: voiceover/timeline).
             # A usable value in the text skips its question; "go" takes
             # the stated defaults (today's silent behavior), so the
             # answer turn needs no new machinery — the model reads the
@@ -5025,6 +5114,12 @@ def _resolve_turn(message, project_id, session, user, current_frame_id, refs):
                 if not _composition_hint(message or ""):
                     missing.append("framing — landscape 16:9 or portrait 9:16")
                     go.append("default framing")
+                if _parse_video_size(message or "") is None and not VIDEO_RES_RE.search(message or ""):
+                    missing.append("resolution — provider default (cheapest), 720p, or 1080p")
+                    go.append("provider default")
+                if SOUND_RE.search(message or ""):
+                    missing.append("sound — the video model renders silent, so say 'no model sound' and use a voiceover take or timeline audio instead")
+                    go.append("no model sound")
             locked = _locked_style(session, user, target)
             if _missing_style(message, "none", "none", locked):
                 missing.append(
@@ -5146,7 +5241,7 @@ def run_agent_turn_stream(
             "summary": action.get("summary"),
         }
     yield {"type": "text", "text": reply}
-    record_usage(session, user.id, "chat", "demo", (len(message) + len(reply)) // 4)
+    record_usage(session, user.id, "chat", "demo", (len(message) + len(reply)) // 4, project_id=target or "")
     yield {
         "type": "result",
         **_finish_turn(target, session, user, reply, actions, "demo", cloud_error),
@@ -5228,6 +5323,6 @@ def run_agent_turn(
         message, target, session, user, job_factory, clip_seconds, ref_context,
         history, fallback_references=refs,
     )
-    record_usage(session, user.id, "chat", "demo", (len(message) + len(reply)) // 4)
+    record_usage(session, user.id, "chat", "demo", (len(message) + len(reply)) // 4, project_id=target or "")
     return _finish_turn(target, session, user, reply, actions, "demo", cloud_error)
 

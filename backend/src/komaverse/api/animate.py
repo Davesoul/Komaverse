@@ -1728,7 +1728,7 @@ def run_export_job(job_id: str, factory=None) -> None:
             job.error = str(exc)
             session.commit()
             metrics.record_job("failed")
-            record_usage(session, job.user_id, "export", "failed")
+            record_usage(session, job.user_id, "export", "failed", project_id=job.project_id or "")
             return
         except Exception as exc:  # noqa: BLE001 — job must never hang
             session.expire(job, ["status"])
@@ -1738,7 +1738,7 @@ def run_export_job(job_id: str, factory=None) -> None:
             job.error = f"unexpected: {exc}"
             session.commit()
             metrics.record_job("failed")
-            record_usage(session, job.user_id, "export", "failed")
+            record_usage(session, job.user_id, "export", "failed", project_id=job.project_id or "")
             return
         session.expire(job, ["status"])
         if job.status == "cancelled":
@@ -1772,6 +1772,7 @@ def run_export_job(job_id: str, factory=None) -> None:
             "export",
             f"{out['width']}x{out['height']}@{out['fps']}",
             max(1, round(out["duration_sec"] * out["fps"])),
+            project_id=job.project_id or "",
         )
 
 

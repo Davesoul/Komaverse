@@ -12,10 +12,17 @@ started Oct 28, 2026.
 ## Try it (judges — sign in with the demo account)
 
 - Open the app and **Sign in**: `demo@komaverse.local` /
-  `demo1234`. The account is created automatically on startup
-  (or sign up with any email — accounts live on that server).
-- Set `KOMA_SEED_DEMO=false` on a public deploy that must not
-  carry a known-password account.
+  `demo1234`. No signup needed, no email verification.
+- The account is created automatically on **every** backend
+  start (`./scripts/dev.ps1`, `./scripts/start.ps1`, plain
+  `uvicorn`, Docker) when `KOMA_SEED_DEMO` is on (default) and
+  the email is not taken — cloning the repo and starting it is
+  enough. Set `KOMA_SEED_DEMO=false` on a public deploy that
+  must not carry a known-password account.
+- Want demo content too? From `backend/` with the venv active:
+  `python scripts/seed_demo.py` loads a Demo project (manga
+  page, detected panels, clips, credits, export). Re-running is
+  safe (existing user is reused).
 - Everything except paid AI works with zero keys: scan, panel
   detection, draw, timeline, subtitles, local voice cloning and
   local TTS, MP4 export.
@@ -88,7 +95,9 @@ started Oct 28, 2026.
   dev grants (no Stripe in v1)
 - **Usage dashboard:** Home tab section with requests/calls, estimated
   tokens, and credits over 7/30/90 days or all time — per activity and
-  model (`GET /api/v1/usage/summary?days=`), with daily activity bars
+  model, and per project (`GET /api/v1/usage/summary?days=` with an
+  optional `project_id` filter; the card lists a By-project table and
+  filters to one project on click), with daily activity bars
 - **Cross-platform:** PWA web app (installable, app-shell offline) + Tauri 2
   desktop shell (Windows/macOS/Linux), remote-API base URL setting
 - **Auth & security:** register/login/logout, per-user projects, rate limits,
@@ -207,23 +216,22 @@ docker run -p 8000:8000 -v komaverse-data:/data komaverse
 # rescan, otherwise detection falls back to fast heuristics
 ```
 
-Open http://localhost:8000, create an account, paste keys in the
-agent Brain panel, and generate. Data (DB, uploads, model caches)
-persists in the `komaverse-data` volume.
+Open http://localhost:8000 and sign in with the demo account
+(`demo@komaverse.local` / `demo1234`, auto-created on startup),
+paste keys in the agent Brain panel, and generate. Data (DB,
+uploads, model caches) persists in the `komaverse-data` volume.
 
 ## Demo login
-
-Seeded by `python scripts/seed_demo.py` (from `backend/` with the venv
-active) — creates the user plus a Demo project with a manga page,
-detected panels, clips, credits, and an export. Re-running is safe
-(existing user is reused).
 
 - Email: `demo@komaverse.local`
 - Password: `demo1234`
 
-Sign in from the landing page (Sign in button, or Create →
-sign in). Registering a new account also works — auth is fully local,
-no email verification.
+The account is seeded automatically on every backend start (see
+"Try it" above); `python scripts/seed_demo.py` (from `backend/`
+with the venv active) additionally loads a Demo project with a
+manga page, detected panels, clips, credits, and an export.
+Registering a new account also works — auth is fully local, no
+email verification.
 
 ## AI providers
 
@@ -251,7 +259,10 @@ via `PUT /api/v1/agent/config`.
 - **Video (OpenRouter):** video jobs (`kind=video`, 25 credits) submit
   async to `POST /videos` (Seedance 2.0, Veo 3.1, Wan 2.6) and poll
   `polling_url` to `completed` — Meta has no video-generation model,
-  so `meta` video jobs fail fast with a routing hint.
+  so `meta` video jobs fail fast with a routing hint. Renders are
+  silent by design (sound comes from voiceover takes / timeline
+  audio); the agent asks duration, ratio, and resolution up front,
+  defaulting to 4s + provider-default resolution.
 - **Voice transcription (Muse Voice Transcribe):** `META_TRANSCRIBE_MODEL`
   (`muse-voice-transcribe-1.0`) transcribes any take from the Media
   tab (`POST /api/v1/audio/{id}/transcribe`, turn-level timings) or via
@@ -310,7 +321,7 @@ with `KOMAVERSE_MCP_USER` in the environment. Claude Desktop
 ## Tests
 
 ```bash
-cd backend && python -m pytest -q     # 375 tests, no sockets needed
+cd backend && python -m pytest -q     # 455 tests, no sockets needed
 cd ../apps/studio-web && npx tsc --noEmit && npm run build
 ```
 

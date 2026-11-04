@@ -87,6 +87,42 @@ def test_chat_turn_records_usage(factory, user):
     assert len(rows) == before + 1
     assert rows[-1].kind == "chat"
     assert rows[-1].tokens and rows[-1].tokens > 0
+    assert rows[-1].project_id == pid
+
+
+def test_usage_summary_splits_by_project(factory, user):
+    from fastapi import HTTPException
+
+    from conftest import create_user
+    from komaverse.api.usage import record_usage, summarize, usage_summary
+
+    pid = seed_project(factory, user, name="First")
+    other = seed_project(factory, user, name="Second")
+    with factory() as s:
+        record_usage(s, user.id, "chat", "demo", 10, project_id=pid)
+        record_usage(s, user.id, "video", "openrouter:seedance", 0, 27.0, project_id=other)
+        record_usage(s, user.id, "detect", "sam", 100, project_id=pid)
+    with factory() as s:
+        everything = summarize(s, user.id, 0)
+    by_project = {p.project_id: p for p in everything.by_project}
+    assert by_project[pid].calls == 2
+    assert by_project[pid].tokens == 110
+    assert by_project[other].name == "Second"
+    assert by_project[other].cost == 27.0
+    with factory() as s:
+        scoped = summarize(s, user.id, 0, pid)
+    assert scoped.project_id == pid
+    assert scoped.totals == {"chat": 1, "detect": 1}
+    assert scoped.by_project == []
+    with factory() as s:
+        scoped_http = usage_summary(0, s, user, project_id=pid)
+    assert scoped_http.project_id == pid
+    assert scoped_http.totals == {"chat": 1, "detect": 1}
+    # Foreign projects stay invisible to other users.
+    with factory() as s:
+        stranger = create_user(s, email="stranger@test.local")
+    with factory() as s, pytest.raises(HTTPException):
+        usage_summary(0, s, stranger, project_id=pid)
 
 
 def test_detect_records_detector(factory, user):

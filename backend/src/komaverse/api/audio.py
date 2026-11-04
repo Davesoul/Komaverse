@@ -264,6 +264,7 @@ def transcribe_take(
         "transcribe",
         settings.meta_transcribe_model,
         len(res.get("transcript") or "") // 4,
+        project_id=row.project_id,
     )
     turns = []
     for t in res.get("turns") or []:
@@ -365,7 +366,7 @@ def synthesize_take(
     )
     session.add(row)
     session.commit()
-    record_usage(session, user.id, "voice", model, len(text) // 4)
+    record_usage(session, user.id, "voice", model, len(text) // 4, project_id=project_id)
     if body.cue_scene_id:
         scene = session.get(SceneRow, body.cue_scene_id)
         if scene is None or scene.project_id != project.id:

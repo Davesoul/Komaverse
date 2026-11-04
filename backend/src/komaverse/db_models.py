@@ -639,6 +639,7 @@ class UsageEventRow(Base):
 
     id: Mapped[str] = mapped_column(String(12), primary_key=True, default=uuid_short)
     user_id: Mapped[str] = mapped_column(String(64), index=True)
+    project_id: Mapped[str] = mapped_column(String(12), default="", index=True)
     kind: Mapped[str] = mapped_column(String(20), default="")
     label: Mapped[str] = mapped_column(String(200), default="")
     tokens: Mapped[int] = mapped_column(default=0)

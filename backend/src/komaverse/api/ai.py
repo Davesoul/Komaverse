@@ -8,6 +8,7 @@ import io
 import json
 import logging
 import random
+import re
 import tempfile
 from pathlib import Path
 
@@ -84,6 +85,8 @@ class GenerateRequest(BaseModel):
     width: int = 1024
     height: int = 1024
     seconds: float = 2.0
+    size: str | None = None  # video only: WxH (1280x720...); None = provider default
+    generate_audio: bool = False  # video only, always off: sound is voiceover/timeline
     attach_frame: bool = False  # gallery-first: frames only on explicit request
     seed: int | None = None  # None = random per job (stored on the job)
     negative_prompt: str = ""
@@ -114,6 +117,21 @@ def image_guidance(ref_pngs, start):
 
 _MAX_SEED = 2**31 - 1
 _AI_SEQUENCE_NAME = "AI generations"
+
+_VIDEO_SIZE_RE = re.compile(r"^(\d{3,4})x(\d{3,4})$")
+
+
+def _parse_video_size_str(size: str | None) -> tuple[int, int] | None:
+    """(w, h) from a WxH size string; None = provider default or invalid."""
+    if not isinstance(size, str):
+        return None
+    m = _VIDEO_SIZE_RE.match(size.strip().lower())
+    if not m:
+        return None
+    w, h = int(m.group(1)), int(m.group(2))
+    if 64 <= w <= 3840 and 64 <= h <= 3840:
+        return (w, h)
+    return None
 
 
 def _ai_sequence(session: Session, project_id: str) -> SequenceRow:
@@ -367,6 +385,8 @@ def run_ai_job(job_id: str, factory=None) -> None:
                     start_frame=start,
                     end_frame=end,
                     reference_images=tuple(rest),
+                    size=f"{job.width}x{job.height}" if job.width > 0 and job.height > 0 else None,
+                    generate_audio=False,
                 )
                 suffix = "mp4"
             else:
@@ -390,7 +410,8 @@ def run_ai_job(job_id: str, factory=None) -> None:
             session.commit()
             metrics.record_job("failed")
             record_usage(
-                session, job.user_id, job.kind, f"{job.provider}:{job.model or 'default'}"
+                session, job.user_id, job.kind, f"{job.provider}:{job.model or 'default'}",
+                project_id=job.project_id or "",
             )
             return
         except Exception as exc:  # noqa: BLE001 — job must never hang
@@ -410,7 +431,8 @@ def run_ai_job(job_id: str, factory=None) -> None:
             session.commit()
             metrics.record_job("failed")
             record_usage(
-                session, job.user_id, job.kind, f"{job.provider}:{job.model or 'default'}"
+                session, job.user_id, job.kind, f"{job.provider}:{job.model or 'default'}",
+                project_id=job.project_id or "",
             )
             return
 
@@ -464,6 +486,7 @@ def run_ai_job(job_id: str, factory=None) -> None:
             f"{job.provider}:{job.model or 'default'}",
             last_usage.get("total", 0),
             COSTS.get(job.kind, 0) if settings.paywall_enabled else 0.0,
+            project_id=job.project_id or "",
         )
 
 
@@ -546,6 +569,7 @@ def generate(
         raise HTTPException(402, f"insufficient credits (need {cost})")
     if settings.paywall_enabled:
         add_entry(session, user.id, -cost, f"{body.kind} generation")
+    video_dims = _parse_video_size_str(body.size) if body.kind == "video" else None
     job = JobRow(
         user_id=user.id,
         project_id=body.project_id,
@@ -553,8 +577,10 @@ def generate(
         prompt=body.prompt,
         provider=body.provider,
         model=body.model,
-        width=min(max(body.width, 64), 2048),
-        height=min(max(body.height, 64), 2048),
+        # Video size rides width/height; (0, 0) = provider default.
+        # Sound is never generated: voiceover takes + timeline audio.
+        width=video_dims[0] if video_dims else (0 if body.kind == "video" else min(max(body.width, 64), 2048)),
+        height=video_dims[1] if video_dims else (0 if body.kind == "video" else min(max(body.height, 64), 2048)),
         seconds=min(max(body.seconds, 0.5), 10.0),
         attach_frame=body.attach_frame,
         seed=body.seed,

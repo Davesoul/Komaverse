@@ -79,7 +79,7 @@ def test_deictic_attaches_latest_generation(factory, user):
         assert "@frame:" not in reply
         # ...while with full params the turn proceeds with the newest gen.
         out = agent_mod._resolve_turn(
-            "use this character to generate a 4 second 16:9 video",
+            "use this character to generate a 4 second 16:9 720p video",
             project.id, s, user, frame.id, refs=[],
         )
         assert "early" not in out
@@ -100,7 +100,7 @@ def test_typed_gen_never_drags_frame(factory, user):
         job = _done_job(s, user, project.id, "fighter character")
         out = agent_mod._resolve_turn(
             f"using this fighter from @gen:{job.id} to generate "
-            "a 4 second 16:9 video",
+            "a 4 second 16:9 720p video",
             project.id, s, user, frame.id, refs=[],
         )
         assert [r.get("kind") for r in out["refs"]] == ["gen"]
@@ -313,9 +313,9 @@ def test_vague_duration_asks_before_generating(factory, user):
         )
         assert "early" in out
         assert "framing" in out["early"]["reply"].lower()
-        # Length plus framing proceeds.
+        # Length plus framing plus resolution proceeds.
         out = agent_mod._resolve_turn(
-            "generate a 5 second wide 16:9 video of a robot",
+            "generate a 5 second wide 16:9 720p video of a robot",
             project.id, s, user, frame.id, refs=[],
         )
         assert "early" not in out
@@ -403,9 +403,9 @@ def test_video_generation_asks_for_duration(factory, user):
         out = agent_mod.tool_create_video(s, user, project.id, "a short video")
         assert "duration" in out
         assert s.query(JobRow).count() == before
-        # A numbered length is usable — the gate stays out of the way
+        # A fully specified request is usable — the gate stays out of the way
         # (here the unconfigured provider answers instead).
-        out = agent_mod.tool_create_video(s, user, project.id, "a 5 second clip")
+        out = agent_mod.tool_create_video(s, user, project.id, "a 5 second 16:9 720p clip")
         assert "Before generating I need" not in out
 
 

@@ -786,3 +786,38 @@ def test_agent_falls_back_to_demo_when_meta_down(factory, user, monkeypatch):
     with factory() as s:
         out = agent_mod.run_agent_turn("status", project.id, s, user)
     assert out["reply"].startswith(f"[{project.name}]")  # demo brain prefix
+
+
+def _video_ok(monkeypatch, seen):
+    polls = iter([
+        _Resp(200, {"status": "pending"}),
+        _Resp(200, {"status": "completed", "unsigned_urls": [
+            {"url": "https://cdn.test/content?index=0"}]}),
+    ])
+
+    def _post(url, json=None, headers=None, timeout=None):
+        seen["body"] = json
+        return _Resp(202, {"id": "job-1", "status": "pending",
+                           "polling_url": url + "/job-1"})
+
+    def _get(url, headers=None, timeout=None):
+        if "cdn.test" in url:
+            return _Resp(200, None, content=b"MP4BYTES")
+        return next(polls)
+
+    monkeypatch.setattr(httpx, "post", _post)
+    monkeypatch.setattr(httpx, "get", _get)
+
+
+def test_openrouter_video_sends_size_and_silent_audio(monkeypatch):
+    monkeypatch.setattr(settings, "openrouter_api_key", "or-test")
+    seen = {}
+    _video_ok(monkeypatch, seen)
+    out = OpenRouterProvider().generate_video("a robot walks", 4.0, size="1280x720")
+    assert out == b"MP4BYTES"
+    assert seen["body"]["size"] == "1280x720"
+    assert seen["body"]["generate_audio"] is False
+    _video_ok(monkeypatch, seen)
+    out = OpenRouterProvider().generate_video("a robot walks", 4.0)
+    assert "size" not in seen["body"]
+    assert seen["body"]["generate_audio"] is False

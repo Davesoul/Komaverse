@@ -375,13 +375,23 @@ export interface UsageSlice {
   tokens: number;
   cost: number;
 }
+export interface ProjectSlice {
+  project_id: string;
+  name: string;
+  calls: number;
+  tokens: number;
+  cost: number;
+}
+
 export interface UsageSummary {
   days: number;
   since: string | null;
+  project_id: string | null;
   totals: Record<string, number>;
   tokens_total: number;
   cost_total: number;
   by_label: UsageSlice[];
+  by_project: ProjectSlice[];
   series: UsagePoint[];
 }
 
@@ -819,6 +829,8 @@ export const api = {
     width?: number;
     height?: number;
     seconds?: number;
+    size?: string;
+    generate_audio?: boolean;
     seed?: number;
     negative_prompt?: string;
     enhance?: boolean;
@@ -905,8 +917,10 @@ export const api = {
       body: JSON.stringify(body ?? {}),
     }),
   getBalance: () => req<Balance>("/api/v1/billing/me"),
-  usageSummary: (days: number) =>
-    req<UsageSummary>(`/api/v1/usage/summary?days=${days}`),
+  usageSummary: (days: number, projectId?: string) =>
+    req<UsageSummary>(
+      `/api/v1/usage/summary?days=${days}${projectId ? `&project_id=${encodeURIComponent(projectId)}` : ""}`,
+    ),
   grantCredits: (amount: number) =>
     req<Balance>("/api/v1/billing/grant", {
       method: "POST",

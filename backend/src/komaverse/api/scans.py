@@ -351,7 +351,7 @@ def detect_panels(
     # Vision-token estimate (standard 512px-tile convention): local YOLO
     # burns no API tokens, but the dashboard scales on this column.
     tiles = math.ceil((page.width or 0) / 512) * math.ceil((page.height or 0) / 512)
-    record_usage(session, user.id, "detect", used, 85 + 170 * max(tiles, 1))
+    record_usage(session, user.id, "detect", used, 85 + 170 * max(tiles, 1), project_id=page.project_id)
     return DetectResponse(panels=panels, detector_used=used, fell_back=fell_back)
 
 
@@ -477,7 +477,7 @@ def read_page(
         row.cues = _json.dumps([str(c)[:80] for c in cue_list[:5]])
         out.append(row.to_schema())
     session.commit()
-    record_usage(session, user.id, "vision", model, 0)
+    record_usage(session, user.id, "vision", model, 0, project_id=page.project_id)
     return out
 
 

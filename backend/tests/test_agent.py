@@ -1274,7 +1274,7 @@ def test_agent_generate_from_finished_generation(factory, user):
 
 def test_agent_video_routes_to_async_job(factory, user):
     pid = seed_project(factory, user)
-    out = turn(factory, user, "generate a 4 second 16:9 video of a robot", pid, job_factory=factory)
+    out = turn(factory, user, "generate a 4 second 16:9 720p video of a robot", pid, job_factory=factory)
     assert out["actions"] and out["actions"][0]["tool"] == "create_video"
 
 
@@ -1480,3 +1480,52 @@ def test_story_pacing_skill_registered():
     names = {s["name"] for s in list_skills()}
     assert "story-pacing" in names
     assert "anime-animation-production" in names
+
+
+def test_parse_video_size():
+    from komaverse.agent import _parse_video_size
+
+    assert _parse_video_size("a 1280x720 video") == (1280, 720)
+    assert _parse_video_size("720p landscape video") == (1280, 720)
+    assert _parse_video_size("vertical 720p video") == (720, 1280)
+    assert _parse_video_size("square 1080p") == (1080, 1080)
+    assert _parse_video_size("full hd 16:9") == (1920, 1080)
+    assert _parse_video_size("a robot") is None
+    assert _parse_video_size("99999x99999") is None
+
+
+def test_agent_video_asks_duration_ratio_resolution(factory, user):
+    pid = seed_project(factory, user)
+    out = turn(factory, user, "generate a video of a robot", pid)
+    assert out["actions"] == []
+    reply = out['reply'].lower()
+    assert "duration" in reply and "framing" in reply and "resolution" in reply
+    assert "sound" not in reply
+
+
+def test_agent_video_asks_sound(factory, user):
+    pid = seed_project(factory, user)
+    out = turn(
+        factory, user,
+        "generate a 4 second 16:9 720p video of a robot with music", pid,
+    )
+    assert "sound" in out["reply"].lower()
+    assert "silent" in out["reply"].lower()
+
+
+def test_agent_video_stores_size(factory, user, monkeypatch):
+    from komaverse.agent import tool_create_video
+    from komaverse.db_models import JobRow
+
+    monkeypatch.setattr(settings, "openrouter_api_key", "test-key")
+    pid = seed_project(factory, user)
+    with factory() as s:
+        summary = tool_create_video(
+            s, user, pid,
+            "a 4 second 16:9 720p anime video of a robot", 4.0,
+            size="1280x720", job_factory=factory,
+        )
+        jid = job_id_of(summary)
+    with factory() as s:
+        job = s.get(JobRow, jid)
+    assert (job.width, job.height) == (1280, 720)

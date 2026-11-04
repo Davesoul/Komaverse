@@ -50,6 +50,8 @@ class AIProvider(Protocol):
         seed: int | None = None,
         negative_prompt: str = "",
         reference_images: tuple[bytes, ...] = (),
+        size: str | None = None,
+        generate_audio: bool = False,
     ) -> bytes:
         ...
 
@@ -63,6 +65,8 @@ class AIProvider(Protocol):
         start_frame: bytes | None = None,
         end_frame: bytes | None = None,
         reference_images: tuple[bytes, ...] = (),
+        size: str | None = None,
+        generate_audio: bool = False,
     ) -> bytes:
         ...
 
@@ -237,6 +241,8 @@ class CloudProvider:
         start_frame: bytes | None = None,
         end_frame: bytes | None = None,
         reference_images: tuple[bytes, ...] = (),
+        size: str | None = None,
+        generate_audio: bool = False,
     ) -> bytes:
         raise UnsupportedOp("generic cloud endpoint has no video model configured")
 
@@ -422,6 +428,8 @@ class ComfyUIProvider:
         start_frame: bytes | None = None,
         end_frame: bytes | None = None,
         reference_images: tuple[bytes, ...] = (),
+        size: str | None = None,
+        generate_audio: bool = False,
     ) -> bytes:
         raise UnsupportedOp("ComfyUI video workflow not configured")
 
@@ -470,6 +478,8 @@ class FakeProvider:
         start_frame: bytes | None = None,
         end_frame: bytes | None = None,
         reference_images: tuple[bytes, ...] = (),
+        size: str | None = None,
+        generate_audio: bool = False,
     ) -> bytes:
         self.last_video = {
             "prompt": prompt,
@@ -477,6 +487,8 @@ class FakeProvider:
             "start_frame": start_frame is not None,
             "end_frame": end_frame is not None,
             "references": len(reference_images),
+            "size": size,
+            "generate_audio": generate_audio,
         }
         raise UnsupportedOp("fake provider has no video")
 
@@ -1036,6 +1048,8 @@ class MetaProvider:
         start_frame: bytes | None = None,
         end_frame: bytes | None = None,
         reference_images: tuple[bytes, ...] = (),
+        size: str | None = None,
+        generate_audio: bool = False,
     ) -> bytes:
         raise UnsupportedOp(
             "meta has no video-generation model: use provider "
@@ -1426,12 +1440,16 @@ class OpenRouterProvider:
         start_frame: bytes | None = None,
         end_frame: bytes | None = None,
         reference_images: tuple[bytes, ...] = (),
+        size: str | None = None,
+        generate_audio: bool = False,
     ) -> bytes:
         # Async Video API (docs/.../multimodal/video-generation): POST
-        # /videos {model, prompt, duration, seed?, frame_images?,
-        # input_references?}; frame_images entries carry frame_type
-        # first_frame/last_frame (image-to-video), input_references guide
-        # style (reference-to-video). No negative field — see images.
+        # /videos {model, prompt, duration, size?, generate_audio,
+        # seed?, frame_images?, input_references?}; frame_images entries
+        # carry frame_type first_frame/last_frame (image-to-video),
+        # input_references guide style (reference-to-video). No
+        # negative field — see images. Sound stays off: voiceover
+        # takes and timeline cues are the studio mix, not model audio.
         self._check()
         base = settings.openrouter_base_url.rstrip("/")
         headers = _openrouter_headers()
@@ -1439,7 +1457,10 @@ class OpenRouterProvider:
             "model": model or settings.openrouter_video_model,
             "prompt": prompt,
             "duration": int(seconds),
+            "generate_audio": bool(generate_audio),
         }
+        if size:
+            payload["size"] = size
         if seed is not None:
             payload["seed"] = seed
         if start_frame is not None:

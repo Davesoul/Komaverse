@@ -1092,6 +1092,41 @@ color-theory (cel shadow colors, light logic), manga-literacy
   (crowd roar / dramatic impact / heroic sting, ...) persisted
   in reading order. Probe projects deleted afterwards.
 
+## ADR-43: Per-project usage + video cost questions + README seed path (accepted)
+
+- Usage is now global AND per project: `usage_events.project_id`
+  (ALTER backfill defaults old rows to '' = outside-projects),
+  `record_usage(..., project_id=...)`
+  threaded through chat turns, AI jobs, export, detect/read,
+  takes, and synth (standalone file transcription stays global).
+  `GET /usage/summary` gains an optional `project_id` filter
+  (ownership-checked) plus a `by_project` breakdown with names;
+  the Usage card lists a By-project table and filters to one
+  project on click. Old positional `usage_summary(days, s, user)`
+  calls keep working (new param is last).
+- The agent now asks every cost-relevant video question before
+  spending: duration (default 4s), ratio (16:9/9:16/1:1),
+  resolution (provider default cheapest / 720p / 1080p), and
+  sound — the model renders silent by design, so sound words
+  trigger a redirect to voiceover takes / timeline audio instead
+  of model audio. `generate_audio` is accepted and forced false
+  through the provider payload; `size` (WxH) flows request →
+  job (width/height, 0/0 = provider default) → OpenRouter
+  payload. No size is ever invented: without an answer the call
+  sends no size.
+- Defaults: 4 seconds, provider-default resolution, no sound.
+  Ask-behavior verified for the demo brain, the tool gate, and
+  the cloud question path; four memory-suite tests updated to
+  fully-specified requests (they now correctly block on the new
+  resolution question).
+- README: judges sign in (no signup), every start path
+  (dev/start scripts, plain uvicorn, Docker) auto-seeds the
+  demo account via lifespan; `seed_demo.py` adds demo content;
+  public deploys set `KOMA_SEED_DEMO=false`. Usage + AI bullets
+  updated (per-project usage, video sound-off).
+- Live: focused suites green (usage/auth/provider/agent/memory);
+  full suite + `tsc` + build at commit time; `:8001` restarted.
+
 ## ADR-41: Agent voice synthesis + story-pacing skill (accepted)
 
 - New `synthesize_voice` agent tool, wired to the existing

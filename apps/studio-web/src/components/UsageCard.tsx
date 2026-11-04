@@ -33,6 +33,8 @@ function fmtInt(n: number): string {
 
 export default function UsageCard() {
   const [days, setDays] = useState(30);
+  const [projectId, setProjectId] = useState<string | null>(null);
+  const [projects, setProjects] = useState<{ id: string; name: string }[]>([]);
   const [data, setData] = useState<UsageSummary | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -42,10 +44,17 @@ export default function UsageCard() {
     setLoading(true);
     setError(null);
     void api
-      .usageSummary(days)
+      .usageSummary(days, projectId ?? undefined)
       .then((summary) => {
         if (!cancelled) {
           setData(summary);
+          if (!projectId && summary.by_project) {
+            setProjects(
+              summary.by_project
+                .filter((p) => p.project_id)
+                .map((p) => ({ id: p.project_id, name: p.name })),
+            );
+          }
           setLoading(false);
         }
       })
@@ -58,7 +67,7 @@ export default function UsageCard() {
     return () => {
       cancelled = true;
     };
-  }, [days]);
+  }, [days, projectId]);
 
   const totalCalls = data
     ? Object.values(data.totals).reduce((a, b) => a + b, 0)
@@ -79,7 +88,12 @@ export default function UsageCard() {
           marginBottom: 8,
         }}
       >
-        <h2 style={{ fontSize: 15, margin: 0 }}>Usage</h2>
+        <h2 style={{ fontSize: 15, margin: 0 }}>
+          Usage
+          {projectId
+            ? ` — ${projects.find((p) => p.id === projectId)?.name ?? "project"}`
+            : ""}
+        </h2>
         <div style={{ display: "flex", gap: 4 }} role="group" aria-label="Usage period">
           {PERIODS.map((p) => (
             <button
@@ -105,6 +119,62 @@ export default function UsageCard() {
           ))}
         </div>
       </div>
+
+      {projects.length > 0 && (
+        <div
+          style={{ display: "flex", gap: 4, flexWrap: "wrap", marginBottom: 8 }}
+          role="group"
+          aria-label="Usage project filter"
+        >
+          <button
+            key="__all"
+            type="button"
+            onClick={() => setProjectId(null)}
+            aria-pressed={projectId === null}
+            style={{
+              border: "1px solid var(--kv-border)",
+              borderRadius: 999,
+              padding: "2px 10px",
+              fontSize: 12,
+              cursor: "pointer",
+              background:
+                projectId === null ? "var(--kv-accent-soft)" : "transparent",
+              color:
+                projectId === null ? "var(--kv-accent)" : "var(--kv-muted)",
+              fontWeight: projectId === null ? 700 : 400,
+            }}
+          >
+            All projects
+          </button>
+          {projects.map((p) => (
+            <button
+              key={p.id}
+              type="button"
+              onClick={() => setProjectId(p.id)}
+              aria-pressed={projectId === p.id}
+              title={p.name}
+              style={{
+                border: "1px solid var(--kv-border)",
+                borderRadius: 999,
+                padding: "2px 10px",
+                fontSize: 12,
+                cursor: "pointer",
+                maxWidth: 160,
+                overflow: "hidden",
+                textOverflow: "ellipsis",
+                whiteSpace: "nowrap",
+                background:
+                  projectId === p.id ? "var(--kv-accent-soft)" : "transparent",
+                color:
+                  projectId === p.id ? "var(--kv-accent)" : "var(--kv-muted)",
+                fontWeight: projectId === p.id ? 700 : 400,
+              }}
+            >
+              {p.name}
+            </button>
+          ))}
+        </div>
+      )}
 
       {loading ? (
         <div style={{ display: "flex", gap: 8, alignItems: "center", padding: 12 }}>
@@ -280,6 +350,103 @@ export default function UsageCard() {
             </tbody>
           </table>
           </div>
+
+          {projectId === null && data.by_project && data.by_project.length > 0 && (
+            <div style={{ overflowX: "auto", marginTop: 12 }}>
+              <table
+                style={{
+                  width: "100%",
+                  minWidth: 420,
+                  borderCollapse: "collapse",
+                  fontSize: 13,
+                }}
+              >
+                <caption
+                  style={{
+                    textAlign: "left",
+                    fontSize: 12,
+                    color: "var(--kv-faint)",
+                    paddingBottom: 4,
+                  }}
+                >
+                  By project — click a name to filter
+                </caption>
+                <thead>
+                  <tr style={{ textAlign: "left", color: "var(--kv-muted)" }}>
+                    <th style={{ fontWeight: 400, padding: "2px 8px 2px 0" }}>Project</th>
+                    <th
+                      className="kv-nums"
+                      style={{ fontWeight: 400, padding: "2px 0", textAlign: "right" }}
+                    >
+                      Calls
+                    </th>
+                    <th
+                      className="kv-nums"
+                      style={{ fontWeight: 400, padding: "2px 0 2px 8px", textAlign: "right" }}
+                    >
+                      Tokens
+                    </th>
+                    <th
+                      className="kv-nums"
+                      style={{ fontWeight: 400, padding: "2px 0 2px 8px", textAlign: "right" }}
+                    >
+                      Credits
+                    </th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {data.by_project.map((row) => (
+                    <tr
+                      key={row.project_id || "__none"}
+                      style={{ borderTop: "1px solid var(--kv-border)" }}
+                    >
+                      <td style={{ padding: "4px 8px 4px 0" }}>
+                        {row.project_id ? (
+                          <button
+                            type="button"
+                            onClick={() => setProjectId(row.project_id)}
+                            title={`Filter to ${row.name}`}
+                            style={{
+                              background: "none",
+                              border: "none",
+                              padding: 0,
+                              cursor: "pointer",
+                              color: "var(--kv-accent)",
+                              fontSize: 13,
+                              textAlign: "left",
+                              maxWidth: 180,
+                              overflow: "hidden",
+                              textOverflow: "ellipsis",
+                              whiteSpace: "nowrap",
+                            }}
+                          >
+                            {row.name}
+                          </button>
+                        ) : (
+                          <span style={{ color: "var(--kv-muted)" }}>{row.name}</span>
+                        )}
+                      </td>
+                      <td className="kv-nums" style={{ padding: "4px 0", textAlign: "right" }}>
+                        {fmtInt(row.calls)}
+                      </td>
+                      <td
+                        className="kv-nums"
+                        style={{ padding: "4px 0 4px 8px", textAlign: "right" }}
+                      >
+                        {fmtInt(row.tokens)}
+                      </td>
+                      <td
+                        className="kv-nums"
+                        style={{ padding: "4px 0 4px 8px", textAlign: "right" }}
+                      >
+                        {fmtInt(Math.round(row.cost))}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
           <p style={{ fontSize: 11, color: "var(--kv-faint)", margin: "8px 0 0" }}>
             Tokens are provider-reported when available, estimated otherwise:
             transcript length for transcription, the standard vision-tile
