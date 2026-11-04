@@ -598,6 +598,15 @@ export default function AgentDock() {
   });
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
+  // Terminal-style prompt recall: Up walks older sent prompts, Down walks
+  // back toward the newest (past the end restores the in-progress draft).
+  // The list derives from this thread's user bubbles, so recall follows
+  // thread switches automatically. Reset on send and on manual typing.
+  const histRef = useRef<{ idx: number | null; draft: string }>({ idx: null, draft: "" });
+  const resetHist = () => {
+    histRef.current.idx = null;
+    histRef.current.draft = "";
+  };
   // Per-project conversation threads: which project the pane shows and
   // which thread inside it is active (null = default thread). The active
   // thread persists per project across reloads.
@@ -898,6 +907,7 @@ export default function AgentDock() {
   };
 
   const onComposerChange = (value: string) => {
+    resetHist();
     setInput(value);
     // Match the @-token under the caret, not just at the end, so the
     // picker opens mid-composer ("put @take:… at 5s then fade").
@@ -1031,6 +1041,40 @@ export default function AgentDock() {
       }
       if (e.key === "Escape") {
         setMention(null);
+        return;
+      }
+    }
+    // Up/Down recalls sent prompts (terminal order), but never fights
+    // the pickers above or multiline caret movement inside long prompts.
+    if ((e.key === "ArrowUp" || e.key === "ArrowDown") && !input.includes("\n")) {
+      const prompts = messages
+        .filter((m) => m.role === "user" && m.text.trim())
+        .map((m) => m.text);
+      if (prompts.length > 0) {
+        e.preventDefault();
+        const h = histRef.current;
+        if (h.idx !== null && h.idx >= prompts.length) h.idx = null;
+        if (e.key === "ArrowUp") {
+          if (h.idx === null) {
+            h.draft = input;
+            h.idx = prompts.length - 1;
+          } else {
+            h.idx = Math.max(0, h.idx - 1);
+          }
+          setInput(prompts[h.idx] ?? "");
+        } else if (h.idx !== null) {
+          h.idx += 1;
+          if (h.idx >= prompts.length) {
+            h.idx = null;
+            setInput(h.draft);
+          } else {
+            setInput(prompts[h.idx]);
+          }
+        }
+        requestAnimationFrame(() => {
+          const el = inputRef.current;
+          if (el) el.setSelectionRange(el.value.length, el.value.length);
+        });
         return;
       }
     }
@@ -1667,12 +1711,14 @@ export default function AgentDock() {
     if (busyRef.current) {
       queueRef.current.push(message);
       setQueued(queueRef.current.length);
+      resetHist();
       setInput("");
       setMention(null);
       setSlash(null);
       setMessages((prev) => [...prev, { role: "user", text: message }]);
       return;
     }
+    resetHist();
     setInput("");
     setMention(null);
     setSlash(null);
@@ -2293,6 +2339,7 @@ export default function AgentDock() {
         {messages.map((m, i) => (
           <div
             key={i}
+            className="kv-msg"
             style={{
               alignSelf: m.role === "user" ? "flex-end" : "flex-start",
               maxWidth: "88%",
@@ -2306,6 +2353,20 @@ export default function AgentDock() {
               overflowWrap: "anywhere",
             }}
           >
+            {m.text ? (
+              <span className="kv-msg-actions" style={{ position: "absolute", top: 4, right: 4 }}>
+                <IconBtn
+                  label="Copy message"
+                  onClick={() => {
+                    void copyText(m.text).then((ok) =>
+                      toast(ok ? "Message copied." : "Copy failed.", ok ? "info" : "error"),
+                    );
+                  }}
+                >
+                  ⧉
+                </IconBtn>
+              </span>
+            ) : null}
             {m.job ? <JobCard job={m.job} onZoom={setLightbox} /> : (
               <>
                 {m.streaming && !m.text && !(m.actions?.length) ? (

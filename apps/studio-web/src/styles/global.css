@@ -766,3 +766,15 @@ html {
     background-position: 22px 0;
   }
 }
+/* Chat bubbles: hover-reveal copy button (same pattern as .kv-chatimg). */
+.kv-msg {
+  position: relative;
+}
+.kv-msg .kv-msg-actions {
+  opacity: 0;
+  transition: opacity 120ms;
+}
+.kv-msg:hover .kv-msg-actions,
+.kv-msg:focus-within .kv-msg-actions {
+  opacity: 1;
+}
