@@ -1414,3 +1414,10 @@ color-theory (cel shadow colors, light logic), manga-literacy
 - 4 new tests (turns with dates, action persistence incl. a real
   turn end-to-end, jobs listing, demo triggers); full suite 476
   passed; `:8001` restarted (agent + models + api changed).
+
+
+## ADR-55: Multi-source keyless image research (accepted)
+
+- Answering "is Fandom the only good image reference, what about Pinterest or Google Images": no. Probed live: Google Images (tbm=isch ou blobs) returns nothing keyless (consent/JS wall), DDG i.js yields a token but zero results from here, and Pinterest server-renders a single originals URL (JS-walled gallery), so all three are rejected as agent sources.
+- Wired what works keyless, verified live: AniList GraphQL Character(search) direct CDN art (best anime likeness, Zoro Roronoa resolves live), Fandom pageimages (kept, scan widened from 3 to 8 DDG hits and every Fandom hit thumbnailed, not just the first), Wikimedia Commons file search (real people/places fallback; anime queries surface cosplay, so it runs last), plus the existing DDG instant image and Wikipedia thumbs. web_images merges round-robin so one strong source cannot crowd out the rest of the diversity budget, which also fixed a real bug the new tests caught (AniList filled all 3 default slots and starved Fandom).
+- 4 new tests (AniList art, null-Character fail-soft, Commons thumbs, every-Fandom-hit) and the three older image tests made hermetic (unmocked httpx.post was hitting live AniList). Live check: tool_web_images(Roronoa Zoro) returns AniList + DDG + Fandom infobox art. Schema + web_search descriptions name AniList/Fandom/Commons; :8001 restarted (agent changed).

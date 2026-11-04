@@ -1035,8 +1035,104 @@ def _search_fandom_images(wiki, title, limit=3):
     return out
 
 
+def _search_anilist_character(query, limit=1):
+    """Keyless anime/manga character art via the AniList GraphQL API.
+
+    AniList search returns the single best match with direct CDN art —
+    the most reliable likeness for anime characters, where Wikipedia
+    has no free lead image. Non-anime queries return nothing.
+    """
+    cleaned = (query or "").strip()
+    if not cleaned:
+        return []
+    try:
+        resp = httpx.post(
+            "https://graphql.anilist.co",
+            json={
+                "query": (
+                    "query($s:String){Character(search:$s){"
+                    "name{full} image{large} siteUrl}}"
+                ),
+                "variables": {"s": cleaned},
+            },
+            timeout=20.0,
+            headers={"User-Agent": "KomaverseStudio/1.0"},
+        )
+    except Exception:
+        return []
+    if resp.status_code >= 400:
+        return []
+    try:
+        data = resp.json()
+    except ValueError:
+        return []
+    char = ((data or {}).get("data") or {}).get("Character") or {}
+    if not isinstance(char, dict):
+        return []
+    image = (char.get("image") or {}).get("large") or ""
+    if not image.startswith("http"):
+        return []
+    name = ((char.get("name") or {}).get("full") or cleaned).strip()
+    site = char.get("siteUrl") or "https://anilist.co"
+    return [(name, image, str(site))][: max(limit, 1)]
+
+
+def _search_commons_images(query, limit=3):
+    """Keyless Wikimedia Commons file search: (title, thumb, page).
+
+    Best for real people, places, and objects (freely licensed photos);
+    anime characters mostly surface cosplay shots, so this runs last.
+    """
+    cleaned = (query or "").strip()
+    if not cleaned:
+        return []
+    try:
+        resp = httpx.get(
+            "https://commons.wikimedia.org/w/api.php",
+            params={
+                "action": "query",
+                "generator": "search",
+                "gsrsearch": cleaned,
+                "gsrlimit": limit,
+                "gsrnamespace": 6,
+                "prop": "imageinfo",
+                "iiprop": "url",
+                "iiurlwidth": 500,
+                "format": "json",
+            },
+            timeout=20.0,
+            headers={"User-Agent": "KomaverseStudio/1.0"},
+        )
+    except Exception:
+        return []
+    if resp.status_code >= 400:
+        return []
+    try:
+        data = resp.json()
+    except ValueError:
+        return []
+    pages = ((data or {}).get("query") or {}).get("pages") or {}
+    out = []
+    for page in pages.values():
+        if not isinstance(page, dict):
+            continue
+        info = (page.get("imageinfo") or [{}])[0] or {}
+        thumb = info.get("thumburl") or info.get("url") or ""
+        if not thumb.startswith("http"):
+            continue
+        title = str(page.get("title") or "")
+        out.append((
+            title,
+            thumb,
+            "https://commons.wikimedia.org/wiki/" + title.replace(" ", "_"),
+        ))
+        if len(out) >= limit:
+            break
+    return out
+
+
 def tool_web_images(query, max_results=3):
-    """Keyless picture results: Wikipedia thumbnails + instant image.
+    """Keyless picture results: AniList art + Wikipedia + Fandom + Commons.
 
     Returns thumbnail URLs the chat renders inline — paste them into
     the reply as bare https URLs (one per line), name what each shows,
@@ -1049,17 +1145,30 @@ def tool_web_images(query, max_results=3):
         limit = min(max(int(max_results or 3), 1), 5)
     except (TypeError, ValueError):
         limit = 3
-    found: list[tuple[str, str, str]] = []
+    buckets: list[list[tuple[str, str, str]]] = []
+    buckets.append(_search_anilist_character(cleaned, 1))
     _abstract, _abstract_url, _topics, instant_image = _search_duckduckgo_instant(cleaned, 1)
-    if instant_image.startswith("http"):
-        found.append(("Instant answer", instant_image, _abstract_url or "https://duckduckgo.com/"))
+    buckets.append(
+        [("Instant answer", instant_image, _abstract_url or "https://duckduckgo.com/")]
+        if instant_image.startswith("http")
+        else []
+    )
     titles = [t for t, _u, _d in _search_wikipedia(cleaned, limit)]
-    found.extend(_search_wikipedia_images(titles, limit))
-    for _t, url, _s in _search_duckduckgo_web(cleaned, 3):
+    buckets.append(_search_wikipedia_images(titles, limit))
+    fandom_found: list[tuple[str, str, str]] = []
+    for _t, url, _s in _search_duckduckgo_web(cleaned, 8):
         m = _FANDOM_URL_RE.match(url or "")
         if m:
-            found.extend(_search_fandom_images(m.group(1), m.group(2), limit))
-            break
+            fandom_found.extend(_search_fandom_images(m.group(1), m.group(2), limit))
+    buckets.append(fandom_found)
+    buckets.append(_search_commons_images(cleaned, limit))
+    # Round-robin across sources so one strong source cannot crowd
+    # out the rest of the diversity budget.
+    found: list[tuple[str, str, str]] = []
+    for i in range(max((len(b) for b in buckets), default=0)):
+        for bucket in buckets:
+            if i < len(bucket):
+                found.append(bucket[i])
     seen = set()
     lines = ["Images for " + cleaned + ":"]
     for title, thumb, page in found:
@@ -4343,7 +4452,9 @@ _TOOLS_SCHEMA = [
                 "then read hits with web_fetch. Pass the natural question. "
                 "When the request is about a person, character, place, or "
                 "other visual subject, also call web_images so the chat "
-                "shows pictures."
+                "shows pictures. For fictional characters, fetch the "
+                "fandom.com result — its page art is the character "
+                "(Wikipedia character pages carry no usable lead image)."
             ),
             "parameters": {
                 "type": "object",
@@ -4361,7 +4472,8 @@ _TOOLS_SCHEMA = [
             "name": "web_images",
             "description": (
                 "Find pictures of anything (people, places, characters, "
-                "art styles, objects): keyless Wikipedia thumbnails plus "
+                "art styles, objects): AniList character art, Wikipedia "
+                "thumbnails, Fandom wiki art, Commons photos, plus "
                 "the instant-answer image. Use when the user asks what "
                 "something looks like or wants visual references. Paste "
                 "the thumbnail URLs into your reply as bare https URLs, "

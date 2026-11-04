@@ -255,14 +255,15 @@ function JobCard({ job, onZoom }: { job: NonNullable<Msg["job"]>; onZoom?: (url:
 }
 
 /** Render text with clickable URLs and highlighted @kind:id mention tokens. */
-const CHAT_IMAGE_RE = /^https?:\/\/\S+\.(png|jpe?g|gif|webp|svg)(\?|#|$)/i;
+const CHAT_IMAGE_RE = /^https?:\/\/\S+\.(png|jpe?g|gif|webp|svg)([\?#\/]|$)/i;
 const WIKIMEDIA_RE = /^https?:\/\/upload\.wikimedia\.org\/\S+/i;
+const WIKIA_RE = /^https?:\/\/static\.wikia\.nocookie\.net\/\S+/i;
 
 function linked(text: string) {
   const parts = text.split(/(https?:\/\/\S+|\/(?:media|api)\/\S+)/g);
   return parts.map((p, i) => {
     if (/^(https?:\/\/\S+|\/(?:media|api)\/\S+)$/.test(p)) {
-      if (CHAT_IMAGE_RE.test(p) || WIKIMEDIA_RE.test(p)) {
+      if (CHAT_IMAGE_RE.test(p) || WIKIMEDIA_RE.test(p) || WIKIA_RE.test(p)) {
         return <ChatImage key={i} src={p} />;
       }
       return (

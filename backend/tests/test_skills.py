@@ -332,6 +332,9 @@ def test_web_images_wikipedia_thumbnails(monkeypatch):
     from komaverse.agent import tool_web_images
 
     monkeypatch.setattr(agent_mod.httpx, "get", _fake_search_get)
+    monkeypatch.setattr(
+        agent_mod.httpx, "post", lambda *a, **k: _FakeResp("", ctype="application/json", json_data={"data": {}})
+    )
     out = tool_web_images("cel shading")
     assert "https://upload.wikimedia.org/cel-500.jpg" in out
     assert "en.wikipedia.org" in out
@@ -344,6 +347,9 @@ def test_web_images_uses_instant_image(monkeypatch):
     from komaverse.agent import tool_web_images
 
     monkeypatch.setattr(agent_mod.httpx, "get", _fake_search_get)
+    monkeypatch.setattr(
+        agent_mod.httpx, "post", lambda *a, **k: _FakeResp("", ctype="application/json", json_data={"data": {}})
+    )
     out = tool_web_images("cel shading")
     assert "https://duckduckgo.com/i/cel-shading.jpg" in out
 
@@ -394,6 +400,9 @@ def test_web_images_uses_fandom_wiki_thumbnails(monkeypatch):
 
     monkeypatch.setattr(agent_mod.httpx, "get", fake_get)
     monkeypatch.setattr(
+        agent_mod.httpx, "post", lambda *a, **k: _FakeResp("", ctype="application/json", json_data={"data": {}})
+    )
+    monkeypatch.setattr(
         agent_mod,
         "_search_duckduckgo_web",
         lambda q, limit=3: [
@@ -403,6 +412,111 @@ def test_web_images_uses_fandom_wiki_thumbnails(monkeypatch):
     out = tool_web_images("Roronoa Zoro")
     assert "static.wikia.nocookie.net" in out
     assert "fandom.com/wiki/Roronoa_Zoro" in out
+
+
+ANILIST_JSON = {
+    "data": {
+        "Character": {
+            "name": {"full": "Zoro Roronoa"},
+            "image": {"large": "https://s4.anilist.co/file/anilistcdn/character/large/b62-x.png"},
+            "siteUrl": "https://anilist.co/character/62",
+        }
+    }
+}
+
+COMMONS_JSON = {
+    "query": {
+        "pages": {
+            "11": {
+                "title": "File:Mount Fuji at dawn.jpg",
+                "imageinfo": [{"thumburl": "https://thumb.wikimedia.org/fuji-500.jpg"}],
+            }
+        }
+    }
+}
+
+
+def test_web_images_uses_anilist_character_art(monkeypatch):
+    """Anime characters resolve to direct AniList CDN art first."""
+    import komaverse.agent as agent_mod
+    from komaverse.agent import tool_web_images
+
+    monkeypatch.setattr(agent_mod.httpx, "get", _fake_search_get)
+    monkeypatch.setattr(
+        agent_mod.httpx,
+        "post",
+        lambda *a, **k: _FakeResp("", ctype="application/json", json_data=ANILIST_JSON),
+    )
+    out = tool_web_images("Roronoa Zoro")
+    assert "https://s4.anilist.co/file/anilistcdn/character/large/b62-x.png" in out
+    assert "anilist.co/character/62" in out
+
+
+def test_web_images_ignores_empty_anilist_match(monkeypatch):
+    """A null AniList Character (non-anime query) fails soft to other sources."""
+    import komaverse.agent as agent_mod
+    from komaverse.agent import _search_anilist_character
+
+    monkeypatch.setattr(
+        agent_mod.httpx,
+        "post",
+        lambda *a, **k: _FakeResp("", ctype="application/json", json_data={"data": {"Character": None}}),
+    )
+    assert _search_anilist_character("Mount Fuji") == []
+
+
+def test_search_commons_images_returns_thumbs(monkeypatch):
+    """Commons file search yields thumb URLs with source pages."""
+    import komaverse.agent as agent_mod
+    from komaverse.agent import _search_commons_images
+
+    def fake_get(url="", params=None, **kwargs):
+        assert "commons.wikimedia.org" in str(url)
+        return _FakeResp("", url=url, ctype="application/json", json_data=COMMONS_JSON)
+
+    monkeypatch.setattr(agent_mod.httpx, "get", fake_get)
+    out = _search_commons_images("Mount Fuji")
+    assert out[0][1] == "https://thumb.wikimedia.org/fuji-500.jpg"
+    assert "commons.wikimedia.org" in out[0][2]
+
+
+def test_web_images_collects_every_fandom_hit(monkeypatch):
+    """All Fandom results are thumbnailed, not just the first wiki hit."""
+    import komaverse.agent as agent_mod
+    from komaverse.agent import tool_web_images
+
+    def fake_get(url="", params=None, **kwargs):
+        url = str(url)
+        if isinstance(params, dict) and params.get("prop") == "pageimages" and "fandom.com" in url:
+            wiki = url.split("https://")[-1].split(".fandom.com")[0]
+            payload = {
+                "query": {
+                    "pages": {
+                        "7": {
+                            "title": "Zoro",
+                            "thumbnail": {"source": f"https://static.wikia.nocookie.net/{wiki}/zoro.png"},
+                        }
+                    }
+                }
+            }
+            return _FakeResp("", url=url, ctype="application/json", json_data=payload)
+        return _fake_search_get(url, params, **kwargs)
+
+    monkeypatch.setattr(agent_mod.httpx, "get", fake_get)
+    monkeypatch.setattr(
+        agent_mod.httpx, "post", lambda *a, **k: _FakeResp("", ctype="application/json", json_data={"data": {}})
+    )
+    monkeypatch.setattr(
+        agent_mod,
+        "_search_duckduckgo_web",
+        lambda q, limit=8: [
+            ("Zoro OP", "https://onepiece.fandom.com/wiki/Zoro", "swordsman"),
+            ("Zoro XY", "https://otherwiki.fandom.com/wiki/Zoro", "other"),
+        ],
+    )
+    out = tool_web_images("Zoro", 5)
+    assert "https://static.wikia.nocookie.net/onepiece/zoro.png" in out
+    assert "https://static.wikia.nocookie.net/otherwiki/zoro.png" in out
 
 
 def test_web_fetch_retries_browser_ua_on_403(monkeypatch):
@@ -434,6 +548,7 @@ def test_web_search_points_visual_subjects_to_images():
         if f.get("type") == "function"
     }
     assert "web_images" in descs["web_search"]
+    assert "fandom" in descs["web_search"]
 
 
 def test_web_fetch_rejects_binary(monkeypatch):
