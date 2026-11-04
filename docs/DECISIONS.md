@@ -1451,3 +1451,11 @@ color-theory (cel shadow colors, light logic), manga-literacy
 - The loop returned: user says 'go', the model says 'generating now', then the create_video tool answers 'I need 3 details' because the ask gate only read the tool prompt (bare subject, no 'go' in it). Asking is now the turn layer's job alone: both create tools take a delegated flag, set from the user's turn message by the demo callers and the cloud executor, so a delegated turn generates with defaults on every path and an undelegated one still asks (contract kept, existing tests untouched).
 - 'defaults' itself is now a delegation word ('use defaults', 'go means defaults'), matching the ask copy that already offers per-piece defaults.
 - 1 new test replays the exact loop (subject-only tool call + 'go' turn message generates via tool and via _exec_cloud_tool; same subject without delegation still asks); agent + memory suites 122 passed, full suite 489 passed; :8001 restarted.
+
+
+## ADR-60: Skill context management (speed fix, measured)
+
+- Measured cost: every cloud step re-sends ~5.3k tokens of system + tool schemas; skill bodies (anime-animation-production is 36KB) were truncated to 2000-char shards in-loop, so the model saw fragments and re-read; nothing deduped repeats. Worst case 12 steps x (5.3k + 9k re-sent skill) ~ 160k input tokens per turn.
+- Fix is mechanical, in _cloud_loop/_exec_cloud_tool only: repeat reads of the same (skill, section) in one turn answer with a pointer; skill bodies ride whole but only the newest stays (older ones collapse to pointers before each step); everything else keeps the 2000-char cap. Worst case halves to ~70k; typical 3-4 step turns drop ~48k to ~30k — with no paid model calls spent verifying, by construction (chars/4). Section-first guidance and once-per-conversation wording were already in the schema; now enforced.
+- 3 new tests (repeat-read pointer, new-section full read, stub-keeps-latest); skills suite 36 passed. One full-suite run showed a single StopIteration in test_openrouter_video_flow (exact-3 mock poll iterator consumed by a 4th GET under load); green alone, in pair, and on full re-run (492 passed) — recorded as flake, mock noted as fragile, providers.py untouched.
+- Full suite 492 passed; :8001 restarted (agent changed).

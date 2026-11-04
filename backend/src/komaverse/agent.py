@@ -5115,11 +5115,36 @@ def _finish_turn(target, session, user, reply, actions, brain, cloud_error=None)
     }
 
 
+def _stub_skill_bodies(messages, skill_bodies, current_id=None):
+    """Collapse older read_skill payloads to pointers, in place.
+
+    A 36KB skill re-sent on every loop step is what makes skill-heavy
+    turns crawl; the model keeps the latest full body and pointers to
+    the rest. Returns the stubbed count.
+    """
+    stubbed = 0
+    for m in messages:
+        if not isinstance(m, dict) or m.get("role") != "tool":
+            continue
+        cid = m.get("tool_call_id")
+        if cid in skill_bodies and cid != current_id and len(str(m.get("content") or "")) > 200:
+            m["content"] = (
+                f"[Skill '{skill_bodies[cid]}' read above — use that "
+                "copy, do not re-read it.]"
+            )
+            stubbed += 1
+    return stubbed
+
+
 def _exec_cloud_tool(
     name, args, *, message, session, user, project_id, job_factory,
-    turn_references=None,
+    turn_references=None, skills_read=None,
 ) -> str:
-    """Run one model-requested tool; shared by sync turns and streams."""
+    """Run one model-requested tool; shared by sync turns and streams.
+
+    skills_read is the turn's set of (skill, section) pairs: a repeat
+    read answers with a pointer instead of re-sending the whole file.
+    """
     try:
         if name == "project_status":
             result = tool_status(session, user, project_id)
@@ -5379,9 +5404,18 @@ def _exec_cloud_tool(
         elif name == "list_skills":
             result = tool_list_skills()
         elif name == "read_skill":
-            result = tool_read_skill(
-                str(args.get("name") or ""), args.get("section")
-            )
+            skill_key = (str(args.get("name") or ""), str(args.get("section") or ""))
+            if skills_read is not None and skill_key in skills_read:
+                result = (
+                    f"Skill '{skill_key[0]}' is already in context above — "
+                    "use that copy, do not re-read it."
+                )
+            else:
+                if skills_read is not None:
+                    skills_read.add(skill_key)
+                result = tool_read_skill(
+                    str(args.get("name") or ""), args.get("section")
+                )
         elif name == "list_tools":
             result = tool_list_tools()
         elif name == "web_fetch":
@@ -5458,7 +5492,12 @@ def _cloud_loop(
     actions: list[dict] = []
     base_url, api_key, model = get_chat_config()
     total_tokens = 0
+    skills_read: set[tuple[str, str]] = set()
+    skill_bodies: dict[str, str] = {}
     for _ in range(CLOUD_MAX_STEPS):
+        # Older skill bodies collapse to pointers; the newest full body
+        # stays for the step about to read it.
+        _stub_skill_bodies(messages, skill_bodies, current_id=list(skill_bodies)[-1] if skill_bodies else None)
         msg, usage, tokens = step(messages, base_url, api_key, model)
         for text in tokens:
             yield {"type": "token", "text": text}
@@ -5488,7 +5527,7 @@ def _cloud_loop(
             result = _exec_cloud_tool(
                 name, args, message=message, session=session, user=user,
                 project_id=project_id, job_factory=job_factory,
-                turn_references=turn_references,
+                turn_references=turn_references, skills_read=skills_read,
             )
             summary = result[:200]
             actions.append({"tool": name, "summary": summary})
@@ -5499,11 +5538,15 @@ def _cloud_loop(
                 "summary": summary,
                 "job_ids": [jid for jid in found_ids if _job_visible(session, user, jid)],
             }
+            if name == "read_skill":
+                skill_bodies[call["id"]] = str(args.get("name") or "skill")
             messages.append(
                 {
                     "role": "tool",
                     "tool_call_id": call["id"],
-                    "content": result[:2000],
+                    # Skill bodies ride whole (once — repeats and older
+                    # ones are stubbed); everything else stays capped.
+                    "content": result if name == "read_skill" else result[:2000],
                 }
             )
     record_usage(session, user.id, "chat", model, total_tokens or (len(message) + 40) // 4, project_id=project_id or "")

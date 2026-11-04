@@ -682,3 +682,61 @@ def test_mcp_skill_tools(factory):
             user,
         )
         assert "unknown skill" in call_tool("read_skill", {"name": "nope"}, s, user)
+
+
+def test_cloud_skill_repeat_read_answers_with_pointer(factory):
+    """A turn that re-reads a skill gets a pointer, not a second full body."""
+    from komaverse.agent import _exec_cloud_tool
+
+    with factory() as s:
+        user = create_user(s)
+        seen: set = set()
+        first = _exec_cloud_tool(
+            "read_skill", {"name": "anime-animation-production"},
+            message="m", session=s, user=user, project_id="p",
+            job_factory=None, skills_read=seen,
+        )
+        assert "cel-shaded tags" in first
+        second = _exec_cloud_tool(
+            "read_skill", {"name": "anime-animation-production"},
+            message="m", session=s, user=user, project_id="p",
+            job_factory=None, skills_read=seen,
+        )
+    assert "already in context" in second
+    assert len(second) < 200
+
+
+def test_cloud_skill_new_section_reads_full(factory):
+    """A different ## section is a new read, not a repeat."""
+    from komaverse.agent import _exec_cloud_tool
+
+    with factory() as s:
+        user = create_user(s)
+        seen: set = set()
+        _exec_cloud_tool(
+            "read_skill", {"name": "anime-animation-production"},
+            message="m", session=s, user=user, project_id="p",
+            job_factory=None, skills_read=seen,
+        )
+        out = _exec_cloud_tool(
+            "read_skill",
+            {"name": "anime-animation-production", "section": "Shot"},
+            message="m", session=s, user=user, project_id="p",
+            job_factory=None, skills_read=seen,
+        )
+    assert "Hold then cut" in out
+
+
+def test_stub_skill_bodies_keeps_latest():
+    """Older skill payloads collapse to pointers; the newest stays whole."""
+    from komaverse.agent import _stub_skill_bodies
+
+    messages = [
+        {"role": "user", "content": "hi"},
+        {"role": "tool", "tool_call_id": "c1", "content": "BODY-A" * 500},
+        {"role": "tool", "tool_call_id": "c2", "content": "BODY-B" * 500},
+    ]
+    bodies = {"c1": "skill-a", "c2": "skill-b"}
+    assert _stub_skill_bodies(messages, bodies, current_id="c2") == 1
+    assert "read above" in messages[1]["content"]
+    assert messages[2]["content"].startswith("BODY-B")
