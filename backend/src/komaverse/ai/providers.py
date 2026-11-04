@@ -1311,6 +1311,76 @@ def _openrouter_headers() -> dict[str, str]:
     }
 
 
+_VIDEO_CAPS_TTL = 24 * 3600.0
+_VIDEO_CAPS: dict = {"at": 0.0, "models": {}}
+
+#: Models verified to reject style input_references (first/last frames
+#: are their image path instead). hailuo-3-max: live 400 from the
+#: provider integration, cross-checked against its first/last keyframe
+#: design. Everything else passes references through.
+_NO_INPUT_REFERENCES = frozenset({"minimax/hailuo-3-max"})
+
+
+def _fetch_video_caps() -> dict:
+    """Live per-model video capabilities from OpenRouter (keyless).
+
+    Returns {model_id: {supported_durations, supported_sizes, ...}}.
+    Fail-soft: any error yields {} and callers skip validation.
+    """
+    # Fail-soft for ANY transport/parse oddity (including test doubles
+    # without .json()): capability data is advisory, generation is not.
+    try:
+        resp = httpx.get("https://openrouter.ai/api/v1/videos/models", timeout=15.0)
+        if resp.status_code >= 400:
+            return {}
+        data = resp.json()
+    except Exception:
+        return {}
+    out = {}
+    for m in data.get("data") or []:
+        if isinstance(m, dict) and m.get("id"):
+            out[m["id"]] = m
+    return out
+
+
+def _video_model_caps() -> dict:
+    """Cached capability matrix (24h TTL); {} when unreachable."""
+    import time as _time
+
+    now = _time.monotonic()
+    if now - _VIDEO_CAPS["at"] > _VIDEO_CAPS_TTL:
+        _VIDEO_CAPS["models"] = _fetch_video_caps()
+        _VIDEO_CAPS["at"] = now
+    return _VIDEO_CAPS["models"]
+
+
+def _validate_video_model(model_id: str, seconds: int, size: str | None,
+                          has_references: bool) -> None:
+    """Fail fast with the fix when the model cannot take the request.
+
+    Never silently reshape billed quantities: a wrong duration/size is an
+    error naming the supported values, not a quiet clamp.
+    """
+    if has_references and model_id in _NO_INPUT_REFERENCES:
+        raise ProviderError(
+            f"{model_id} takes frames (first/last), not style references — "
+            "attach a start frame instead, or switch model"
+        )
+    caps = _video_model_caps().get(model_id) or {}
+    durs = caps.get("supported_durations") or []
+    if durs and seconds not in durs:
+        raise ProviderError(
+            f"{model_id} supports durations {durs} (got {seconds}s)"
+        )
+    sizes = caps.get("supported_sizes")
+    if size and sizes is not None and size not in sizes:
+        shown = ", ".join(sizes[:8]) + ("…" if len(sizes) > 8 else "")
+        raise ProviderError(
+            f"{model_id} supports sizes [{shown}] (got {size}) — "
+            "omit size for its default"
+        )
+
+
 _POLICY_RE = re.compile(
     r"copyright|moderat|content.?polic|filter|block|inappropriate|"
     r"flagg|infring|not.?allowed|prohibit|refus",
@@ -1485,6 +1555,11 @@ class OpenRouterProvider:
                     "hailuo-3-max takes one frame only — attach a start "
                     "frame or an end frame, not both"
                 )
+        # General per-model validation (live OpenRouter matrix, fail-soft);
+        # the hailuo block above stays as the offline fallback.
+        _validate_video_model(
+            resolved, int(seconds), size, bool(reference_images)
+        )
         # Async Video API (docs/.../multimodal/video-generation): POST
         # /videos {model, prompt, duration, size?, generate_audio,
         # seed?, frame_images?, input_references?}; frame_images entries

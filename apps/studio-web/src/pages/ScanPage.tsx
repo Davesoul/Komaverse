@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api, mediaUrl, type Page, type Panel, type Project } from "../api";
-import { getCurrentProject, gotoTab, setCurrentProject } from "../lib/studio";
+import { getCurrentProject, gotoTab, setCurrentProject, setCurrentScene } from "../lib/studio";
 import {
   Btn,
   ChapterHeader,
@@ -565,6 +565,11 @@ export default function ScanPage() {
       toast(
         `Sent ${target.clips.length} clip${target.clips.length === 1 ? "" : "s"} into '${target.name}' — opening Render.`,
       );
+      // Land Render on the scene that actually received the clips: later
+      // sends create a fresh scene (the first one already has clips), and
+      // without this Render reopens the previously stored scene, hiding
+      // the new frames.
+      setCurrentScene(project.id, target.id);
       gotoTab("render");
     } catch (e) {
       toast(`Couldn't send panels: ${(e as Error).message}`, "error");

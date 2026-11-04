@@ -421,6 +421,49 @@ def test_openrouter_video_copyright_refusal_points_to_docs(monkeypatch):
     assert "docs/MODEL_ERRORS.md" in str(exc.value)  # hint appended
 
 
+def _fresh_caps(monkeypatch, payload):
+    import komaverse.ai.providers as providers
+
+    monkeypatch.setattr(providers, "_VIDEO_CAPS", {"at": 0.0, "models": {}})
+    monkeypatch.setattr(providers, "_fetch_video_caps", lambda: payload)
+
+
+def test_video_model_validation_rejects_bad_duration_and_size(monkeypatch):
+    """Live matrix values are enforced with the fix, not a provider 400."""
+    import komaverse.ai.providers as providers
+
+    _fresh_caps(monkeypatch, {
+        "bytedance/seedance-2.0": {
+            "supported_durations": [4, 6, 8],
+            "supported_sizes": ["1280x720"],
+        }
+    })
+    monkeypatch.setattr(settings, "openrouter_api_key", "or-test")
+    with pytest.raises(ProviderError, match=r"supports durations \[4, 6, 8\]"):
+        providers.OpenRouterProvider().generate_video("x", 5.0)
+    with pytest.raises(ProviderError, match="supports sizes"):
+        providers.OpenRouterProvider().generate_video(
+            "x", 4.0, size="999x999")
+
+
+def test_video_model_validation_failsoft(monkeypatch):
+    """Unreachable matrix endpoint skips validation (old behavior kept)."""
+    import komaverse.ai.providers as providers
+
+    _fresh_caps(monkeypatch, {})
+    assert providers._video_model_caps() == {}
+
+
+def test_video_model_rejects_style_refs_for_hailuo3max(monkeypatch):
+    """The user's live 400, caught client-side with the fix."""
+    monkeypatch.setattr(settings, "openrouter_api_key", "or-test")
+    with pytest.raises(ProviderError, match="not style references"):
+        OpenRouterProvider().generate_video(
+            "x", 5.0, model="minimax/hailuo-3-max",
+            reference_images=(b"png",),
+        )
+
+
 def test_hailuo3max_floor_and_single_frame(monkeypatch):
     """H3 Max constraints fail fast with the fix — never a cryptic 422,
     never silently upscaled billed seconds."""

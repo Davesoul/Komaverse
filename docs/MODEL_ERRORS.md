@@ -56,15 +56,27 @@ provider's billing page, not Komaverse.
   commercial/demo use — can infringe even when a model *allows* it. A filter
   refusal is the provider protecting you (and itself).
 
-## Per-model constraints we enforce client-side
+## Per-model constraints (live OpenRouter matrix, 2026-11-04)
 
-- **Hailuo 3 Max (`minimax/hailuo-3-max`)**: 5–15s only (our 4s default is
-  rejected), one frame max (first *or* last — never both), 480p/768p, and at
-  $0.05–0.08/s the cheapest video in the catalog. Komaverse fails fast with
-  the fix instead of sending a doomed request: pick 5+ seconds, one frame.
-  Sources: [H3 Max skill](https://github.com/finpeakinc/frevana-skills/blob/HEAD/skills/minimax-h3-max/SKILL.md),
-  [video-model survey](https://seminal.ai/reference/categories/video-generation-models/).
-  Policy strictness: unknown — treat as untested, not as lax.
+Source of truth at runtime: `GET /videos/models` (keyless) — Komaverse
+validates duration/size against it and fails fast naming the supported
+values. Frame/reference support below is verified where marked, otherwise
+pass-through (provider errors surface with hints).
+
+| Model | Durations | Sizes | Frames | Style refs | Notes |
+|---|---|---|---|---|---|
+| Seedance 2.0 | 4–15s | 25 sizes incl. 1280x720 | first+last | yes | strictest IP filter (see §2) |
+| Seedance mini/fast | 4–15s | ≤720p sizes | first+last | yes | same family, cheaper |
+| Veo 3.1 | 4/6/8s | 1280x720, 1920x1080… | first+last | yes | native audio (we keep silent) |
+| Wan 2.6 | 5/10s | 1280x720, 1920x1080… | first+last | yes | no C2PA manifest |
+| Wan 3.0 Prime | 2–30s | resolution-driven (no WxH list) | first+last* | yes* | *unverified — pass-through |
+| Hailuo 3 Max | 5–15s | resolution-driven (480p/768p) | first *xor* last | **no** (400) | cheapest ($0.05–0.08/s); fail-fast enforced |
+| HeyGen 1 | 5–30s | resolution-driven | first+last* | yes* | *unverified — pass-through |
+
+*Sources: [OpenRouter video guide](https://openrouter.ai/docs/guides/overview/multimodal/video-generation),
+[H3 Max skill](https://github.com/finpeakinc/frevana-skills/blob/HEAD/skills/minimax-h3-max/SKILL.md),
+[video-model survey](https://seminal.ai/reference/categories/video-generation-models/). Policy
+strictness unknown for Wan/Hailuo/HeyGen — treat as untested, not as lax.*
 
 ## 3. What to do instead (in order)
 

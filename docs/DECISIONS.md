@@ -1466,3 +1466,10 @@ color-theory (cel shadow colors, light logic), manga-literacy
 - Seedance refused a Zoro-vs-Mister-One page with a clear output-side message ('may be related to copyright restrictions'); researched the landscape (MPA-B dance Feb 2026 IP guardrails, Seedance prompt+face filters, commercial-model real-person rules, OpenRouter 403/422 moderation shapes) into docs/MODEL_ERRORS.md with an error catalog, per-model strictness notes, and a what-to-do ladder (originals first).
 - Code: failed jobs keep the raw provider text and append a policy hint + doc pointer on moderation signals; completed-with-no-media first tries the reconstructed content URL (old contract kept, existing retry test green), raising a 'filtered' explanation only when that is dead too; create_image/create_video descriptions steer the agent to originals after a refusal; Render Generate carries an original-content notice.
 - 2 new tests (copyright-refusal hint, silent-filter explanation); skills/agents suites unaffected; full suite 494 passed; web research + this build spent zero provider credits (suite is transport-mocked); :8001 restarted.
+
+
+## ADR-62: Per-model video validation + scan send lands on the receiving scene (accepted)
+
+- Models are not interchangeable: live matrix GET /videos/models (keyless, 24h cache, fail-soft) now validates duration/size per model with named supported values; hailuo-3-max style input_references are rejected client-side with the fix (first/last frames are its image path); offline H3 floor/frame guards stay as fallback. Never silently reshapes billed quantities.
+- Scan send-to-Render dropped users on the wrong scene: later sends create a fresh scene (first already has clips) but Scan ignored the returned scene id, so Render reopened the stored one. Scan now publishes the receiving scene before jumping tabs.
+- Suite lesson: the module-global caps cache leaked live data across tests (6 order-dependent failures); conftest now starts every test offline via _hermetic_video_caps, tests inject their own matrix. Full suite 498 passed; :8001 restarted.
