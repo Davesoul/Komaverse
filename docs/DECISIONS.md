@@ -1362,3 +1362,16 @@ color-theory (cel shadow colors, light logic), manga-literacy
   instant image, og:image, get page, demo image trigger).
 - Live: full suite 468 passed; `tsc` + build green; `:8001`
   restarted (agent + scans changed).
+
+## ADR-52: Bot-wall retry + visual-subject image routing (accepted)
+
+- The Zoro turn showed two gaps: the model researched with
+  web_search + web_fetch but never called web_images (no
+  pictures), and the Fandom fetch died with HTTP 403 (bot-walled).
+- `web_fetch` now retries once behind a plain browser UA on 403
+  only — first request stays identified, other statuses unchanged.
+  `web_search` cross-references web_images for people, characters,
+  places, and visual subjects so text research brings pictures.
+- 2 new tests (403-then-200 retry with UA assertion, description
+  cross-reference). Full suite re-run at commit time; `:8001`
+  restarted (agent changed).

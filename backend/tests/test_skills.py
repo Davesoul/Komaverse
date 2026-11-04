@@ -363,6 +363,37 @@ def test_web_fetch_extracts_og_image(monkeypatch):
     assert "[image: https://example.com/hero.jpg]" in out
 
 
+def test_web_fetch_retries_browser_ua_on_403(monkeypatch):
+    """Bot-walled pages (Fandom wiki) load on a browser-UA retry."""
+    import komaverse.agent as agent_mod
+
+    calls = []
+
+    def fake_get(url, **kwargs):
+        calls.append(kwargs.get("headers", {}).get("User-Agent", ""))
+        if len(calls) == 1:
+            return _FakeResp("", url=url, status=403)
+        return _FakeResp("<p>Zoro the swordsman</p>", url=url)
+
+    monkeypatch.setattr(agent_mod.httpx, "get", fake_get)
+    out = tool_web_fetch("https://onepiece.fandom.com/wiki/Roronoa_Zoro")
+    assert "Zoro the swordsman" in out
+    assert len(calls) == 2
+    assert "Mozilla" in calls[1]
+
+
+def test_web_search_points_visual_subjects_to_images():
+    """Text research on visual subjects must mention web_images."""
+    from komaverse import agent as agent_mod
+
+    descs = {
+        f["function"]["name"]: f["function"].get("description", "")
+        for f in agent_mod._TOOLS_SCHEMA
+        if f.get("type") == "function"
+    }
+    assert "web_images" in descs["web_search"]
+
+
 def test_web_fetch_rejects_binary(monkeypatch):
     import komaverse.agent as agent_mod
 

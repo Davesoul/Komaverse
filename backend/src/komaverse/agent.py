@@ -634,6 +634,18 @@ def tool_web_fetch(url, max_chars=4000):
         )
     except Exception as exc:
         return "fetch failed: " + type(exc).__name__ + ": " + str(exc)[:160]
+    if resp.status_code == 403:
+        # Bot-walled pages (Fandom wikis): one retry behind a plain
+        # browser UA before giving up.
+        try:
+            resp = httpx.get(
+                cleaned,
+                timeout=20.0,
+                follow_redirects=True,
+                headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36"},
+            )
+        except Exception as exc:
+            return "fetch failed: " + type(exc).__name__ + ": " + str(exc)[:160]
     if resp.status_code >= 400:
         return "fetch failed: HTTP " + str(resp.status_code)
     ctype = resp.headers.get("content-type", "")
@@ -4114,7 +4126,10 @@ _TOOLS_SCHEMA = [
             "description": (
                 "Search the open web without keys (DDG hits, instant "
                 "answers, Wikipedia fallback). Use for online research, "
-                "then read hits with web_fetch. Pass the natural question."
+                "then read hits with web_fetch. Pass the natural question. "
+                "When the request is about a person, character, place, or "
+                "other visual subject, also call web_images so the chat "
+                "shows pictures."
             ),
             "parameters": {
                 "type": "object",
