@@ -34,10 +34,30 @@ export default function ScanPage() {
   const [notice, setNotice] = useState("");
   // First-run weight downloads surface in the App-shell card (all tabs).
   const [zoom, setZoom] = useState(1);
+  // Fit-to-view (contain) is the default: the whole page stays visible
+  // without scrolling. Any manual zoom (+/−/1:1) leaves fit mode; the ⤢
+  // button and the `0` key return to it.
+  const [fit, setFit] = useState(true);
   // True size (1:1): one image pixel per screen pixel, so the scan looks
   // exactly like the upload instead of a CSS fit-downscale. Any fit/+/−
   // zoom leaves 1:1 mode.
   const [trueSize, setTrueSize] = useState(false);
+  // Measured preview box, so fit can contain the page height too: a tall
+  // page at width:100% still scrolls vertically, which is why "fit" looked
+  // like it did nothing.
+  // Callback-ref element: the box only mounts once a page loads, so a
+  // mount-time effect would see a null ref and never observe.
+  const [previewBoxEl, setPreviewBoxEl] = useState<HTMLDivElement | null>(null);
+  const [previewBox, setPreviewBox] = useState<{ w: number; h: number } | null>(null);
+  useEffect(() => {
+    if (!previewBoxEl) return;
+    const ro = new ResizeObserver((entries) => {
+      const r = entries[0]?.contentRect;
+      if (r && r.width > 0 && r.height > 0) setPreviewBox({ w: r.width, h: r.height });
+    });
+    ro.observe(previewBoxEl);
+    return () => ro.disconnect();
+  }, [previewBoxEl]);
   const [draft, setDraft] = useState<{ x: number; y: number; w: number; h: number } | null>(null);
   const [imgHref, setImgHref] = useState("");
   const svgRef = useRef<SVGSVGElement>(null);
@@ -152,7 +172,10 @@ export default function ScanPage() {
     setPage(p);
     setPanels(p.panels);
     setSelectedId(null);
+    // New page: back to fit-to-view by default.
+    setTrueSize(false);
     setZoom(1);
+    setFit(true);
   };
 
   const doDelete = useCallback(async () => {
@@ -176,6 +199,37 @@ export default function ScanPage() {
     setSelectedId(null);
   }, [selectedId, panels]);
 
+  // Width of the preview as a fraction of the box width that contains
+  // the whole page: min(1, height-limited width). Never upscales past
+  // full width; before the box is measured it degrades to full width.
+  const fitFrac =
+    page && page.height > 0 && previewBox
+      ? Math.min(1, ((previewBox.h * page.width) / page.height / previewBox.w + Number.EPSILON))
+      : 1;
+  // Effective render scale: fit wins unless a manual zoom or 1:1 took over.
+  const eff = fit ? fitFrac : zoom;
+  // Rendered px per image px, so panel strokes stay ~constant on screen.
+  const cssScale =
+    !page || page.width <= 0
+      ? 1
+      : trueSize
+        ? 1
+        : previewBox
+          ? (eff * previewBox.w) / page.width
+          : eff;
+  const effRef = useRef(eff);
+  effRef.current = eff;
+  const stepZoom = (dir: 1 | -1) => {
+    setTrueSize(false);
+    setFit(false);
+    setZoom(Math.min(4, Math.max(0.1, effRef.current * (dir === 1 ? 1.25 : 1 / 1.25))));
+  };
+  const goFit = () => {
+    setTrueSize(false);
+    setZoom(1);
+    setFit(true);
+  };
+
   // Keyboard: Delete removes selection, Escape clears it, +/-/0 zoom.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -187,11 +241,11 @@ export default function ScanPage() {
       } else if (e.key === "Escape") {
         setSelectedId(null);
       } else if (e.key === "+" || e.key === "=") {
-        setZoom((z) => Math.min(z * 1.25, 4));
+        stepZoom(1);
       } else if (e.key === "-") {
-        setZoom((z) => Math.max(z / 1.25, 0.5));
+        stepZoom(-1);
       } else if (e.key === "0") {
-        setZoom(1);
+        goFit();
       } else if (e.key === "v" || e.key === "V") {
         setMode("select");
       } else if (e.key === "r" || e.key === "R") {
@@ -912,13 +966,13 @@ export default function ScanPage() {
                 Frame panel
               </Btn>
               <span style={{ display: "inline-flex", gap: 4, alignItems: "center" }}>
-                <IconBtn onClick={() => { setTrueSize(false); setZoom((z) => Math.max(z / 1.25, 0.5)); }} label="Zoom out">−</IconBtn>
+                <IconBtn onClick={() => stepZoom(-1)} label="Zoom out">−</IconBtn>
                 <span style={{ fontSize: 12, minWidth: 44, textAlign: "center", color: "var(--kv-muted)" }}>
-                  {trueSize ? "1:1" : `${Math.round(zoom * 100)}%`}
+                  {trueSize ? "1:1" : fit ? "Fit" : `${Math.round(zoom * 100)}%`}
                 </span>
-                <IconBtn onClick={() => { setTrueSize(false); setZoom((z) => Math.min(z * 1.25, 4)); }} label="Zoom in">+</IconBtn>
-                <IconBtn onClick={() => { setTrueSize(false); setZoom(1); }} label="Fit page to view">⤢</IconBtn>
-                <Btn small active={trueSize} onClick={() => setTrueSize(true)} title="True size: one image pixel per screen pixel">1:1</Btn>
+                <IconBtn onClick={() => stepZoom(1)} label="Zoom in">+</IconBtn>
+                <IconBtn onClick={goFit} label="Fit page to view">⤢</IconBtn>
+                <Btn small active={trueSize} onClick={() => { setFit(false); setTrueSize(true); }} title="True size: one image pixel per screen pixel">1:1</Btn>
               </span>
             </div>
 
@@ -939,6 +993,7 @@ export default function ScanPage() {
             )}
 
             <div
+              ref={setPreviewBoxEl}
               style={{
                 background: "var(--kv-inset)",
                 border: "1px solid var(--kv-border)",
@@ -953,9 +1008,13 @@ export default function ScanPage() {
                 ref={svgRef}
                 viewBox={`0 0 ${page.width} ${page.height}`}
                 style={{
-                  width: trueSize ? page.width : zoom === 1 ? "100%" : `${Math.round(zoom * 100)}%`,
-                  maxWidth: trueSize || zoom !== 1 ? "none" : "100%",
+                  // Contain-fit: a width fraction of the box, so the whole
+                  // page height fits too (width:100% alone still scrolled).
+                  width: trueSize ? page.width : `${eff * 100}%`,
+                  maxWidth: trueSize || eff > 1 ? "none" : "100%",
+                  height: "auto",
                   display: "block",
+                  margin: fit && !trueSize ? "0 auto" : undefined,
                   cursor: mode === "draw" ? "crosshair" : undefined,
                 }}
                 onPointerDown={onSvgPointerDown}
@@ -979,8 +1038,8 @@ export default function ScanPage() {
                     width={draft.w}
                     height={draft.h}
                     fill="rgba(193,18,31,0.12)"
-                    strokeWidth={2 / zoom}
-                    strokeDasharray={`${8 / zoom} ${4 / zoom}`}
+                    strokeWidth={2 / cssScale}
+                    strokeDasharray={`${8 / cssScale} ${4 / cssScale}`}
                     style={{ stroke: "var(--kv-accent)", pointerEvents: "none" }}
                   />
                 )}
@@ -994,7 +1053,7 @@ export default function ScanPage() {
                         width={p.w}
                         height={p.h}
                         fill={selected ? "rgba(193,18,31,0.16)" : "transparent"}
-                        strokeWidth={selected ? 3 / zoom : 2 / zoom}
+                        strokeWidth={selected ? 3 / cssScale : 2 / cssScale}
                         style={{
                           cursor: mode === "select" ? "move" : "default",
                           /* var() does not resolve in SVG presentation
@@ -1101,7 +1160,7 @@ export default function ScanPage() {
               items={[
                 `${page.width}×${page.height}`,
                 `${panels.length} panels`,
-                `zoom ${Math.round(zoom * 100)}%`,
+                `zoom ${trueSize ? "1:1" : fit ? "fit" : `${Math.round(zoom * 100)}%`}`,
                 `mode: ${mode}`,
                 `read ${direction.toUpperCase()}`,
                 selectedId ? "1 selected (Del removes)" : "none selected",
