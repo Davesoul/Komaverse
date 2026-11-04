@@ -1256,6 +1256,25 @@ export default function DrawPage() {
     }
   };
 
+  /** Copy an @frame:id mention for the agent composer. */
+  const copyRef = async (token: string) => {
+    try {
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(token);
+      } else {
+        const ta = document.createElement("textarea");
+        ta.value = token;
+        document.body.appendChild(ta);
+        ta.select();
+        document.execCommand("copy");
+        ta.remove();
+      }
+      toast(`Copied ${token} — paste it in the AI chat with @.`);
+    } catch {
+      toast(`Copy failed — reference is ${token}`, "error");
+    }
+  };
+
   // Canvas playback (Krita-style): the drawing canvas itself flips
   // through the frames at the chosen rate. Each frame is pre-rendered once
   // via the engine; per tick the display only blits a bitmap, so the live
@@ -2185,35 +2204,65 @@ export default function DrawPage() {
                   }}
                 >
                   {seqFrames.map((f, i) => (
-                    <button
-                      key={f.id}
-                      type="button"
-                      onClick={() => openFrame(f.id)}
-                      title={f.name || `Frame ${i + 1}`}
-                      aria-label={`Open ${f.name || `frame ${i + 1}`}`}
-                      style={{
-                        flexShrink: 0,
-                        padding: 2,
-                        borderRadius: 6,
-                        cursor: "pointer",
-                        background: "transparent",
-                        border:
-                          f.id === frameId
-                            ? "2px solid var(--kv-accent)"
-                            : "1px solid var(--kv-border)",
-                      }}
-                    >
-                      <img
-                        crossOrigin="use-credentials"
-                        src={`${api.frameThumbnailUrl(f.id)}?v=${thumbBust[f.id] ?? 0}`}
-                        alt=""
-                        width={72}
-                        height={40}
-                        style={{ display: "block", borderRadius: 4, objectFit: "cover", background: "#f6f1e8" }}
-                        loading="lazy"
-                        draggable={false}
-                      />
-                    </button>
+                    <div key={f.id} style={{ position: "relative", flexShrink: 0 }}>
+                      <button
+                        type="button"
+                        onClick={() => openFrame(f.id)}
+                        title={f.name || `Frame ${i + 1}`}
+                        aria-label={`Open ${f.name || `frame ${i + 1}`}`}
+                        style={{
+                          padding: 2,
+                          borderRadius: 6,
+                          cursor: "pointer",
+                          background: "transparent",
+                          border:
+                            f.id === frameId
+                              ? "2px solid var(--kv-accent)"
+                              : "1px solid var(--kv-border)",
+                        }}
+                      >
+                        <img
+                          crossOrigin="use-credentials"
+                          src={`${api.frameThumbnailUrl(f.id)}?v=${thumbBust[f.id] ?? 0}`}
+                          alt=""
+                          width={72}
+                          height={40}
+                          style={{ display: "block", borderRadius: 4, objectFit: "cover", background: "#f6f1e8" }}
+                          loading="lazy"
+                          draggable={false}
+                        />
+                      </button>
+                      <span
+                        role="button"
+                        tabIndex={0}
+                        title="Copy this frame's @reference for the AI chat"
+                        aria-label={`Copy reference for ${f.name || `frame ${i + 1}`}`}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          void copyRef(`@frame:${f.id}`);
+                        }}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter") {
+                            e.stopPropagation();
+                            void copyRef(`@frame:${f.id}`);
+                          }
+                        }}
+                        style={{
+                          position: "absolute",
+                          top: 3,
+                          right: 3,
+                          cursor: "pointer",
+                          fontSize: 12,
+                          lineHeight: 1,
+                          padding: "2px 4px",
+                          borderRadius: 4,
+                          background: "rgba(0,0,0,0.65)",
+                          color: "#fff",
+                        }}
+                      >
+                        ⧉
+                      </span>
+                    </div>
                   ))}
                   <IconBtn onClick={newFrame} label="New frame">＋</IconBtn>
                 </div>
@@ -2560,6 +2609,25 @@ export default function DrawPage() {
                           style={{ cursor: "pointer", fontSize: 13, padding: "0 2px", color: "var(--kv-accent)" }}
                         >
                           ▸
+                        </span>
+                        <span
+                          role="button"
+                          tabIndex={0}
+                          title="Copy this frame's @reference for the AI chat"
+                          aria-label={`Copy reference for ${f.name || `frame ${i + 1}`}`}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            void copyRef(`@frame:${f.id}`);
+                          }}
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter") {
+                              e.stopPropagation();
+                              void copyRef(`@frame:${f.id}`);
+                            }
+                          }}
+                          style={{ cursor: "pointer", fontSize: 13, padding: "0 2px", color: "var(--kv-accent)" }}
+                        >
+                          ⧉
                         </span>
                       </div>
                       {renamingFrame === f.id ? (

@@ -1320,3 +1320,21 @@ color-theory (cel shadow colors, light logic), manga-literacy
   test now covers the new name plus content/IP-boundary checks.
 - Live: full suite 463 passed; `:8001` restarted (agent prompt +
   routing changed).
+## ADR-50: No blank projects; one-line clip row; Draw copy-ref (accepted)
+
+- Home: "Create project" with a blank name silently made an
+  "Untitled" project. It now refuses with a notice ("Name your
+  project first") and the button stays disabled until the input is
+  non-blank (covers the Enter key too).
+- Render tab: the clip-jump buttons under the preview wrapped into
+  many rows above the timeline. They now hold one line with
+  horizontal scroll (`overflow-x: auto`, buttons never shrink).
+- Draw tab: no way to get a frame's `@reference` for the AI chat.
+  Both frame lists (side-panel cards and the fullscreen filmstrip)
+  now have a ⧉ copy button next to the ▸ send button, copying
+  `@frame:<id>` via clipboard with textarea fallback and a toast;
+  label/ARIA announce the copy action. Mirrors the Media tab
+  copyRef pattern and the card's existing action-button style.
+- Live: `tsc` clean, `npm run build` green (frontend-only, no
+  backend change, so `:8001` keeps running). No new maintained
+  tests: three tiny UI tweaks verified by the typecheck + build.

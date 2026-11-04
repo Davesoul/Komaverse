@@ -656,11 +656,12 @@ export function PreviewPlayer({
           {fmt(time)} / {fmt(total)}
         </span>
       </div>
-      <div style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
+      <div style={{ display: "flex", gap: 4, overflowX: "auto", paddingBottom: 2 }} role="list" aria-label="Timeline clips">
         {clips.map((c, i) => (
           <Btn
             key={c.id}
             small
+            style={{ flexShrink: 0 }}
             active={c.id === current.id}
             title={`${c.label} (${c.duration.toFixed(1)}s)`}
             onClick={() => {

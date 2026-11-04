@@ -213,10 +213,14 @@ export default function App() {
 
   const doCreateProject = async () => {
     if (creating) return;
+    if (!newName.trim()) {
+      setCreateNotice("Name your project first — blank names don't create anything.");
+      return;
+    }
     setCreating(true);
     setCreateNotice("");
     try {
-      const created = await api.createProject(newName.trim() || "Untitled");
+      const created = await api.createProject(newName.trim());
       setNewName("");
       const ps = await api.listProjects();
       setProjectCount(ps.length);
@@ -478,7 +482,7 @@ export default function App() {
                 style={{ flex: 1 }}
                 aria-label="New project name"
               />
-              <PrimaryBtn onClick={() => void doCreateProject()} disabled={creating}>
+              <PrimaryBtn onClick={() => void doCreateProject()} disabled={creating || !newName.trim()}>
                 {creating ? "Creating…" : "Create project"}
               </PrimaryBtn>
             </div>
