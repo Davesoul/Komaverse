@@ -503,3 +503,89 @@ def test_truncation_is_surfaced(factory, user, monkeypatch):
         )
         result = next(e for e in events if e["type"] == "result")
         assert "continue" in result["reply"]
+
+
+def test_history_scoped_per_project_and_thread(factory, user):
+    """Reads and writes filter by (user, project, thread).
+
+    The default thread is NULL (pre-thread rows read as default), and
+    listing/deleting threads never crosses a project boundary.
+    """
+    from komaverse.api.agent import (
+        agent_history,
+        clear_agent_history,
+        create_agent_thread,
+        delete_agent_thread,
+        list_agent_threads,
+    )
+    from komaverse.api.agent import _remember
+
+    with factory() as s:
+        project_a, _ = _project_and_frame(s, user, name="A")
+        project_b, _ = _project_and_frame(s, user, name="B")
+        pid_a, pid_b = project_a.id, project_b.id
+        _remember(s, user, pid_a, "user", "hello alpha")
+        _remember(s, user, pid_a, "agent", "hi alpha")
+        _remember(s, user, pid_b, "user", "hello beta")
+        _remember(s, user, pid_a, "user", "side quest", thread_id="t1")
+        _remember(s, user, pid_a, "agent", "quest ack", thread_id="t1")
+        s.commit()
+        # Default thread of A: B's turns and t1 stay out.
+        default = agent_history(project_id=pid_a, session=s, user=user)
+        assert [t.text for t in default] == ["hello alpha", "hi alpha"]
+        assert all(t.thread_id is None for t in default)
+        # Thread t1 reads only its own turns.
+        side = agent_history(project_id=pid_a, thread_id="t1", session=s, user=user)
+        assert [t.text for t in side] == ["side quest", "quest ack"]
+        assert all(t.thread_id == "t1" for t in side)
+        # Project B is isolated from both.
+        other = agent_history(project_id=pid_b, session=s, user=user)
+        assert [t.text for t in other] == ["hello beta"]
+        # The history tool honors the thread scope too.
+        out = agent_mod.tool_history(s, user, pid_a, thread_id="t1")
+        assert "side quest" in out
+        assert "hello alpha" not in out
+        out = agent_mod.tool_history(s, user, pid_a)
+        assert "hello alpha" in out
+        assert "side quest" not in out
+        # Thread listing: default + t1, titles from first user text.
+        threads = list_agent_threads(project_id=pid_a, session=s, user=user)
+        by_id = {t.id: t for t in threads}
+        assert by_id[None].count == 2
+        assert by_id[None].title == "hello alpha"
+        assert by_id["t1"].count == 2
+        assert by_id["t1"].title == "side quest"
+        assert by_id["t1"].updated_at
+        # Mint + delete round-trip.
+        fresh = create_agent_thread(project_id=pid_a, session=s, user=user)
+        assert fresh.id
+        delete_agent_thread(fresh.id, project_id=pid_a, session=s, user=user)
+        delete_agent_thread("t1", project_id=pid_a, session=s, user=user)
+        assert agent_history(project_id=pid_a, thread_id="t1", session=s, user=user) == []
+        # Deleting t1 leaves the default thread and project B alone.
+        assert len(agent_history(project_id=pid_a, session=s, user=user)) == 2
+        assert len(agent_history(project_id=pid_b, session=s, user=user)) == 1
+        # Clearing the default thread is scoped the same way.
+        assert clear_agent_history(project_id=pid_a, session=s, user=user) is None
+        assert agent_history(project_id=pid_a, session=s, user=user) == []
+        assert len(agent_history(project_id=pid_b, session=s, user=user)) == 1
+
+
+def test_chat_turn_stays_in_thread(factory, user):
+    """chat() with a thread_id stores and recalls inside that thread."""
+    from komaverse.api.agent import AgentChatBody, agent_history, chat
+
+    with factory() as s:
+        project, _ = _project_and_frame(s, user)
+        chat(
+            AgentChatBody(project_id=project.id, thread_id="t9", message="hello"),
+            s, user,
+        )
+    with factory() as s:
+        side = agent_history(
+            project_id=project.id, thread_id="t9", session=s, user=user
+        )
+        assert [t.role for t in side] == ["user", "agent"]
+        assert side[0].text == "hello"
+        assert all(t.thread_id == "t9" for t in side)
+        assert agent_history(project_id=project.id, session=s, user=user) == []

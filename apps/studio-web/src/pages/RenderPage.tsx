@@ -844,8 +844,13 @@ export default function RenderPage() {
   const fmtElapsed = (s: number) =>
     `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
 
+  // Synchronous in-flight guard: state closures go stale on rapid
+  // double-click, which queued two exports and left the button/progress
+  // fighting over two jobs. The ref flips in the same tick as the click.
+  const exportRef = useRef(false);
   const doExport = async () => {
-    if (!project || !scene || clips.length === 0 || exporting) return;
+    if (!project || !scene || clips.length === 0 || exporting || exportRef.current) return;
+    exportRef.current = true;
     setBusy("export");
     setNotice("");
     try {
@@ -886,6 +891,7 @@ export default function RenderPage() {
     } catch (e) {
       setNotice(`Export failed: ${(e as Error).message}`);
     } finally {
+      exportRef.current = false;
       setBusy("");
       setExporting(null);
     }

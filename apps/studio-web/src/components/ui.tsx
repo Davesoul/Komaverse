@@ -637,6 +637,12 @@ export function SfxBtn({
     <button
       className={`kv-sfxbtn${small ? " small" : ""}${className ? ` ${className}` : ""}`}
       {...rest}
+      onAnimationEnd={(e) => {
+        if (e.animationName === "kv-punch" || e.animationName === "kv-flash") {
+          e.currentTarget.classList.remove("punch");
+        }
+        rest.onAnimationEnd?.(e);
+      }}
       onClick={(e) => {
         const el = e.currentTarget;
         el.classList.remove("punch");

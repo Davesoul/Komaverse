@@ -111,6 +111,7 @@ def init_db() -> None:
         "ALTER TABLE usage_events ADD COLUMN project_id VARCHAR(12) DEFAULT ''",
         "ALTER TABLE clips ADD COLUMN offset FLOAT DEFAULT 0.0",
         "ALTER TABLE chat_turns ADD COLUMN actions TEXT",
+        "ALTER TABLE chat_turns ADD COLUMN thread_id VARCHAR(12)",
     ):
         try:
             with engine.begin() as conn:

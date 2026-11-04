@@ -7,6 +7,7 @@ import {
   type AgentRef,
   type AgentReply,
   type AgentStatus,
+  type AgentThread,
 } from "../api";
 import { getCurrentProject, getDrawFrame } from "../lib/studio";
 import { probeDuration } from "../lib/audio/peaks";
@@ -597,6 +598,13 @@ export default function AgentDock() {
   });
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
+  // Per-project conversation threads: which project the pane shows and
+  // which thread inside it is active (null = default thread). The active
+  // thread persists per project across reloads.
+  const [pid, setPid] = useState<string | null>(() => getCurrentProject());
+  const [threads, setThreads] = useState<AgentThread[]>([]);
+  const [threadId, setThreadId] = useState<string | null>(null);
+  const threadKey = (p: string | null) => `komaverse.agentThread.${p ?? "none"}`;
   const [credits, setCredits] = useState<number | null>(null);
   const [agentInfo, setAgentInfo] = useState<AgentStatus | null>(null);
   // Studio brain settings: provider + model pickers, persisted server-side.
@@ -656,8 +664,11 @@ export default function AgentDock() {
   }, [messages]);
 
   // Credit balance, but only when the server actually charges.
-  // Server memory wins: restore the project thread when it exists,
-  // otherwise keep the local log.
+  // Server memory wins per (project, thread): the pane reloads whenever
+  // the dock opens, the current project changes, or the active thread
+  // changes — so history is genuinely per project, not one global log.
+  // An empty server thread resets to the greeting instead of keeping a
+  // stale thread from another project.
   useEffect(() => {
     if (!open) return;
     api
@@ -675,23 +686,65 @@ export default function AgentDock() {
       .catch(() => {});
     setAgentInfo(null);
     api.agentStatus().then(setAgentInfo).catch(() => setAgentInfo(null));
-    const pid = getCurrentProject();
-    if (pid) {
-      api
-        .agentHistory(pid)
-        .then((turns) => {
-          if (turns.length > 0) {
-            setMessages(
-              turns.slice(-50).map((t) => ({
-                role: (t.role === "user" ? "user" : "agent") as Msg["role"],
-                text: t.text,
-              })),
-            );
-          }
-        })
-        .catch(() => {});
-    }
+    const cur = getCurrentProject();
+    setPid((prev) => (prev === cur ? prev : cur));
+    if (busyRef.current) return;
+    let live = true;
+    api
+      .listAgentThreads(cur)
+      .then((ts) => {
+        if (live) setThreads(ts);
+      })
+      .catch(() => {});
+    api
+      .agentHistory(cur, threadId)
+      .then((turns) => {
+        if (!live) return;
+        if (turns.length > 0) {
+          setMessages(
+            turns.slice(-50).map((t) => ({
+              role: (t.role === "user" ? "user" : "agent") as Msg["role"],
+              text: t.text,
+            })),
+          );
+        } else {
+          setMessages([GREETING]);
+        }
+      })
+      .catch(() => {});
+    return () => {
+      live = false;
+    };
+  }, [open, pid, threadId]);
+
+  // The current project can change while the dock stays open (Home tab
+  // publishes a new id): follow it so the pane never shows a stale
+  // project's thread.
+  useEffect(() => {
+    if (!open) return;
+    const tick = () => {
+      const cur = getCurrentProject();
+      setPid((prev) => (prev === cur ? prev : cur));
+    };
+    tick();
+    const t = window.setInterval(tick, 1000);
+    window.addEventListener("focus", tick);
+    return () => {
+      window.clearInterval(t);
+      window.removeEventListener("focus", tick);
+    };
   }, [open ]);
+
+  // Restore the saved active thread when the dock opens or the project
+  // changes (saved per project by the switcher handlers below).
+  useEffect(() => {
+    if (!open) return;
+    try {
+      setThreadId(localStorage.getItem(threadKey(pid)) || null);
+    } catch {
+      setThreadId(null);
+    }
+  }, [open, pid]);
 
   // Focus the composer on open; Escape closes the dock.
   useEffect(() => {
@@ -1377,6 +1430,57 @@ export default function AgentDock() {
         .then((b) => setCredits(b.balance))
         .catch(() => {});
     }
+    // Titles and counts change with every turn: refresh the switcher.
+    api
+      .listAgentThreads(out.project_id ?? getCurrentProject())
+      .then(setThreads)
+      .catch(() => {});
+  };
+
+  // Thread switcher: swap the active conversation (history reloads via
+  // the effect above), mint a fresh one, or delete with the same
+  // confirm() convention as Clear. Chat carries the active thread so the
+  // turn pipeline reads and writes inside it.
+  const saveThread = (p: string | null, id: string | null) => {
+    try {
+      localStorage.setItem(threadKey(p), id ?? "");
+    } catch {
+      /* private mode — session only */
+    }
+  };
+  const switchThread = (id: string | null) => {
+    if (busyRef.current) return;
+    saveThread(getCurrentProject(), id);
+    setThreadId(id);
+  };
+  const newThread = async () => {
+    if (busyRef.current) return;
+    const cur = getCurrentProject();
+    try {
+      const t = await api.createAgentThread(cur);
+      saveThread(cur, t.id);
+      setThreadId(t.id);
+      setMessages([GREETING]);
+    } catch (e) {
+      toast(`New conversation failed: ${(e as Error).message}`, "error");
+    }
+  };
+  const deleteThread = async () => {
+    if (busyRef.current) return;
+    const cur = getCurrentProject();
+    if (!window.confirm("Delete this conversation? Its messages are deleted. This can't be undone.")) return;
+    try {
+      if (threadId) await api.deleteAgentThread(cur, threadId);
+      else await api.clearAgentHistory(cur, null);
+      if (threadId) {
+        saveThread(cur, null);
+        setThreadId(null);
+      } else {
+        setMessages([GREETING]);
+      }
+    } catch (e) {
+      toast(`Delete failed: ${(e as Error).message}`, "error");
+    }
   };
 
   interface StreamEvent {
@@ -1402,6 +1506,7 @@ export default function AgentDock() {
     signal: AbortSignal,
     refs: AgentRef[],
     currentFrame: string | null,
+    thread: string | null,
   ): Promise<TurnOut & { streamed: boolean; messageId?: string }> => {
     const res = await fetch(`${apiBase()}/api/v1/agent/chat/stream`, {
       method: "POST",
@@ -1412,13 +1517,14 @@ export default function AgentDock() {
         message,
         refs,
         current_frame_id: currentFrame ?? null,
+        thread_id: thread ?? null,
       }),
       signal,
     });
     if (!res.ok || !res.body) {
       // Stream unavailable (or refused): same reply, no live updates.
       // api.agentChat surfaces 401 through the shared session handler.
-      const fr = await api.agentChat(pid, message, signal, refs, currentFrame);
+      const fr = await api.agentChat(pid, message, signal, refs, currentFrame, thread);
       return {
         reply: fr.reply,
         actions: fr.actions ?? [],
@@ -1583,6 +1689,7 @@ export default function AgentDock() {
         ctl.signal,
         parseAgentRefs(message),
         currentFrame,
+        threadId,
       );
       finalizeTurn(out, out.streamed ? out.messageId : undefined);
     } catch (e) {
@@ -1659,6 +1766,7 @@ export default function AgentDock() {
     elevenlabs: "elevenlabs_",
     "free-tts": "freetts_",
   };
+  const defaultThread = threads.find((t) => !t.id);
   const brainOverridden = new Set(agentInfo?.overrides ?? []);
   const brainCustom = (field: string) => (brainOverridden.has(field) ? " •" : "");
   const openBrain = () => {
@@ -1931,13 +2039,53 @@ export default function AgentDock() {
           <Btn small active={showBrain} onClick={openBrain} aria-label="Brain settings" title="Switch provider and models">
             Brain
           </Btn>
-          <Btn small onClick={() => { if (!window.confirm("Clear this chat history? The conversation memory is deleted. This can't be undone.")) return; setMessages([GREETING]); api.clearAgentHistory(getCurrentProject()).catch(() => {}); }} aria-label="Clear chat history">
+          <Btn small onClick={() => { if (!window.confirm("Clear this chat history? The conversation memory is deleted. This can't be undone.")) return; setMessages([GREETING]); api.clearAgentHistory(getCurrentProject(), threadId).then(() => { api.listAgentThreads(getCurrentProject()).then(setThreads).catch(() => {}); }).catch(() => {}); }} aria-label="Clear chat history">
             Clear
           </Btn>
           <Btn small onClick={() => setOpen(false)} aria-label="Close agent">
             Close
           </Btn>
         </span>
+      </div>
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: 6,
+          padding: "8px 12px",
+          borderBottom: "1px solid var(--kv-border)",
+        }}
+      >
+        <SelectInput
+          value={threadId ?? ""}
+          onChange={(e) => switchThread(e.target.value || null)}
+          aria-label="Conversation thread"
+          title="Switch conversation thread (per project)"
+          disabled={busy}
+          style={{ flex: 1, minWidth: 0 }}
+        >
+          <option value="">
+            {defaultThread
+              ? `Default conversation (${defaultThread.count})`
+              : "Default conversation"}
+          </option>
+          {threadId && !threads.some((t) => t.id === threadId) && (
+            <option value={threadId}>New conversation</option>
+          )}
+          {threads
+            .filter((t) => t.id)
+            .map((t) => (
+              <option key={t.id} value={t.id ?? ""}>
+                {t.title} ({t.count})
+              </option>
+            ))}
+        </SelectInput>
+        <Btn small disabled={busy} onClick={() => void newThread()} title="Start a new conversation">
+          New
+        </Btn>
+        <Btn small disabled={busy} onClick={() => void deleteThread()} title="Delete this conversation">
+          Delete
+        </Btn>
       </div>
       {lightbox && (
         <div

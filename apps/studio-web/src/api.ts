@@ -322,6 +322,15 @@ export interface AgentConfigBody {
 export interface ChatTurn {
   role: string;
   text: string;
+  thread_id: string | null;
+}
+
+/** One agent conversation thread in a project scope (null id = default). */
+export interface AgentThread {
+  id: string | null;
+  title: string;
+  updated_at: string | null;
+  count: number;
 }
 
 /** One @-mention: a specific frame, detected panel, voice take, generation, or sequence. */
@@ -898,11 +907,12 @@ export const api = {
     signal?: AbortSignal,
     refs: AgentRef[] = [],
     current_frame_id?: string | null,
+    thread_id?: string | null,
   ) =>
     req<AgentReply>("/api/v1/agent/chat", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ project_id, message, refs, current_frame_id: current_frame_id ?? null }),
+      body: JSON.stringify({ project_id, message, refs, current_frame_id: current_frame_id ?? null, thread_id: thread_id ?? null }),
       signal,
     }),
   agentStatus: () => req<AgentStatus>("/api/v1/agent/status"),
@@ -912,15 +922,36 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     }),
-  agentHistory: (project_id: string | null) =>
-    req<ChatTurn[]>(
-      `/api/v1/agent/history${project_id ? `?project_id=${encodeURIComponent(project_id)}` : ""}`,
-    ),
-  clearAgentHistory: (project_id: string | null) =>
-    req<void>(
-      `/api/v1/agent/history${project_id ? `?project_id=${encodeURIComponent(project_id)}` : ""}`,
-      { method: "DELETE" },
-    ),
+  agentHistory: (project_id: string | null, thread_id?: string | null) => {
+    const q = new URLSearchParams();
+    if (project_id) q.set("project_id", project_id);
+    if (thread_id) q.set("thread_id", thread_id);
+    const qs = q.toString();
+    return req<ChatTurn[]>(`/api/v1/agent/history${qs ? `?${qs}` : ""}`);
+  },
+  clearAgentHistory: (project_id: string | null, thread_id?: string | null) => {
+    const q = new URLSearchParams();
+    if (project_id) q.set("project_id", project_id);
+    if (thread_id) q.set("thread_id", thread_id);
+    const qs = q.toString();
+    return req<void>(`/api/v1/agent/history${qs ? `?${qs}` : ""}`, {
+      method: "DELETE",
+    });
+  },
+  listAgentThreads: (project_id: string | null) => {
+    const qs = project_id ? `?project_id=${encodeURIComponent(project_id)}` : "";
+    return req<AgentThread[]>(`/api/v1/agent/threads${qs}`);
+  },
+  createAgentThread: (project_id: string | null) => {
+    const qs = project_id ? `?project_id=${encodeURIComponent(project_id)}` : "";
+    return req<{ id: string }>(`/api/v1/agent/threads${qs}`, { method: "POST" });
+  },
+  deleteAgentThread: (project_id: string | null, thread_id: string) => {
+    const qs = project_id ? `?project_id=${encodeURIComponent(project_id)}` : "";
+    return req<void>(`/api/v1/agent/threads/${encodeURIComponent(thread_id)}${qs}`, {
+      method: "DELETE",
+    });
+  },
   autoDirect: (projectId: string, body?: { seconds?: number; motions?: string[] }) =>
     req<Scene>(`/api/v1/projects/${projectId}/auto-direct`, {
       method: "POST",

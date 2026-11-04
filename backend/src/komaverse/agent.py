@@ -118,7 +118,13 @@ def _fmt_when(dt) -> str:
         return "unknown time"
 
 
-def tool_history(session: Session, user: UserRow, project_id: str | None, limit=10) -> str:
+def tool_history(
+    session: Session,
+    user: UserRow,
+    project_id: str | None,
+    limit=10,
+    thread_id: str | None = None,
+) -> str:
     """Recent chat turns with dates and the tool actions each ran."""
     try:
         n = min(max(int(limit or 10), 1), 20)
@@ -129,6 +135,11 @@ def tool_history(session: Session, user: UserRow, project_id: str | None, limit=
         ChatTurnRow.project_id == project_id
         if project_id
         else ChatTurnRow.project_id.is_(None)
+    )
+    cond = cond & (
+        ChatTurnRow.thread_id == thread_id
+        if thread_id
+        else ChatTurnRow.thread_id.is_(None)
     )
     rows = (
         session.execute(

@@ -27,7 +27,7 @@ from komaverse.auth import get_current_user
 from komaverse.config import settings
 from komaverse.db import get_session
 from komaverse.db_models import ChatTurnRow, UserRow
-from komaverse.models import Scene
+from komaverse.models import Scene, uuid_short
 from komaverse.studio_settings import (
     AI_OVERRIDE_KEYS,
     AI_SECRET_KEYS,
@@ -45,6 +45,9 @@ router = APIRouter(prefix="/api/v1")
 
 class AgentChatBody(BaseModel):
     project_id: str | None = None
+    # Conversation thread within the project scope (None = default).
+    # Reads and writes both filter by (user, project, thread).
+    thread_id: str | None = None
     message: str = ""
     clip_seconds: float = 2.0
     # @-mentions parsed by the client: resolved ownership-scoped into context.
@@ -119,6 +122,21 @@ class AgentConfigBody(BaseModel):
 class ChatTurnOut(BaseModel):
     role: str
     text: str
+    thread_id: str | None = None
+
+
+class ThreadOut(BaseModel):
+    """One conversation thread in a project scope (None id = default)."""
+
+    id: str | None
+    # First user turn's text (truncated), so the switcher can label it.
+    title: str
+    updated_at: str | None
+    count: int
+
+
+class ThreadIdOut(BaseModel):
+    id: str
 
 
 class AutoDirectBody(BaseModel):
@@ -135,7 +153,7 @@ def chat(
     if not body.message.strip():
         raise HTTPException(400, "message is required")
     seconds = min(max(body.clip_seconds, 0.1), 30.0)
-    history = _load_history(session, user, body.project_id)
+    history = _load_history(session, user, body.project_id, thread_id=body.thread_id)
     refs = [r.model_dump() for r in body.refs]
     # The open frame reaches run_agent_turn via current_frame_id, which
     # scopes the turn and - only on reference intent - attaches it.
@@ -143,10 +161,17 @@ def chat(
         body.message, body.project_id, session, user, None, seconds,
         refs=refs, history=history, current_frame_id=body.current_frame_id,
     )
-    _remember(session, user, out.get("project_id"), "user", body.message)
+    # Stored under the resolved project (not the requested one): the turn
+    # rewrote an unscoped request into its project, so the memory must move
+    # with it — reads filter by the same scope, which is what makes
+    # history genuinely per project end to end.
+    _remember(
+        session, user, out.get("project_id"), "user", body.message,
+        thread_id=body.thread_id,
+    )
     _remember(
         session, user, out.get("project_id"), "agent", out.get("reply", ""),
-        out.get("actions"),
+        out.get("actions"), thread_id=body.thread_id,
     )
     session.commit()
     return AgentReply(**out)
@@ -167,7 +192,7 @@ def chat_stream(
     if not body.message.strip():
         raise HTTPException(400, "message is required")
     seconds = min(max(body.clip_seconds, 0.1), 30.0)
-    history = _load_history(session, user, body.project_id)
+    history = _load_history(session, user, body.project_id, thread_id=body.thread_id)
     refs = [r.model_dump() for r in body.refs]
 
     def generate():
@@ -180,10 +205,13 @@ def chat_stream(
                 final = {k: v for k, v in event.items() if k != "type"}
             yield f"data: {json.dumps(event)}\n\n"
         if final is not None:
-            _remember(session, user, final.get("project_id"), "user", body.message)
+            _remember(
+                session, user, final.get("project_id"), "user", body.message,
+                thread_id=body.thread_id,
+            )
             _remember(
                 session, user, final.get("project_id"), "agent", final.get("reply", ""),
-                final.get("actions"),
+                final.get("actions"), thread_id=body.thread_id,
             )
             session.commit()
 
@@ -199,22 +227,27 @@ _HISTORY_KEEP = 100
 _MAX_TURN_CHARS = 2000
 
 
-def _history_scope(user, project_id):
+def _history_scope(user, project_id, thread_id=None):
     cond = ChatTurnRow.user_id == user.id
     scope = (
         ChatTurnRow.project_id == project_id
         if project_id
         else ChatTurnRow.project_id.is_(None)
     )
-    return cond & scope
+    thread = (
+        ChatTurnRow.thread_id == thread_id
+        if thread_id
+        else ChatTurnRow.thread_id.is_(None)
+    )
+    return cond & scope & thread
 
 
-def _load_history(session, user, project_id, limit=_HISTORY_LIMIT):
-    """Recent turns oldest-first for one user+project scope (the memory)."""
+def _load_history(session, user, project_id, limit=_HISTORY_LIMIT, thread_id=None):
+    """Recent turns oldest-first for one user+project+thread scope (the memory)."""
     rows = (
         session.execute(
             select(ChatTurnRow)
-            .where(_history_scope(user, project_id))
+            .where(_history_scope(user, project_id, thread_id))
             .order_by(desc(ChatTurnRow.created_at), desc(ChatTurnRow.id))
             .limit(limit)
         )
@@ -226,12 +259,13 @@ def _load_history(session, user, project_id, limit=_HISTORY_LIMIT):
             "role": r.role,
             "text": r.text,
             "at": r.created_at.isoformat(timespec="minutes") if r.created_at else "",
+            "thread_id": r.thread_id,
         }
         for r in reversed(rows)
     ]
 
 
-def _remember(session, user, project_id, role, text, actions=None):
+def _remember(session, user, project_id, role, text, actions=None, thread_id=None):
     """Store one turn and prune the scope past the keep limit.
 
     Agent rows also keep the tool calls they ran (JSON), so the
@@ -255,6 +289,7 @@ def _remember(session, user, project_id, role, text, actions=None):
         ChatTurnRow(
             user_id=user.id,
             project_id=project_id,
+            thread_id=thread_id,
             role=role,
             text=(text or "")[:_MAX_TURN_CHARS],
             actions=stored_actions,
@@ -264,7 +299,7 @@ def _remember(session, user, project_id, role, text, actions=None):
     stale = (
         session.execute(
             select(ChatTurnRow.id)
-            .where(_history_scope(user, project_id))
+            .where(_history_scope(user, project_id, thread_id))
             .order_by(desc(ChatTurnRow.created_at), desc(ChatTurnRow.id))
             .offset(_HISTORY_KEEP)
         )
@@ -278,22 +313,113 @@ def _remember(session, user, project_id, role, text, actions=None):
 @router.get("/agent/history", response_model=list[ChatTurnOut])
 def agent_history(
     project_id: str | None = None,
+    thread_id: str | None = None,
     session: Session = Depends(get_session),
     user: UserRow = Depends(get_current_user),
 ):
     return [
-        ChatTurnOut(role=h["role"], text=h["text"])
-        for h in _load_history(session, user, project_id, limit=50)
+        ChatTurnOut(role=h["role"], text=h["text"], thread_id=h["thread_id"])
+        for h in _load_history(session, user, project_id, limit=50, thread_id=thread_id)
     ]
 
 
 @router.delete("/agent/history", status_code=204)
 def clear_agent_history(
     project_id: str | None = None,
+    thread_id: str | None = None,
     session: Session = Depends(get_session),
     user: UserRow = Depends(get_current_user),
 ):
-    session.execute(delete(ChatTurnRow).where(_history_scope(user, project_id)))
+    session.execute(
+        delete(ChatTurnRow).where(_history_scope(user, project_id, thread_id))
+    )
+    session.commit()
+    return None
+
+
+@router.get("/agent/threads", response_model=list[ThreadOut])
+def list_agent_threads(
+    project_id: str | None = None,
+    session: Session = Depends(get_session),
+    user: UserRow = Depends(get_current_user),
+):
+    """Conversation threads in one project scope, newest first.
+
+    Threads are the distinct thread_id values stored on this user's turns
+    (NULL rows predate threads and read as the default thread). The title
+    is the thread's first user turn, truncated for the switcher.
+    """
+    cond = ChatTurnRow.user_id == user.id
+    cond = cond & (
+        ChatTurnRow.project_id == project_id
+        if project_id
+        else ChatTurnRow.project_id.is_(None)
+    )
+    rows = (
+        session.execute(
+            select(
+                ChatTurnRow.thread_id,
+                ChatTurnRow.role,
+                ChatTurnRow.text,
+                ChatTurnRow.created_at,
+            )
+            .where(cond)
+            .order_by(ChatTurnRow.created_at.asc(), ChatTurnRow.id.asc())
+        )
+        .all()
+    )
+    agg: dict[str | None, dict] = {}
+    for tid, role, text, at in rows:
+        entry = agg.setdefault(tid, {"count": 0, "updated_at": None, "title": None})
+        entry["count"] += 1
+        entry["updated_at"] = at
+        if entry["title"] is None and role == "user" and (text or "").strip():
+            entry["title"] = (text or "").strip().split("\n")[0][:48]
+    out = [
+        ThreadOut(
+            id=tid,
+            title=entry["title"] or "Untitled thread",
+            updated_at=(
+                entry["updated_at"].isoformat(timespec="minutes")
+                if entry["updated_at"]
+                else None
+            ),
+            count=entry["count"],
+        )
+        for tid, entry in agg.items()
+    ]
+    out.sort(key=lambda t: t.updated_at or "", reverse=True)
+    return out
+
+
+@router.post("/agent/threads", response_model=ThreadIdOut, status_code=201)
+def create_agent_thread(
+    project_id: str | None = None,
+    session: Session = Depends(get_session),
+    user: UserRow = Depends(get_current_user),
+):
+    """Mint a fresh thread id for this project scope.
+
+    The id carries no rows until the first turn is stored under it, so it
+    only appears in the list once the conversation starts — the widget
+    adopts it as the active thread immediately.
+    """
+    _ = (project_id, session, user)
+    return ThreadIdOut(id=uuid_short())
+
+
+@router.delete("/agent/threads/{thread_id}", status_code=204)
+def delete_agent_thread(
+    thread_id: str,
+    project_id: str | None = None,
+    session: Session = Depends(get_session),
+    user: UserRow = Depends(get_current_user),
+):
+    """Delete one non-default thread's turns (the default thread clears
+    through DELETE /agent/history instead)."""
+    session.execute(
+        delete(ChatTurnRow).where(_history_scope(user, project_id, thread_id))
+    )
     session.commit()
     return None
 

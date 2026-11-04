@@ -665,6 +665,13 @@ class ChatTurnRow(Base):
     id: Mapped[str] = mapped_column(String(12), primary_key=True, default=uuid_short)
     user_id: Mapped[str] = mapped_column(String(64), index=True, default="local")
     project_id: Mapped[str | None] = mapped_column(String(12), index=True, default=None)
+    # Conversation thread within the project scope. NULL rows predate
+    # threads (same backfill pattern as actions): they read as the default
+    # thread. Existing DBs also need
+    # `ALTER TABLE chat_turns ADD COLUMN thread_id VARCHAR(12)` in init_db.
+    thread_id: Mapped[str | None] = mapped_column(
+        String(12), index=True, default=None, nullable=True
+    )
     role: Mapped[str] = mapped_column(String(8), default="user")
     text: Mapped[str] = mapped_column(Text, default="")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, index=True)

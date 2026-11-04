@@ -694,6 +694,51 @@ def test_motion_frame_moves_pixels_for_every_motion():
     assert np.array_equal(still, motion_frame(base, 320, 180, 0.0, "none"))
 
 
+def test_contain_resize_letterboxes_portrait():
+    """Export fits the whole picture like the preview (contain, not cover).
+
+    A portrait still in a 16:9 frame keeps its full height with black
+    side bars — the old cover-crop cut the top and bottom off.
+    """
+    import numpy as np
+
+    from komaverse.renderer import contain_resize, finish_frame
+
+    portrait = np.full((200, 100, 3), 200, dtype="uint8")  # grey portrait
+    out = finish_frame(portrait, "none", 0, 4, 320, 180, 12, 0.0, 0.0)
+    assert out.shape == (180, 320, 3)
+    # Side bars are black, the full-height picture survives in the middle.
+    assert (out[:, :10] == 0).all() and (out[:, -10:] == 0).all()
+    assert (out[:, 115:205] > 0).all()
+    wide = np.full((100, 400, 3), 200, dtype="uint8")
+    out_w = contain_resize(wide, 320, 180)
+    assert out_w.shape == (180, 320, 3)
+    assert (out_w[:10, :] == 0).all() and (out_w[-10:, :] == 0).all()
+    assert (out_w[50:130, :] > 0).all()
+
+
+def test_motion_canvas_matches_preview_factors():
+    """Canvas motion mirrors the preview CSS: zoom <= 1.18, small pans."""
+    import numpy as np
+
+    from komaverse.renderer import motion_canvas
+
+    rng = np.random.default_rng(7)
+    base = rng.integers(0, 255, (180, 320, 3)).astype("uint8")
+    # zoom-in starts at identity, ends zoomed but bounded (preview: 1.18x)
+    first = motion_canvas(base, 320, 180, 0.0, "zoom-in")
+    assert np.array_equal(first, base)
+    last = motion_canvas(base, 320, 180, 1.0, "zoom-in")
+    assert not np.array_equal(first, last)
+    for motion in ("zoom-out", "pan-left", "pan-right", "pan-up", "pan-down", "drift"):
+        a = motion_canvas(base, 320, 180, 0.0, motion)
+        b = motion_canvas(base, 320, 180, 1.0, motion)
+        assert a.shape == (180, 320, 3)
+        assert not np.array_equal(a, b), motion
+    still = motion_canvas(base, 320, 180, 0.5, "none")
+    assert np.array_equal(still, base)
+
+
 def _page_png(factory, user, project_id, w=200, h=100):
     import io as _io
 

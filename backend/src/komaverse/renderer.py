@@ -103,14 +103,55 @@ def composite_frame(frame: FrameRow) -> np.ndarray:
     return cv2.cvtColor(np.array(composite_frame_image(frame)), cv2.COLOR_RGBA2BGR)
 
 
-def cover_resize(src: np.ndarray, w: int, h: int) -> np.ndarray:
-    """Scale src to cover (w, h), then center-crop."""
+def contain_resize(src: np.ndarray, w: int, h: int) -> np.ndarray:
+    """Scale src to fit inside (w, h), then center on a black canvas.
+
+    This is what the preview player shows (object-fit contain on a
+    black stage): the whole picture stays visible, aspect intact.
+    """
     sh, sw = src.shape[:2]
-    scale = max(w / sw, h / sh)
-    resized = cv2.resize(src, (int(sw * scale) + 1, int(sh * scale) + 1))
-    rh, rw = resized.shape[:2]
-    x, y = (rw - w) // 2, (rh - h) // 2
-    return resized[y : y + h, x : x + w]
+    scale = min(w / sw, h / sh)
+    nw, nh = max(int(sw * scale), 1), max(int(sh * scale), 1)
+    resized = cv2.resize(src, (nw, nh))
+    canvas = np.zeros((h, w, 3), dtype=np.uint8)
+    x, y = (w - nw) // 2, (h - nh) // 2
+    canvas[y : y + nh, x : x + nw] = resized
+    return canvas
+
+
+def motion_canvas(base: np.ndarray, w: int, h: int, t: float, motion: str) -> np.ndarray:
+    """Canvas-space Ken Burns on a WxH frame, mirroring the preview CSS.
+
+    Preview pans/zooms the contained picture (scale <= 1.18, +/-4% pans);
+    the warp below uses the same factors so the MP4 matches the stage.
+    Out-of-canvas samples stay black (the preview stage is #000).
+    """
+    if motion == "zoom-in":
+        s, tx, ty = 1.0 + 0.18 * t, 0.0, 0.0
+    elif motion == "zoom-out":
+        s, tx, ty = 1.18 - 0.18 * t, 0.0, 0.0
+    elif motion == "pan-left":
+        s, tx, ty = 1.15, 1.15 * (4.0 - 8.0 * t) / 100.0 * w, 0.0
+    elif motion == "pan-right":
+        s, tx, ty = 1.15, 1.15 * (-4.0 + 8.0 * t) / 100.0 * w, 0.0
+    elif motion == "pan-up":
+        s, tx, ty = 1.15, 0.0, 1.15 * (4.0 - 8.0 * t) / 100.0 * h
+    elif motion == "pan-down":
+        s, tx, ty = 1.15, 0.0, 1.15 * (-4.0 + 8.0 * t) / 100.0 * h
+    elif motion == "drift":
+        s, tx, ty = (
+            1.15,
+            1.15 * (-4.0 + 8.0 * t) / 100.0 * w,
+            1.15 * (-4.0 + 8.0 * t) / 100.0 * h,
+        )
+    else:  # none and unknown motions hold the frame still
+        return base
+    cx, cy = w / 2.0, h / 2.0
+    mat = np.float32([[s, 0, cx - s * cx + tx], [0, s, cy - s * cy + ty]])
+    return cv2.warpAffine(
+        base, mat, (w, h),
+        flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=(0, 0, 0),
+    )
 
 
 def motion_frame(base: np.ndarray, w: int, h: int, t: float, motion: str) -> np.ndarray:
@@ -331,9 +372,9 @@ def finish_frame(
     frame: np.ndarray, motion: str, i: int, n: int, w: int, h: int,
     fps: int, fade_in: float, fade_out: float,
 ) -> np.ndarray:
-    """Cover-crop, Ken Burns motion, and fade envelope for one frame."""
-    base = cover_resize(frame, w * 2, h * 2)
-    out = motion_frame(base, w, h, i / max(n - 1, 1), motion or "none")
+    """Contain-fit on black, canvas-space Ken Burns, fade envelope."""
+    base = contain_resize(frame, w, h)
+    out = motion_canvas(base, w, h, i / max(n - 1, 1), motion or "none")
     return fade_frame(out, fade_alpha(i, n, fps, fade_in or 0.0, fade_out or 0.0))
 
 
