@@ -1,332 +1,98 @@
-# Komaverse — AI Anime Studio
+# Komaverse — turn manga pages into animated sequences
 
-Animation studio in one cross-platform app: draw, animate on a
-frame-by-frame timeline, and generate with AI (cloud-first,
-local-pluggable) — starting from manga/comic pages (scan → panels →
-clips) or from a blank canvas.
+[![CI](https://github.com/Davesoul/Komaverse/actions/workflows/ci.yml/badge.svg)](https://github.com/Davesoul/Komaverse/actions/workflows/ci.yml)
 
-Rebuild of `../saas-projects/koma-wari` (kept as legacy reference —
-do not import from it, port deliberately). All work in this repo
-started Oct 28, 2026.
+Browser anime studio: scan a page, detect its panels, clean up the frames,
+generate the ones in between, animate and export — with no GPU on your machine.
+Built for the Cerebral Valley × Meta hackathon on Meta Model API models
+([Muse Spark](https://developers.meta.ai/docs/models) chat/vision, Muse Image,
+Muse Voice, SAM 3.1) plus open-weight Muse models.
 
-## Try it (judges — sign in with the demo account)
+![Komaverse demo reel](docs/assets/readme/demo.gif)
 
-- Open the app and **Sign in**: `demo@komaverse.local` /
-  `demo1234`. No signup needed, no email verification.
-- The account is created automatically on **every** backend
-  start (`./scripts/dev.ps1`, `./scripts/start.ps1`, plain
-  `uvicorn`, Docker) when `KOMA_SEED_DEMO` is on (default) and
-  the email is not taken — cloning the repo and starting it is
-  enough. Set `KOMA_SEED_DEMO=false` on a public deploy that
-  must not carry a known-password account.
-- Want demo content too? From `backend/` with the venv active:
-  `python scripts/seed_demo.py` loads a Demo project (manga
-  page, detected panels, clips, credits, export). Re-running is
-  safe (existing user is reused).
-- Everything except paid AI works with zero keys: scan, panel
-  detection, draw, timeline, subtitles, local voice cloning and
-  local TTS, MP4 export.
-- Paid generations need your own keys: paste Meta / OpenRouter /
-  ElevenLabs keys into the Brain panel (Provider keys) — no
-  `.env`, no restart. Or pick the fake provider for a free tour.
-- Keys are never shown on screen; the status endpoint only
-  reports set-or-not.
+*Above: the real app — landing, home, scan, draw, render, media, and the AI
+dock. Full clip: [demo.mp4](docs/assets/readme/demo.mp4) (13s, 720p).*
 
-## Features (v1)
+## See it
 
-- **Scan:** upload manga pages, detect panels (SAM 3.1
-  default, YOLO `yolo-leoxs22` / `yolo` best-comic options via
-  `KOMA_YOLO_MODEL`, heuristic fallback, cloud with local fallback;
-  missing weights can be fetched
-  once from `KOMA_YOLO_LEOXS_URL` / `KOMA_YOLO_URL` on web deploys, with
-  a bottom-left download card visible on every tab until ready),
-  1:1 true-size viewer, SVG overlay editor (move/reshape/add/delete,
-  reading order), Send-to-Render handoff
-- **Draw:** layered canvas (brush/eraser, pressure, undo/redo, G-pen and
-  Japanese/modern presets, Ctrl+scroll zoom), frames strip under the canvas,
-  last-open frame auto-opens per project, canvas-native playback at 2–24 fps
-  with loop, Krita-style onion skin (red previous / green next, counts +
-  opacity, never exported), fullscreen canvas mode (F) with a compact
-  tool rail and a Brushes popup (presets, size, colors); frames and
-  whole sequences send to the timeline, new frames land after the cursor;
-  the paper sits in a tight scroll bed and moves only on its hotkeys
-  (H tool or Space-drag); it re-centers on fit/frame switch
-- **Render:** CapCut-style V1/A1/S1 timeline (proportional blocks, second
-  ruler, tenths timecode, zoom, drag-reorder, edge-trim with cue `end_sec`,
-  undo/redo with Ctrl+Z / Ctrl+Shift+Z like Draw), every delete gated by
-  a confirm pop-up. Clicking a sound cue selects it and opens the sound
-  inspector: volume (slider + numeric field, one PATCH per gesture),
-  fade in/out, speed (0.5/1/1.5/2× presets + custom 0.25–4, previewed
-  live with `playbackRate` and burned into the export with `atempo`),
-  and lane (A1–A8). Timeline cue rows carry a speed-cycle button too. The ＋ Lane menu adds
-  audio lanes (video overlap and extra subtitle lanes stay disabled until
-  the renderer grows a compositor and multi-track subs),
-  per-clip inspector (duration steppers, motion, lane V1–V4 + overlay
-  start), scenes + clips timeline (panels, frames, stills) with audio
-  waveforms on cues and Ctrl+wheel zoom + fit-to-width, V2–V4 overlay
-  lanes for fullscreen image/video cutaways (drag to move, right-edge
-  resize, composited into the export with native video audio, stacked
-  in the preview), S1 bottom + S2 top subtitle lanes (each replaces
-  only itself, both burn into the MP4), sidebar grouped by sequence
-  with search,
-  clips open back in Draw (frames directly, stills place, video
-  explodes), Ken Burns motion (drift added), transitions (wipe-right,
-  push-left, fade-white added), per-clip color grades (grayscale/sepia/
-  vintage/vivid, previewed live, burned into export), text title cards
-  with entrance anims (fade/rise), voiceover recording over
-  playback with auto-cue, TTS voice generation (ElevenLabs cloud or
-  vendored local voices — Kokoro/system, all in-app; Brain voice row
-  picks the engine, one-tap cue at the playhead), SRT subtitles
-  (S1 lane, preview captions, burned
-  into MP4 + VTT sidecar), H.264 MP4 export with contain-fit hi-res preview
-- **Media:** per-project library grid (scans, takes, generations, renders)
-  with search/filters/sort, lightbox viewer, storage usage. Takes reach the
-  timeline via ＋ Timeline (at the playhead) or drag onto the A1 lane
-- **AI:** pluggable providers — Meta Model API (Muse Spark/Wonder
-  brain, Muse Image generation, Voice Transcribe takes, SAM 3.1
-  segmentation), OpenRouter (chat, image + async video models),
-  ElevenLabs + vendored local TTS voices, ElevenLabs instant voice
-  cloning from 1–5 samples (clones join the Brain voice picker),
-  generic cloud endpoint (incl. hosted open weights), local ComfyUI,
-  fake demo — background jobs with polling; generations land in the
-  Media gallery (frames only on explicit request), videos preview in
-  the Generate panel
-- **Credits:** append-only ledger, per-operation costs, 402 enforcement,
-  dev grants (no Stripe in v1)
-- **Usage dashboard:** Home tab section with requests/calls, estimated
-  tokens, and credits over 7/30/90 days or all time — per activity and
-  model, and per project (`GET /api/v1/usage/summary?days=` with an
-  optional `project_id` filter; the card lists a By-project table and
-  filters to one project on click), with daily activity bars
-- **Cross-platform:** PWA web app (installable, app-shell offline) + Tauri 2
-  desktop shell (Windows/macOS/Linux), remote-API base URL setting
-- **Auth & security:** register/login/logout, per-user projects, rate limits,
-  security headers; **landing page** with auth gate included
-- **App intro:** a 5s manga-panel ident (`apps/studio-web/public/ident.html`,
-  `?embed=1` for a single in-app playthrough) plays over every app load
-  with its sting (`public/audio/ident-sting.mp3`,
-  "Fingerstyle Impact") — skippable (Skip/Esc), silent-safe when the browser
-  blocks autoplay; reduced motion is covered by Skip/Escape/auto-dismiss. See
-  [docs/BRAND.md](docs/BRAND.md)
-- **Observability:** JSON logs + request IDs, Prometheus `/metrics`,
-  `/ready`, error ring, client error funnel ([docs](docs/OBSERVABILITY.md))
-- **Studio agent (the differentiator):** chat that operates the app —
-  status, detect, auto-direct, export, generate — via real tools, with a
-  tool-calling LLM brain when keyed and one-click auto-direct in the UI.
-  `@`-mentions reference a specific frame, media item, or detected panel
-  (`@frame:…`, `@media:…`, `@panel:…`) and the reply grounds in it.
-  The agent also runs the whole drawing/animation studio: draw-frame
-  layers (add/rename/show/hide/lock/blend/reorder/merge), manga
-  screentone layers, dropping any media onto a frame as a layer, plus
-  frame and clip management — same tools over MCP (stdio + HTTP
-  `POST /mcp`). Projects hold multiple animation sequences (Draw tab
-  switcher, Media overview) and multiple timelines (Render switcher,
-  per-timeline export), all agent-operated. Media imports image, video,
-  and audio files; videos also drop onto the current timeline as clips
-  or explode into the current sequence frame by frame. Jobs cancel from
-  the dock progress cards or via the agent (`cancel_job`); usage tokens
-  cover transcription, detection, and export estimates; `@`-mentions
-  insert anywhere in the composer. Generation honors aspect ratios; the
-  timeline has transitions (crossfade, fade-black, wipe-left), per-clip
-  fades, and more Ken Burns moves — all agent-operated. Replies
-  stream with live tool chips and inline generating/image/video cards;
-  the Brain sets a provider + verified model per kind (chat/vision/
-  image/video/transcribe); `@`-mentions offer a live preview list over
-  renamable pages, panels, and frames; the mic button dictates via
-  Meta transcription. The agent reads studio craft skills (anime
-  direction, manga, composition, drawing, color, manga-literacy,
-  manga studio pages, web research) and passes an anime genre into
-  image/video prompts so generations carry the genre grammar; `/skills`
-  and `/tools` slash commands in the composer list them with
-  autocomplete, and `web_fetch` reads docs and references for
-  online research
+| | |
+|---|---|
+| ![Landing](docs/assets/readme/01-landing.png) | ![AI dock](docs/assets/readme/04-agent.png) |
+| Manga-hero landing with Netflix-style ident intro | Studio agent on `muse-spark-1.3-contributor`, threads, @-refs, inline art |
+| ![Draw](docs/assets/readme/03-draw.png) | ![Media](docs/assets/readme/03-media.png) |
+| Layered canvas, free pan, per-frame @-refs | Scanned pages, panel counts, takes, generations |
 
-## Layout
+More: [home](docs/assets/readme/02-home.png) · [scan](docs/assets/readme/03-scan.png) ·
+[render](docs/assets/readme/03-render.png)
 
-```
-komaverse/
-├── apps/studio-web/       # React + Vite + TS (PWA, primary UI)
-├── apps/studio-desktop/   # Tauri 2 shell (Win/macOS/Linux) around studio-web
-├── backend/               # FastAPI API (sync SQLAlchemy, SQLite/Postgres)
-│   └── scripts/seed_demo.py  # one-command demo project + export
-├── infra/                 # compose (postgres + redis + backend), backend Dockerfile
-└── docs/                  # SPEC.md, DECISIONS.md
-```
+## Made with Komaverse
 
-## Quick start
+Brand marks generated in-app through the AI widget (`create_image`,
+provider-default image model, no prompt engineering beyond the subject):
 
-One-time setup: `python -m venv .venv` + `pip install -e ".[dev]"` in
-`backend/`, `npm install` in `apps/studio-web`, `cp backend/.env.example
-backend/.env`. If PowerShell blocks scripts, run once:
-`Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`.
+| | |
+|---|---|
+| ![Red slash panel mark](docs/assets/readme/gen-red-slash.png) | ![Koma mark](docs/assets/readme/gen-koma-mark.png) |
 
-```powershell
-# quick dev mode (API :8001 with reload + web :5173 with HMR, opens browser)
-./scripts/dev.ps1
+## How it works
 
-# whole app on one URL (builds UI, serves API + UI from :8000)
-./scripts/start.ps1
+1. **Scan** — import `.kra`/`.ora`/GIF/APNG/PNG/JPG or draw; SAM + YOLO detect
+   panels, SFX, cues, and page text (vision model reads what detectors can't).
+2. **Draw** — layered canvas with onion-free pan/zoom, floatbar tools, and a
+   per-frame ⧉ that copies the frame's `@frame:` reference for the chat.
+3. **Render** — multi-lane timeline (video/audio/subs/overlay), head-trim from
+   either end, per-clip speed/volume/fades, Ken Burns motion, native-audio MP4
+   export that matches the preview frame-for-frame.
+4. **Agent** — per-conversation memory with threads, `@`-mentions for every
+   entity (`@frame:`, `@panel:`, `@media:`, `@gen:`, `@sequence:`), web research
+   with inline pictures, voice (ElevenLabs + local XTTS cloning), and full
+   studio control: generate, look, detect, timeline, export.
+5. **Media** — every scan, take, generation, and export in one searchable
+   library with per-project usage.
 
-# stop everything on the app ports / restart
-./scripts/stop.ps1
-./scripts/restart.ps1 -Mode dev   # or -Mode prod
-```
-
-Manual alternative:
+## Run it
 
 ```bash
-# backend
-cd backend
-python -m venv .venv && .venv/Scripts/activate  # or source .venv/bin/activate
-pip install -e ".[dev]"
-cp .env.example .env                              # add AI keys for cloud gen
-uvicorn komaverse.main:app --port 8001
-
-# demo data (new shell, venv active, from backend/)
-python scripts/seed_demo.py
-
-# web
-cd apps/studio-web
-npm install
-npm run dev        # http://localhost:5173, /api proxied to :8001
-
-# desktop (needs Rust toolchain + root npm install; icons + macOS mic
-# permission are wired, but no binary has been built from this machine yet)
-cd apps/studio-desktop
-npm install        # installs @tauri-apps/cli from the workspace root
-npm run dev        # tauri dev (loads studio-web, API via base-URL setting)
-
-# services (prod Postgres/Redis)
-docker compose -f infra/docker-compose.yml up postgres redis
+# backend (FastAPI, :8001) — seeds demo@komaverse.local / demo1234
+cd backend && uvicorn komaverse.main:app --port 8001
+# studio (Vite, :5173)
+cd apps/studio-web && npm install && npm run dev
 ```
 
-## Docker (judge / demo run)
+Sign in with `demo@komaverse.local` / `demo1234` — judging uses this account,
+no sign-up needed. Paste provider keys in the AI widget's **Brain** panel
+(Meta, OpenRouter, Baseten, ElevenLabs) or via env; see
+[backend/.env.example](backend/.env.example).
 
-All-in-one image: builds the web UI, serves API + UI on one port.
-Keys ship empty — paste them in the studio Brain panel under
-Provider keys (Meta, OpenRouter, ElevenLabs, Cloud AI), no `.env`
-editing, no restart.
+## AI models
 
-```powershell
-docker build -t komaverse .
-docker run -p 8000:8000 -v komaverse-data:/data komaverse
-# or: docker compose up --build   (adds backend/.env when present)
+| Family | Default | Options include |
+|---|---|---|
+| Chat brain | `muse-spark-1.3` (Meta) | Muse Spark contributor, Muse Wonder, Baseten open-weight |
+| Vision | `muse-spark-1.3-contributor` (multimodal, auto when keyed) | any chat brain fallback |
+| Image | provider default (cheapest) | Qwen, FLUX, Muse Image, Gemini banana |
+| Video | `bytedance/seedance-2.0` | Seedance mini/fast, Wan 2.6/3.0-prime, Veo 3.1, Hailuo 3 Max, HeyGen 1 |
+| Voice | ElevenLabs instant / local XTTS clone | Meta voice transcribe |
 
-# first scan without weights? set KOMA_YOLO_URL to a weights URL and
-# rescan, otherwise detection falls back to fast heuristics
-```
-
-Open http://localhost:8000 and sign in with the demo account
-(`demo@komaverse.local` / `demo1234`, auto-created on startup),
-paste keys in the agent Brain panel, and generate. Data (DB,
-uploads, model caches) persists in the `komaverse-data` volume.
-
-## Demo login
-
-- Email: `demo@komaverse.local`
-- Password: `demo1234`
-
-The account is seeded automatically on every backend start (see
-"Try it" above); `python scripts/seed_demo.py` (from `backend/`
-with the venv active) additionally loads a Demo project with a
-manga page, detected panels, clips, credits, and an export.
-Registering a new account also works — auth is fully local, no
-email verification.
-
-## AI providers
-
-`AI_PROVIDER` selects the studio brain and generation backend
-(`cloud` default, `meta`, `openrouter`, `comfyui`, `fake`). Without any
-key everything still works: the agent uses its demo brain and image jobs
-use the fake provider (non-production). The Brain tab routes per kind
-instead of one global switch — e.g. Meta for chat and image,
-OpenRouter for video (video is OpenRouter-only, transcription is
-Meta-only) — with verified model ids and their makers shown, persisted
-via `PUT /api/v1/agent/config`.
-
-- **Agent (Muse Spark / Wonder):** `AI_PROVIDER=meta` + `META_API_KEY`
-  (from dev.meta.ai). The chat agent talks to the Meta Model API
-  (`https://api.meta.ai/v1`, OpenAI-compatible, `muse-spark-1.3` by
-  default — set `META_CHAT_MODEL=muse-wonder-1.0` for the larger
-  reasoning model) with the same tool calls as the demo brain. Any
-  failure falls back to the demo brain.
-- **Images (Muse Image or OpenRouter):** `AI_PROVIDER=meta` renders
-  images with `muse-image-1.0` (override via `META_IMAGE_MODEL`) —
-  references ride along as `input_image` turns (steer/compose). The
-  Generate panel's OpenRouter picker stays the testing default
-  (`OPENROUTER_API_KEY`, verified catalog: Flux 3 Klein, Qwen 2.1
-  Turbo, Nano Banana, Meta Muse Image).
-- **Video (OpenRouter):** video jobs (`kind=video`, 25 credits) submit
-  async to `POST /videos` (Seedance 2.0, Veo 3.1, Wan 2.6) and poll
-  `polling_url` to `completed` — Meta has no video-generation model,
-  so `meta` video jobs fail fast with a routing hint. Renders are
-  silent by design (sound comes from voiceover takes / timeline
-  audio); the agent asks duration, ratio, and resolution up front,
-  defaulting to 4s + provider-default resolution.
-- **Voice transcription (Muse Voice Transcribe):** `META_TRANSCRIBE_MODEL`
-  (`muse-voice-transcribe-1.0`) transcribes any take from the Media
-  tab (`POST /api/v1/audio/{id}/transcribe`, turn-level timings) or via
-  the agent ("transcribe the latest take", optionally "...as subtitles").
-- **Segmentation (SAM 3.1):** `META_SAM_MODEL` (`sam-3.1`) powers the
-  `sam` panel detector — text-prompted geometry instead of chat-vision
-  boxes (native segmentation grammar, scaled to pixels),
-  heuristic fallback.
-- **Panel detection via vision:** detector `cloud` with
-  `AI_VISION_MODEL`, `meta`, or `OPENROUTER_VISION_MODEL` — same
-  0–1000 box contract as YOLO.
-- **Local open weights (desktop / on-device):** `AI_PROVIDER=local`
-  points the studio at an Ollama-compatible server instead of a cloud
-  account — `LOCAL_BASE_URL` (default `http://127.0.0.1:11434`) plus
-  `LOCAL_CHAT_MODEL` / `LOCAL_VISION_MODEL` set to the names you
-  pulled (e.g. `ollama pull qwen3:8b`). The Generate panel offers a
-  `Local` provider with a free-text model box, the Scan tab a `local`
-  vision detector, and the agent brain runs on it too — no key, no
-  network. Hosted open weights (e.g. Baseten
-  `meta-models/muse-spark-open-1026`) plug in the same way through
-  the generic `cloud` provider (`AI_BASE_URL` + `AI_API_KEY`).
-
-## MCP server (stdio)
-
-The studio agent tools are also an MCP server, so Claude Code or
-Claude Desktop can operate the studio directly (same tools, same
-auth/credits as the in-app dock). Long-running tools never block:
-`export_video` and `create_image` return a job id at once (video
-already does) and `check_job` polls them to completion.
-
-Streamable HTTP (served by the backend, single-user via
-`KOMAVERSE_MCP_USER` — point any MCP client at the URL):
-
-```powershell
-# backend running (./scripts/dev.ps1), then:
-# POST http://localhost:8001/mcp   (JSON-RPC tools/list, tools/call)
-```
-
-Stdio (local subprocess):
-
-```powershell
-# from backend/ with the venv active
-$env:KOMAVERSE_MCP_USER = "you@example.com"  # your studio login email
-.venv\Scripts\python.exe -m komaverse.mcp_server
-```
-
-Claude Code (`mcp add`, stdio):
-
-```powershell
-claude mcp add komaverse -- .venv\Scripts\python.exe -m komaverse.mcp_server
-```
-
-with `KOMAVERSE_MCP_USER` in the environment. Claude Desktop
-(`claude_desktop_config.json`, same command/args, plus `"env"`).
-
-## Tests
-
-```bash
-cd backend && python -m pytest -q     # 455 tests, no sockets needed
-cd ../apps/studio-web && npx tsc --noEmit && npm run build
-```
+Video is silent by design (4s default, provider cheapest); voice, music, and SFX
+are separate lanes you control.
 
 ## Docs
 
-- [docs/SPEC.md](docs/SPEC.md) — product spec, data model, API surface, milestones
-- [docs/DECISIONS.md](docs/DECISIONS.md) — architecture decision records
-- [docs/OBSERVABILITY.md](docs/OBSERVABILITY.md) — logs, metrics, alerts
+- [docs/DEMO_SCRIPT.md](docs/DEMO_SCRIPT.md) — 3-minute demo video script (chill YouTuber vibe approved)
+- [docs/DECISIONS.md](docs/DECISIONS.md) — architecture decision records (ADR-1…ADR-60)
+- [docs/SPEC.md](docs/SPEC.md), [docs/BRAND.md](docs/BRAND.md), [docs/COMPETITIVE.md](docs/COMPETITIVE.md), [docs/ROADMAP.md](docs/ROADMAP.md), [docs/OBSERVABILITY.md](docs/OBSERVABILITY.md)
+
+## Capture pipeline (for contributors)
+
+README visuals are real captures, reproducible with the repo's own tooling:
+
+```bash
+python -m pip install playwright && python -m playwright install chromium
+python /tmp/capture.py   # docs/assets/readme/*.png via headless Chromium
+python /tmp/reel.py       # demo.mp4 + demo.gif via imageio-ffmpeg
+```
+
+Technique follows the standard repo-to-video playbook (Playwright screencast /
+record-demo style pipelines, AutoDemo/Repocast): drive the live app, screenshot
+the tour, stitch with ffmpeg. No staged mockups — every pixel above is the app.
