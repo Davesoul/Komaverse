@@ -1531,3 +1531,9 @@ color-theory (cel shadow colors, light logic), manga-literacy
 - Reported divergence, reproduced on the user's own timeline: clips whose sources were deleted ("Panel (missing)") rendered BLACK in the preview but were SKIPPED in the export, compressing everything after them — the MP4 no longer matched the preview it was exported from.
 - The timeline is the contract: `render_project` now resolves every clip up front and renders an unresolvable one as blank paper (the existing `PAPER_RGB` convention) with a warning naming the clip, instead of dropping it. The existing export-report warning list already surfaces in the Render UI ("Exported with N warnings — see below"), so the user learns exactly which slots to fix. The preview shows the same slot as paper with a "source deleted" note instead of a black hole, and the Media lightbox video gains `object-fit: contain` (it could stretch).
 - Contract change, not a regression fix: `test_export_reports_clamps_and_skips` now asserts 2 clips / ~0.8s (was skip-to-1), and `test_export_job_failure` asserts a fully dangling timeline exports `done` with the paper warning (was `failed`).
+
+## ADR-73: Latency is model rounds; shrink the resend + cache the project (accepted)
+
+- Profiled a turn without LLM calls: `tool_status` ~40ms, `_resolve_turn` ~19ms — server overhead is negligible. Every slow second is model rounds × prompt size. So: cut what resends each step and stop refetching the project on every tab switch.
+- The craft-skill index (7.5k chars of full SKILL.md descriptions, resent every step) is now 12 curated taglines (~0.5k). `create_image`/`create_video` drop their duplicated freedom prose (the system prompt owns the ask rule). ~7.3k fewer chars per model round.
+- `api.getProject` caches 8s with in-flight dedupe; any write clears it. Same-tab mutations already update local state, so the window never shows stale UI. Skeleton/EmptyState placeholders already exist in the kit.

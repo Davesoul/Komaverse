@@ -438,6 +438,34 @@ export const reportClientError = (message: string) => {
   }).catch(() => {});
 };
 
+/* Project payload cache: every tab fetches the full project (pages +
+ * panels) on mount, so tab switches re-downloaded it each time. A short
+ * TTL + in-flight dedupe makes switches instant; same-tab mutations update
+ * local state directly so the 8s staleness window never shows stale UI. */
+const projectCache = new Map<string, { at: number; data: Project }>();
+const projectInflight = new Map<string, Promise<Project>>();
+const PROJECT_TTL_MS = 8000;
+function cachedProject(id: string): Promise<Project> {
+  const hit = projectCache.get(id);
+  if (hit && Date.now() - hit.at < PROJECT_TTL_MS) return Promise.resolve(hit.data);
+  const flying = projectInflight.get(id);
+  if (flying) return flying;
+  const p = req<Project>(`/api/v1/projects/${id}`)
+    .then((data) => {
+      projectCache.set(id, { at: Date.now(), data });
+      return data;
+    })
+    .finally(() => {
+      if (projectInflight.get(id) === p) projectInflight.delete(id);
+    });
+  projectInflight.set(id, p);
+  return p;
+}
+/** Drop the cached project (call after structural mutations). */
+export function invalidateProject(id: string) {
+  projectCache.delete(id);
+}
+
 async function req<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`${apiBase()}${path}`, {
     credentials: "include",
@@ -468,6 +496,10 @@ async function req<T>(path: string, init?: RequestInit): Promise<T> {
     const where = `${init?.method ?? "GET"} ${path}: ${res.status}`;
     throw new Error(detail ? `${where} — ${detail}` : where);
   }
+  // Any write may have changed project structure: drop cached projects so
+  // the next tab switch refetches fresh (the map holds ~1 entry).
+  // Before the 204 early-return: deletes have no body.
+  if ((init?.method ?? "GET") !== "GET") projectCache.clear();
   if (res.status === 204) return undefined as T;
   return (await res.json()) as T;
 }
@@ -480,7 +512,7 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ name }),
     }),
-  getProject: (id: string) => req<Project>(`/api/v1/projects/${id}`),
+  getProject: (id: string) => cachedProject(id),
   deleteProject: (id: string) =>
     req<void>(`/api/v1/projects/${id}`, { method: "DELETE" }),
   projectStorage: (id: string) =>

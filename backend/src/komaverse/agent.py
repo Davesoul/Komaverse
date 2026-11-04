@@ -681,6 +681,25 @@ def tool_list_skills():
 _skills_index_cache: dict = {}
 
 
+_STUDIO_SKILL_TAGS = {
+    # Studio-relevant skills with short taglines. The full SKILL.md
+    # descriptions are long; the index only needs to route read_skill,
+    # so taglines keep every model round smaller (index resends each step).
+    "anime-animation-production": "shonen shot grammar/QC",
+    "manga-studio-pages": "manga pages on studio primitives",
+    "manga-literacy": "panel flow/reading order",
+    "manga-production": "character-consistent pages",
+    "masters-craft": "illustrator/animator knowledge",
+    "story-pacing": "story/pacing structure",
+    "drawing-fundamentals": "line/art fundamentals",
+    "color-theory": "palette/light",
+    "visual-composition": "staging/focus",
+    "motion-design": "UI/animation motion",
+    "motion-graphics": "promo/kinetic video",
+    "web-research": "online research w/ images",
+}
+
+
 def _skills_index() -> str:
     """One-line craft-skill index for the turn system prompt.
 
@@ -695,9 +714,14 @@ def _skills_index() -> str:
     key = tuple(s.get("name", "") for s in found)
     if _skills_index_cache.get("key") != key:
         _skills_index_cache["key"] = key
-        _skills_index_cache["text"] = "; ".join(
-            f"{s.get('name', '')} — {s.get('description', '')}" for s in found
-        )
+        bits = []
+        for s in found:
+            name = s.get("name", "")
+            tag = _STUDIO_SKILL_TAGS.get(name)
+            if tag is None:
+                continue  # not studio-relevant: list_skills covers it
+            bits.append(f"{name} ({tag})")
+        _skills_index_cache["text"] = "; ".join(bits)
     return _skills_index_cache["text"]
 
 
@@ -1559,7 +1583,8 @@ FRAME_DIRECTED_RE = re.compile(
     r"((this|that|the|current|open)\s+frames?\b"
     r"|\btrace\b|\bredraw\b|\bpaint\s+over\b|\bdraw\s+(on|onto|over)\b"
     r"|\b(edit|change|fix|continue|paint|draw)\s+(this|it|that|the)\b"
-    r"|\bon\s+(it|this|that|the\s+frames?)\b)",
+    r"|\bon\s+(it|this|that|the\s+frames?)\b"
+    r"|\bon\s+frames?\b)",
     re.IGNORECASE,
 )
 
@@ -1814,6 +1839,7 @@ def tool_generate(
     width=None,
     height=None,
     attach_frame: bool = False,
+    paint_on_frame: str | None = None,
     delegated: bool = False,
     asked: set | None = None,
     history: list[dict] | None = None,
@@ -1825,6 +1851,11 @@ def tool_generate(
     # Fail-open note when a repeated identical call skips the question.
     repeat_note = ""
     locked = _locked_style(session, user, project_id)
+    paint_target = None
+    if paint_on_frame is not None:
+        paint_target = session.get(FrameRow, paint_on_frame)
+        if paint_target is None or paint_target.project_id != project_id:
+            return f"Unknown paint frame: {paint_on_frame}"
     # Intent checks read the raw text: token scrubbing above removes the
     # @-references that can carry the value ("in the style of @panel:X").
     missing = []
@@ -1841,7 +1872,9 @@ def tool_generate(
             "the request names no style",
             "a style, e.g. shonen manga, photoreal, watercolor",
         ))
-    if missing and not (
+    # Paint flow is a canvas directive, not a gallery request: the user said
+    # where, so defaults apply with no interrogation (like manage_layers).
+    if missing and paint_target is None and not (
         delegated or _delegates_decisions(raw)
         or _question_pending(history, [w for w, _, _ in missing])
     ):
@@ -1900,6 +1933,7 @@ def tool_generate(
         genre=genre or "none",
         negative_prompt=negative_prompt or "",
         reference_frame_id=reference_frame_id,
+        layer_frame_id=paint_target.id if paint_target is not None else None,
         entities_json=json.dumps(snaps),
     )
     before = set(
@@ -1913,6 +1947,8 @@ def tool_generate(
         threading.Thread(target=run_ai_job, args=(job.id, job_factory), daemon=True).start()
         ref_bit = f" with {len(snaps)} reference(s)" if snaps else ""
         note_bit = (" " + " ".join(notes)) if notes else ""
+        if paint_target is not None:
+            return f"Painting onto frame '{paint_target.name or 'Untitled'}' as a new layer [job {job.id}] - reply now with the job id; the UI follows it live, do not poll check_job.{note_bit}"
         return f"Image job started [job {job.id}]{ref_bit} - reply now with the job id; the UI follows it live, do not poll check_job.{note_bit}{repeat_note}"
     run_ai_job(job.id, job_factory)
     session.refresh(job)
@@ -1927,6 +1963,11 @@ def tool_generate(
         frame_bit = f" [frame {next(iter(new))}]" if len(new) == 1 else ""
         ref_bit = f" with {len(snaps)} reference(s): " + ", ".join(s.get("name", "ref") for s in snaps) if snaps else ""
         note_bit = (" " + " ".join(notes)) if notes else ""
+        if paint_target is not None:
+            return (
+                f"Painted onto frame '{paint_target.name or 'Untitled'}' as a new layer: "
+                f"{job.result_url}{spent} [job {job.id}].{note_bit}"
+            )
         return (
             f"Generated{' and attached as a frame' if frame_bit else ''}: {job.result_url}{spent} "
             f"[job {job.id}]{frame_bit}{ref_bit}.{note_bit}{repeat_note}"
@@ -4075,6 +4116,31 @@ def _wants_draw_shape(text: str) -> bool:
     )
 
 
+_PAINT_VERB_RE = re.compile(r"\b(draw|paint|sketch)\b")
+_REF_SOURCE_RE = re.compile(r"@(media|panel|gen):")
+
+
+def _wants_paint_on_frame(text: str) -> bool:
+    """A subject directed at the canvas ('draw a samurai on the current
+    frame'), not a gallery generation and not a geometric shape op.
+
+    The verb decides: draw/paint/sketch + frame-directed words paint onto
+    the named frame; generate/create verbs (or no frame) generate media.
+    Shapes ("draw a circle") stay on manage_layers even when frame-directed.
+    Explicit gallery sources (@media:/@panel:/@gen:) and "redraw" (which is
+    a regeneration verb, not \bdraw\b) stay on the generation flow.
+    """
+    if "video" in text or "generat" in text:
+        return False
+    if not _PAINT_VERB_RE.search(text or ""):
+        return False
+    if _wants_draw_shape(text):
+        return False
+    if _REF_SOURCE_RE.search(text or ""):
+        return False
+    return bool(FRAME_DIRECTED_RE.search(text))
+
+
 def _demo_draw_turn(session, user, project_id, message):
     """Paint one centered shape on a draw layer (demo brain)."""
     text = message.lower()
@@ -4181,6 +4247,17 @@ def demo_turn(
             reply = run("check_job", tool_check_job, session, user, jid)
     elif _wants_draw_shape(text):
         reply = run("manage_layers", _demo_draw_turn, session, user, project_id, message)
+    elif _wants_paint_on_frame(text):
+        target = _resolve_frame(session, user, project_id, message)
+        if isinstance(target, str):
+            reply = target
+        else:
+            reply = run(
+                "create_image", tool_generate, session, user, project_id,
+                message.strip(), job_factory, paint_on_frame=target.id,
+                fallback_references=fallback_references,
+                delegated=_delegates_decisions(message), history=history,
+            )
     elif _wants_video(text):
         prompt = message.strip()
         for prefix in ("generate", "create", "draw me", "make me"):
@@ -4437,7 +4514,10 @@ _SYSTEM = (
     "them when asked what happened when. "
     "Greetings, thanks, and other smalltalk get a words-only reply — "
     "call no tools unless the user asks for an action, a change, or "
-    "information not already in context. Async jobs (create_video, "
+    "information not already in context. Draw/paint/sketch a subject on a "
+    "frame paints it there (create_image with paint_on_frame); generate/ "
+    "create verbs make gallery media; never narrate a gallery generation "
+    "as drawing on a frame. Async jobs (create_video, "
     "background create_image, export_video) answer immediately with the "
     "[job id] — the UI follows the job live and shows it when done. "
     "Never call check_job to wait; call it only when the user explicitly "
@@ -4755,12 +4835,19 @@ _TOOLS_SCHEMA = [
             "name": "create_image",
             "description": (
                 "Generate an image from the named subject ON THIS TURN - "
-                "call now, do not interview. Pass what the conversation "
-                "states; omit the rest (square, standard quality). "
-                "If the user grants freedom to decide the blanks — in any "
-                "words or language — generate immediately with defaults; "
-                "ask at most one short question, and only when a blank "
-                "is genuinely cost-affecting and no freedom was granted. "
+                "call now, do not interview. The verb decides the landing: "
+                "draw/paint/sketch + a frame ('on the frame', 'on the "
+                "current frame', 'draw this') paints the subject ONTO that "
+                "frame via paint_on_frame — the pixels land on the canvas "
+                "as a layer, never as a separate gallery image. generate/"
+                "create verbs (or no frame) make standalone gallery media. "
+                "Geometric shapes (circle, line, rect) are never yours: "
+                "they go to manage_layers draw. Never say you are 'drawing "
+                "on a frame' for a gallery generation. "
+                "Pass what the conversation "
+                "states; omit the rest. Blanks take defaults (square, "
+                "standard quality); ask only for cost-affecting blanks "
+                "per the system ask rule. "
                 "Attach a reference only when the user asked to reuse one: "
                 "pass their @frame:/@panel:/@media:/@gen:/@sequence: mentions as "
                 "references, named entities as entity_ids - never paste "
@@ -4786,6 +4873,7 @@ _TOOLS_SCHEMA = [
                     "width": {"type": "number", "description": "Pixels (16:9→1280x720, 9:16→720x1280, 1:1→1024x1024). Pass the conversation's format when stated; otherwise omit."},
                     "height": {"type": "number", "description": "Pixels (draft→512, standard→768, high→1024 longest side). Pass the conversation's quality when stated; otherwise omit."},
                     "attach_frame": {"type": "boolean", "description": "True only when the user explicitly asks for a draw frame. Omit otherwise."},
+                "paint_on_frame": {"type": "string", "description": "Frame-directed draw ONLY: the @frame: id or frame name the user named ('on the current frame' = the open frame). The image paints onto that frame as a layer. Omit for gallery generations and shape ops."},
                 },
                 "required": ["prompt"],
             },
@@ -4799,12 +4887,9 @@ _TOOLS_SCHEMA = [
                 "Render a video from the named subject ON THIS TURN - call "
                 "now, do not interview. Pass what the conversation states "
                 "(subject words, seconds, size, references); omit the "
-                "rest: blanks take defaults (4s, provider-default size, "
-                "silent). If the user grants freedom to decide the blanks "
-                "— in any words or language — generate immediately with "
-                "defaults; ask at most one short question, and only when "
-                "a blank is genuinely cost-affecting and no freedom was "
-                "granted. The job runs in the background and "
+                "rest. Blanks take defaults (4s, provider-default size, "
+                "silent); ask only for cost-affecting blanks per the system "
+                "ask rule. The job runs in the background and "
                 "the UI follows it live — answer immediately with the "
                 "[job id]; never call check_job afterwards. "
                 "Attach a reference only when the user asked to reuse one, "
@@ -4998,8 +5083,11 @@ _TOOLS_SCHEMA = [
                 "Draw-layer ops on one frame (frame id, @frame: mention, or name). "
                 "Ops: list, add, rename, set (opacity/visible/locked/blend), "
                 "move (position 0 is bottom), remove, duplicate, clear, merge down, "
-                "draw (paint shapes: stroke/rect/ellipse/fill in frame pixels; "
-                "omitted layer means the top layer)."
+                "draw (paint GEOMETRIC SHAPES ONLY: stroke/rect/ellipse/fill in "
+                "frame pixels; omitted layer means the top layer). The draw op "
+                "cannot freehand a subject — a named subject on a frame ('draw a "
+                "samurai on the current frame') is create_image with "
+                "paint_on_frame, never this tool."
             ),
             "parameters": {
                 "type": "object",
@@ -5388,6 +5476,7 @@ def _exec_cloud_tool(
                 fallback_references=turn_references,
                 width=args.get("width"), height=args.get("height"),
                 attach_frame=bool(args.get("attach_frame")),
+                paint_on_frame=args.get("paint_on_frame"),
                 delegated=_delegates_decisions(message),
                 asked=asked,
                 history=history,
