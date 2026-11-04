@@ -369,24 +369,42 @@ def parse_seconds(text: str) -> float | None:
     return min(max(value, 0.1), 30.0)
 
 
-#: The user handed blank dimensions to the agent ("decide the rest",
-#: "go", "as you wish", a bare "ok"): documented defaults apply, no
-#: questions. Checked before every ask-gate so an answer turn can never
-#: re-ask what it was told to fill.
+#: Protocol tokens that grant the agent the blanks on first sight.
+#: Deliberately tiny: the questions themselves teach 'go', and anything
+#: richer ("as you wish", "fais comme tu veux", a bare "ok" answering a
+#: question) is comprehension, not pattern matching — handled by the
+#: behavioral check below, in any language.
 _DELEGATED_RE = re.compile(
     r"\bgo\b"
-    r"|\b(decide|whatever|you\s+choose|your\s+call|go\s+ahead|surprise\s+me|"
-    r"i\s+don'?t\s+mind|up\s+to\s+you|use\s+whatever|your\s+choice|"
-    r"you\s+decide|as\s+you\s+like|dealers?\s+choice|defaults?)\b"
-    r"|\bas\s+you\s+wish\b"
-    r"|\bdo\s+what\s+you\s+want\b"
-    r"|\bi\s+trust\s+you\b"
-    r"|\bwhatever\s+you\s+(want|think|like|decide)\b"
-    r"|\bfine\s+by\s+me\b"
-    r"|\bsounds?\s+good\b"
-    r"|^\s*(ok(ay)?|yes?|yeah?|yep|sure|please(\s+do)?|do\s+it|go)\b",
+    r"|\b(decide|defaults?|whatever)\b"
+    r"|^\s*(ok(ay)?|yes?|yeah?|yep|sure)\b",
     re.IGNORECASE,
 )
+
+
+#: Kind words the ask-questions name, so a pending question can be
+#: recognized from our own wording (never the user's).
+_ASK_KIND_WORDS = ("duration", "framing", "resolution", "sound", "style", "aspect", "quality", "ratio", "aspect ratio")
+
+
+def _question_pending(history: list[dict] | None, kinds) -> bool:
+    """True when our last question already covered these pieces.
+
+    Behavioral, language-free delegation: we asked (the reply teaches
+    the 'go' protocol), the user answered without new specifics, so the
+    blanks are freedom-granted, not unknown. Matches OUR OWN question
+    signature only — never the user's words, in any language.
+    """
+    if not history or not kinds:
+        return False
+    for h in reversed(history[-6:]):
+        if (h.get("role") or "") not in ("assistant", "agent"):
+            continue
+        text = (h.get("text") or "").lower()
+        if "say 'go'" not in text and 'say "go"' not in text:
+            return False
+        return any(k in text for k in kinds)
+    return False
 
 
 def _delegates_decisions(text: str | None) -> bool:
@@ -604,7 +622,7 @@ def _missing_style(prompt, style, genre, locked) -> str | None:
     return m.group(0)
 
 
-def _ask_before_generating(tool: str, missing: list[tuple[str, str, str]]) -> str:
+def _ask_before_generating(tool: str, missing: list[tuple[str, str, str]], go_defaults: str) -> str:
     """Blocking question for subject-free generations (user-confirmed).
 
     Asked at most once per subject: one short question for the listed
@@ -612,14 +630,18 @@ def _ask_before_generating(tool: str, missing: list[tuple[str, str, str]]) -> st
     the tool on the next turn with defaults for anything still blank.
     (The caller enforces the once-only part: a repeated identical call
     in the same turn proceeds with defaults instead of asking again.)
+    The quoted protocol line is what _question_pending recognizes, so
+    a repeated answer without new specifics counts as freedom granted.
     """
     bits = "; ".join(f"{what} ({detail} — suggest {choices})" for what, detail, choices in missing)
     n = "one detail" if len(missing) == 1 else f"{len(missing)} details"
     return (
         f"Before generating I need {n}: {bits}. "
         f"Reply to the user with this ONE question now and STOP — do not "
-        f"call {tool} again until the user answers. When they answer "
-        "(even 'go', 'whatever', 'as you wish', or 'ok'), call "
+        f"call {tool} again until the user answers. Offer the protocol: "
+        f"'answer with the specifics, or say go for {go_defaults} and "
+        f"I'll generate it'. When they answer — in any words or language, "
+        f"'go', 'whatever', 'as you wish', 'ok', or new specifics — call "
         f"{tool} with what they gave, taking the stated defaults for "
         "anything still blank, and never ask these pieces again."
     )
@@ -1794,6 +1816,7 @@ def tool_generate(
     attach_frame: bool = False,
     delegated: bool = False,
     asked: set | None = None,
+    history: list[dict] | None = None,
 ) -> str:
     raw = prompt or ""
     prompt = clean_prompt_text(raw)
@@ -1818,7 +1841,10 @@ def tool_generate(
             "the request names no style",
             "a style, e.g. shonen manga, photoreal, watercolor",
         ))
-    if missing and not (delegated or _delegates_decisions(raw)):
+    if missing and not (
+        delegated or _delegates_decisions(raw)
+        or _question_pending(history, [w for w, _, _ in missing])
+    ):
         sig = ("create_image", tuple(sorted(w for w, _, _ in missing)))
         if asked is not None and sig in asked:
             repeat_note = (" Asked once already with no new answers — "
@@ -1826,7 +1852,7 @@ def tool_generate(
         else:
             if asked is not None:
                 asked.add(sig)
-            return _ask_before_generating("create_image", missing)
+            return _ask_before_generating("create_image", missing, "provider-default format")
     refs = _generation_references(raw, references, fallback_references)
     snaps, notes = gather_reference_snapshots(session, user, project_id, prompt, refs, entity_ids)
     if locked and STYLE_TALK_RE.search(prompt or "") and style == "none" and genre == "none":
@@ -1923,6 +1949,7 @@ def tool_create_video(
     size: str | None = None,
     delegated: bool = False,
     asked: set | None = None,
+    history: list[dict] | None = None,
 ) -> str:
     """Start an async OpenRouter video job; watch it with check_job.
 
@@ -1980,7 +2007,10 @@ def tool_create_video(
             "the request names no style",
             "a style, e.g. anime, cinematic, photorealistic",
         ))
-    if missing and not (delegated or _delegates_decisions(raw)):
+    if missing and not (
+        delegated or _delegates_decisions(raw)
+        or _question_pending(history, [w for w, _, _ in missing])
+    ):
         sig = ("create_video", tuple(sorted(w for w, _, _ in missing)))
         if asked is not None and sig in asked:
             repeat_note = (" Asked once already with no new answers — "
@@ -1988,7 +2018,7 @@ def tool_create_video(
         else:
             if asked is not None:
                 asked.add(sig)
-            return _ask_before_generating("create_video", missing)
+            return _ask_before_generating("create_video", missing, "4 seconds, default framing, provider default")
     refs = _generation_references(raw, references, fallback_references)
     snaps, notes = gather_reference_snapshots(session, user, project_id, prompt, refs, entity_ids)
     if locked and STYLE_TALK_RE.search(prompt or "") and genre == "none":
@@ -4170,6 +4200,7 @@ def demo_turn(
             fallback_references=fallback_references,
             size=_size_str(_parse_video_size(message)),
             delegated=_delegates_decisions(message),
+            history=history,
         )
         if any(k in text for k in TIMELINE_WORDS):
             reply += " When it is done, say 'add the video to the timeline'."
@@ -4183,7 +4214,7 @@ def demo_turn(
         if not prompt:
             reply = 'Tell me what to generate and add - e.g. "generate a moonlit robot and add it to the timeline".'
         else:
-            reply = run("create_image", tool_generate, session, user, project_id, prompt, job_factory, fallback_references=fallback_references, attach_frame=True, delegated=_delegates_decisions(message))
+            reply = run("create_image", tool_generate, session, user, project_id, prompt, job_factory, fallback_references=fallback_references, attach_frame=True, delegated=_delegates_decisions(message), history=history)
             m = re.search(r"\[frame ([A-Za-z0-9_-]+)\]", actions[-1]["summary"])
             if not m:
                 reply += " I could not place it on the timeline - say which frame to add."
@@ -4301,7 +4332,7 @@ def demo_turn(
             return "Tell me what to generate — e.g. \"generate a moonlit robot\".", []
         reply = run(
             "create_image", tool_generate, session, user, project_id, prompt, job_factory, attach_frame=add_it,
-            fallback_references=fallback_references,
+            fallback_references=fallback_references, history=history,
         )
         if add_it:
             m = re.search(r"\[frame ([A-Za-z0-9_-]+)\]", actions[-1]["summary"])
@@ -4394,9 +4425,11 @@ _SYSTEM = (
     "project, then summarize briefly. "
     "When the user names an image or video subject, call "
     "create_image/create_video ON THIS TURN — pass what the conversation "
-    "states, omit the rest. Blanks take defaults; 'decide', 'go ahead' "
-    "and 'whatever' mean every blank defaults. Ask a question only when "
-    "no subject exists at all. "
+    "states, omit the rest. Blanks take defaults. If the user grants "
+    "freedom to decide the blanks — in any words or language — generate "
+    "immediately; ask at most one short question, and only when a blank "
+    "is genuinely cost-affecting and no freedom was granted. Ask a "
+    "question only when no subject exists at all. "
     "Never invent IDs, counts, or URLs — "
     "only report what tools return. Earlier turns in this conversation are "
     "included before the latest message - use them as context; turns carry "
@@ -4724,8 +4757,10 @@ _TOOLS_SCHEMA = [
                 "Generate an image from the named subject ON THIS TURN - "
                 "call now, do not interview. Pass what the conversation "
                 "states; omit the rest (square, standard quality). "
-                "'Decide', 'go ahead' and 'whatever' mean every blank "
-                "takes its default. "
+                "If the user grants freedom to decide the blanks — in any "
+                "words or language — generate immediately with defaults; "
+                "ask at most one short question, and only when a blank "
+                "is genuinely cost-affecting and no freedom was granted. "
                 "Attach a reference only when the user asked to reuse one: "
                 "pass their @frame:/@panel:/@media:/@gen:/@sequence: mentions as "
                 "references, named entities as entity_ids - never paste "
@@ -4765,8 +4800,11 @@ _TOOLS_SCHEMA = [
                 "now, do not interview. Pass what the conversation states "
                 "(subject words, seconds, size, references); omit the "
                 "rest: blanks take defaults (4s, provider-default size, "
-                "silent) and 'decide', 'go ahead' and 'whatever' mean "
-                "every blank defaults. The job runs in the background and "
+                "silent). If the user grants freedom to decide the blanks "
+                "— in any words or language — generate immediately with "
+                "defaults; ask at most one short question, and only when "
+                "a blank is genuinely cost-affecting and no freedom was "
+                "granted. The job runs in the background and "
                 "the UI follows it live — answer immediately with the "
                 "[job id]; never call check_job afterwards. "
                 "Attach a reference only when the user asked to reuse one, "
@@ -5239,6 +5277,7 @@ def _stub_skill_bodies(messages, skill_bodies, current_id=None):
 def _exec_cloud_tool(
     name, args, *, message, session, user, project_id, job_factory,
     turn_references=None, skills_read=None, asked=None, media_seen=None,
+    history=None,
 ) -> str:
     """Run one model-requested tool; shared by sync turns and streams.
 
@@ -5351,6 +5390,7 @@ def _exec_cloud_tool(
                 attach_frame=bool(args.get("attach_frame")),
                 delegated=_delegates_decisions(message),
                 asked=asked,
+                history=history,
             )
         elif name == "create_video":
             try:
@@ -5372,6 +5412,7 @@ def _exec_cloud_tool(
                 size=args.get("size") if isinstance(args.get("size"), str) else None,
                 delegated=_delegates_decisions(message),
                 asked=asked,
+                history=history,
             )
             if args.get("generate_audio"):
                 result += " (Model sound stays off even when asked: the video renders silent.)"
@@ -5655,7 +5696,7 @@ def _cloud_loop(
                 name, args, message=message, session=session, user=user,
                 project_id=project_id, job_factory=job_factory,
                 turn_references=turn_references, skills_read=skills_read,
-                asked=asked, media_seen=media_seen,
+                asked=asked, media_seen=media_seen, history=history,
             )
             summary = result[:200]
             actions.append({"tool": name, "summary": summary})
@@ -5680,7 +5721,7 @@ def _cloud_loop(
     record_usage(session, user.id, "chat", model, total_tokens or (len(message) + 40) // 4, project_id=project_id or "")
     yield {"type": "result", "reply": "I ran out of steps \u2014 try a smaller request.", "actions": actions}
 
-def _resolve_turn(message, project_id, session, user, current_frame_id, refs):
+def _resolve_turn(message, project_id, session, user, current_frame_id, refs, history=None):
     """Scope a turn to its project and open frame (sync and stream share).
 
     Returns {"early": out} when the turn answers without tools.
@@ -5917,7 +5958,8 @@ def _resolve_turn(message, project_id, session, user, current_frame_id, refs):
                 missing.append(
                     "art style (e.g. shonen manga, photoreal, watercolor)"
                 )
-            if missing and not _delegates_decisions(message):
+            kinds = [k for k in _ASK_KIND_WORDS if any(k in m.lower() for m in missing)]
+            if missing and not (_delegates_decisions(message) or _question_pending(history, kinds)):
                 # References resolved above ride the question: the early
                 # return drops message/refs, so without their names in the
                 # reply the next turn could not cite them back.
@@ -6011,7 +6053,7 @@ def run_agent_turn_stream(
     """
     try:
         resolved = _resolve_turn(
-            message, project_id, session, user, current_frame_id, refs
+            message, project_id, session, user, current_frame_id, refs, history
         )
     except HTTPException as exc:
         yield {"type": "error", "status": exc.status_code, "message": str(exc.detail)}
@@ -6115,7 +6157,7 @@ def run_agent_turn(
     history: list[dict] | None = None,
     current_frame_id: str | None = None,
 ) -> dict:
-    resolved = _resolve_turn(message, project_id, session, user, current_frame_id, refs)
+    resolved = _resolve_turn(message, project_id, session, user, current_frame_id, refs, history)
     if "early" in resolved:
         return resolved["early"]
     message = resolved["message"]

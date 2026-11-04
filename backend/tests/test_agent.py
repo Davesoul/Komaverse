@@ -1661,18 +1661,86 @@ def test_generation_loop_delegation_rides_the_turn(factory, user, monkeypatch):
     assert "Before generating I need" not in out
 
 
-def test_delegation_accepts_wish_and_bare_affirmation():
-    """'As you wish' and a bare 'ok'/'yes' after a question mean proceed
-    with defaults — not another lap of the same question."""
+def test_delegation_protocol_tokens():
+    """The tiny first-sight protocol set the questions themselves teach."""
     from komaverse import agent as agent_mod
 
-    for text in (
-        "as you wish", "do what you want", "i trust you", "fine by me",
-        "sounds good", "whatever you want", "ok", "okay, do it", "yes",
-        "yes, but make it 8 seconds",
-    ):
+    for text in ("go", "go ahead", "use defaults", "whatever", "ok", "okay, do it", "yes"):
         assert agent_mod._delegates_decisions(text), text
     assert not agent_mod._delegates_decisions("yesterday we talked")
+    assert not agent_mod._delegates_decisions("as you wish")
+
+
+def _pending_history():
+    return [
+        {"role": "user", "text": "generate a colored video of the page"},
+        {
+            "role": "agent",
+            "text": (
+                "Which duration in seconds (e.g. 2, 4, or 8) and framing — landscape 16:9 "
+                "or portrait 9:16 and resolution — provider default (cheapest), 720p, or "
+                "1080p? Answer with the specifics, or say 'go' for 4 seconds, default "
+                "framing, provider default and I'll generate it."
+            ),
+        },
+    ]
+
+
+def test_question_pending_is_behavioral_not_phrased():
+    """Freedom granted in any words or language counts — once we already
+    asked these exact pieces. Only our own question signature matches."""
+    from komaverse.agent import _question_pending
+
+    assert _question_pending(_pending_history(), ["duration", "ratio", "resolution"])
+    assert not _question_pending(_pending_history(), ["quality"])
+    assert not _question_pending([], ["duration"])
+    assert not _question_pending(
+        [{"role": "agent", "text": "Here is your video [job abc123]"}],
+        ["duration"],
+    )
+
+
+def test_repeated_answer_without_specifics_generates(factory, user, monkeypatch):
+    """The loop, closed across turns: we asked, the user replied 'as you
+    wish' (or French, or a bare ok) with no new specifics — the tool
+    generates with defaults instead of re-asking."""
+    from komaverse.agent import tool_create_video
+    from komaverse.db_models import JobRow
+
+    pid = seed_project(factory, user)
+    monkeypatch.setattr(settings, "openrouter_api_key", "test-key")
+    for reply in ("as you wish", "fais comme tu veux", "ok"):
+        with factory() as s:
+            out = tool_create_video(
+                s, user, pid, "colored video of the page", 4.0, None, factory,
+                history=_pending_history(),
+            )
+        assert "Video job started" in out, reply
+        assert "Before generating I need" not in out
+    with factory() as s:
+        assert s.query(JobRow).filter(JobRow.kind == "video").count() == 3
+    # First sight with no history still asks (cost-awareness kept).
+    with factory() as s:
+        asked = tool_create_video(s, user, pid, "colored video of the page", 4.0, None, factory)
+    assert "Before generating I need" in asked
+
+
+def test_early_gate_honors_pending_question(factory, user):
+    """The stateless early path asks once, then treats a specifics-free
+    answer as freedom granted — no phrase list involved."""
+    from komaverse import agent as agent_mod
+
+    pid = seed_project(factory, user)
+    with factory() as s:
+        first = agent_mod._resolve_turn(
+            "generate a colored video of the page", pid, s, user, None, []
+        )
+    assert "early" in first
+    with factory() as s:
+        second = agent_mod._resolve_turn(
+            "fais comme tu veux", pid, s, user, None, [], _pending_history()
+        )
+    assert "early" not in second
 
 
 def test_create_video_asks_once_then_defaults(factory, user, monkeypatch):
