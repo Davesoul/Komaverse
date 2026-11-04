@@ -820,10 +820,11 @@ export const api = {
     req<void>(`/api/v1/scenes/${sceneId}/subtitles?lane=${lane}`, { method: "DELETE" }),
   listClonedVoices: () =>
     req<ClonedVoice[]>(`/api/v1/ai/voices/clones`),
-  cloneVoice: (name: string, files: File[], engine: "elevenlabs" | "xtts" = "elevenlabs") => {
+  cloneVoice: (name: string, files: File[], engine: "elevenlabs" | "xtts" = "elevenlabs", clean = true) => {
     const form = new FormData();
     form.append("name", name);
     form.append("engine", engine);
+    form.append("clean", clean ? "true" : "false");
     for (const f of files) form.append("files", f, f.name);
     return req<ClonedVoice>(`/api/v1/ai/voices/clone`, {
       method: "POST",

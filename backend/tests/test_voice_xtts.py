@@ -85,6 +85,48 @@ def test_clone_xtts_saves_reference(factory, user):
         assert (fh.getframerate(), fh.getnchannels()) == (22050, 1)
 
 
+def _padded_wav() -> bytes:
+    """1s silence + 0.5s loud tone + 1s silence: cleaning must trim the padding."""
+    import struct
+
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as fh:
+        fh.setnchannels(1)
+        fh.setsampwidth(2)
+        fh.setframerate(8000)
+        fh.writeframes(b"\x00\x00" * 8000)
+        fh.writeframes(struct.pack("<" + "h" * 4000, *([20000] * 4000)))
+        fh.writeframes(b"\x00\x00" * 8000)
+    return buf.getvalue()
+
+
+def test_clone_xtts_cleans_reference(factory, user):
+    """Ref is denoised/normalized/silence-trimmed (free-tts chain): the
+    2.5s padded sample lands well under a second of real speech."""
+    import wave as _wave
+
+    with factory() as s:
+        voice = clone_voice(
+            "Local",
+            [UploadFile(filename="ref.wav", file=io.BytesIO(_padded_wav()))],
+            s,
+            user,
+            engine="xtts",
+        )
+    with factory() as s:
+        from sqlalchemy import select
+
+        from komaverse.db_models import ClonedVoiceRow
+
+        row = s.execute(
+            select(ClonedVoiceRow).where(ClonedVoiceRow.id == voice.id)
+        ).scalars().one()
+        path = settings.media_dir / row.ref_audio
+    with _wave.open(str(path), "rb") as fh:
+        assert (fh.getframerate(), fh.getnchannels()) == (22050, 1)
+        assert fh.getnframes() < 22050, fh.getnframes()
+
+
 def test_clone_xtts_validation(factory, user):
     with factory() as s, pytest.raises(HTTPException) as exc:
         clone_voice("Nope", [], s, user, engine="xtts")

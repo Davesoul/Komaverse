@@ -831,13 +831,17 @@ def clone_voice(
     session: Session = Depends(get_session),
     user: UserRow = Depends(get_current_user),
     engine: str = Form("elevenlabs"),
+    clean: bool = Form(True),
 ):
     """Clone a voice from speech samples.
 
     engine "elevenlabs": cloud Instant Voice Clone (1-5 samples,
     needs ELEVENLABS_API_KEY). engine "xtts": local XTTS v2 clone
     (exactly 1 sample, no key; needs `pip install coqui-tts`).
-    Either way the clone lands in the voice picker for its engine."""
+    clean (xtts only, default on): run the free-tts reference chain
+    (highpass + loudness norm + silence trim) so noisy recordings
+    still yield a tight clone. Either way the clone lands in the
+    voice picker for its engine."""
     from komaverse.ai.voice_local import wav_normalize_22k
 
     # engine arrives as a plain string over HTTP; direct calls that
@@ -878,8 +882,10 @@ def clone_voice(
     # Local XTTS v2: normalize the sample to the 22kHz reference the
     # model wants and save it under the media dir; synthesis reads it
     # back for every line (free-tts keeps the ref file the same way).
+    # clean=True (default) also runs the free-tts cleanup chain.
+    clean_flag = clean if isinstance(clean, bool) else True
     try:
-        ref_wav = wav_normalize_22k(samples[0][1])
+        ref_wav = wav_normalize_22k(samples[0][1], clean=clean_flag)
     except ProviderError as exc:
         raise HTTPException(400, f"voice sample is unusable: {exc}") from None
     row = ClonedVoiceRow(

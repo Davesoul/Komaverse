@@ -77,28 +77,49 @@ def _get_xtts():
         return _xtts
 
 
-def wav_normalize_22k(data: bytes) -> bytes:
-    """Any audio sample -> 22050Hz mono 16-bit WAV (XTTS reference sweet spot)."""
+def wav_normalize_22k(data: bytes, clean: bool = True) -> bytes:
+    """Any audio sample -> 22050Hz mono 16-bit WAV (XTTS reference sweet spot).
+
+    With clean (default): the free-tts reference chain — highpass rumble
+    removal, EBU R128 loudness normalization, leading/trailing silence
+    trim — so a noisy recording still yields a tight clone reference.
+    FFT denoise (afftdn) is deliberately NOT in the chain: free-tts
+    found it can destabilize XTTS speaker encoding ("index out of range
+    in self"). Same chain without clean: plain resample only.
+    """
     with tempfile.TemporaryDirectory() as tmp:
         src = Path(tmp) / "in"
         src.write_bytes(bytes(data))
         dst = Path(tmp) / "ref.wav"
+        cmd = [
+            imageio_ffmpeg.get_ffmpeg_exe(),
+            "-y",
+            "-v",
+            "error",
+            "-i",
+            str(src),
+        ]
+        if clean:
+            cmd += [
+                "-af",
+                "highpass=f=80,"
+                "loudnorm=I=-16:TP=-1.5:LRA=11,"
+                "areverse,"
+                "silenceremove=stop_periods=-1:stop_duration=0.4:stop_threshold=-30dB,"
+                "areverse,"
+                "silenceremove=start_periods=1:start_duration=0.4:start_threshold=-30dB",
+            ]
+        cmd += [
+            "-ar",
+            "22050",
+            "-ac",
+            "1",
+            "-c:a",
+            "pcm_s16le",
+            str(dst),
+        ]
         proc = subprocess.run(
-            [
-                imageio_ffmpeg.get_ffmpeg_exe(),
-                "-y",
-                "-v",
-                "error",
-                "-i",
-                str(src),
-                "-ar",
-                "22050",
-                "-ac",
-                "1",
-                "-c:a",
-                "pcm_s16le",
-                str(dst),
-            ],
+            cmd,
             capture_output=True,
             text=True,
             timeout=120,

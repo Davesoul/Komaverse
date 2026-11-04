@@ -72,6 +72,7 @@ export function AudioDeck({
   const [cloneEngine, setCloneEngine] = useState<"xtts" | "elevenlabs">("xtts");
   const [cloneTake, setCloneTake] = useState("");
   const [cloneFiles, setCloneFiles] = useState<File[]>([]);
+  const [cloneClean, setCloneClean] = useState(true);
   const cloneFileRef = useRef<HTMLInputElement>(null);
 
   const doClone = async () => {
@@ -103,7 +104,7 @@ export function AudioDeck({
     }
     setCloneBusy(true);
     try {
-      const v = await api.cloneVoice(cloneName.trim(), staged.slice(0, 5), cloneEngine);
+      const v = await api.cloneVoice(cloneName.trim(), staged.slice(0, 5), cloneEngine, cloneEngine === "xtts" ? cloneClean : true);
       setClones((cs) => [v, ...cs]);
       setCloneName("");
       setCloneTake("");
@@ -471,7 +472,12 @@ export function AudioDeck({
         </div>
         <div style={{ fontSize: 12, color: "var(--kv-muted)", marginBottom: 6 }}>
           {cloneEngine === "xtts" ? (
-            <>Clone a voice locally (XTTS v2) from one clear sample — a recording or an uploaded voice. Free, no key; needs <span className="kv-nums">pip install coqui-tts</span> once. The clone appears in AI settings under free-tts as “name · cloned”.</>
+            <>Clone a voice locally (XTTS v2) from one clear sample — a recording or an uploaded voice. Free, no key; needs <span className="kv-nums">pip install coqui-tts</span> once. The clone appears in AI settings under free-tts as “name · cloned”.
+              <label style={{ display: "flex", gap: 6, alignItems: "center", marginTop: 6, cursor: "pointer" }}>
+                <input type="checkbox" checked={cloneClean} onChange={(e) => setCloneClean(e.target.checked)} />
+                Clean audio — denoise, normalize loudness, trim silence before cloning
+              </label>
+            </>
           ) : (
             <>Clone a voice — 1–5 clear speech samples (ElevenLabs instant clone). Clones appear in the Brain voice picker under elevenlabs.</>
           )}
