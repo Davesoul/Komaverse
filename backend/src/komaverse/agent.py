@@ -1091,9 +1091,28 @@ def tool_detect_all(
         )
         used = res.detector_used
         total += len(res.panels)
-    if used != detector:
-        return f"Detected {total} panels across {len(p.pages)} pages ({detector} unavailable, fell back to {used}, {direction}, free)."
-    return f"Detected {total} panels across {len(p.pages)} pages ({used}, {direction}, free)."
+    head = (
+        f"Detected {total} panels across {len(p.pages)} pages "
+        f"({used}, {direction}, free)."
+        if used == detector
+        else f"Detected {total} panels across {len(p.pages)} pages "
+        f"({detector} unavailable, fell back to {used}, {direction}, free)."
+    )
+    # The panel roster rides the reply: later turns reference detected
+    # panels by @panel: id from context alone — counts never suffice.
+    session.expire_all()
+    p = get_project(project_id, session, user)
+    lines = [head]
+    for page in sorted(p.pages, key=lambda pg: pg.index):
+        ordered = sorted(page.panels, key=lambda pn: pn.reading_order)
+        bits = [
+            f'@panel:{pn.id} "{(pn.name or f"Panel {pn.reading_order + 1}")[:24]}"'
+            for pn in ordered[:8]
+        ]
+        if len(ordered) > 8:
+            bits.append(f"+{len(ordered) - 8} more (open Scan to see all)")
+        lines.append(f"Page {page.index + 1} (@media:{page.id}): " + ", ".join(bits))
+    return "\n".join(lines)
 
 
 def auto_direct_core(
@@ -4290,7 +4309,11 @@ _TOOLS_SCHEMA = [
         "type": "function",
         "function": {
             "name": "detect_all",
-            "description": "Detect panels on every page of the project.",
+            "description": (
+                "Detect panels on every page of the project. Replies "
+                "with a @panel: roster — reference those ids directly in "
+                "later turns."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {

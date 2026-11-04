@@ -1376,3 +1376,21 @@ color-theory (cel shadow colors, light logic), manga-literacy
 - 2 new tests (403-then-200 retry with UA assertion, description
   cross-reference). Full suite re-run at commit time; `:8001`
   restarted (agent changed).
+
+## ADR-53: Detection replies carry a panel roster (accepted)
+
+- Answering "can the agent reference detected panels on its own,
+  and do we have to handle that": no, it could not — `tool_status`
+  reports only counts ("24 panels") and the detect reply was
+  count-only, so no panel id ever reached context. A prompt cannot
+  fix missing context. Yes, it had to be handled, or panel
+  references stay impossible without the user pasting ids.
+- `tool_detect_all` now appends a per-page roster (first 8 panels
+  as `@panel:<id> "name"`, `+N more` beyond that) plus the page's
+  `@media:` id. The roster rides the user-visible reply (chat
+  renders each as a thumbnail via ADR-51), the tool result, and
+  history — so later turns reuse the ids; the tool description
+  tells the model to reference them directly.
+- New `test_detect_all_lists_panel_refs` locks roster ids (and page
+  ids) against the seeded pages. Agent + scans suites green at
+  commit time; full suite re-run below.

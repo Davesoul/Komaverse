@@ -235,6 +235,30 @@ def test_agent_detect_with_detector_and_direction(factory, user):
     assert "panels" in summary
 
 
+def test_detect_all_lists_panel_refs(factory, user):
+    """After detection the reply carries @panel: ids, so later turns
+    can reference panels from context alone (no user pasting)."""
+    import re
+
+    from komaverse import agent as agent_mod
+    from komaverse.api.scans import get_project
+
+    pid = seed_project(factory, user)
+    with factory() as s:
+        summary = agent_mod.tool_detect_all(
+            s, user, pid, detector="heuristic", direction="ltr"
+        )
+    assert "panels" in summary
+    assert "@panel:" in summary
+    with factory() as s:
+        ids = {p.id for page in get_project(pid, s, user).pages for p in page.panels}
+    found = set(re.findall(r"@panel:([A-Za-z0-9_-]+)", summary))
+    assert found and found <= ids
+    with factory() as s:
+        page_ids = {page.id for page in get_project(pid, s, user).pages}
+    assert set(re.findall(r"@media:([A-Za-z0-9_-]+)", summary)) <= page_ids
+
+
 def test_agent_parse_detector_and_direction():
     from komaverse.agent import parse_detector, parse_direction
 
