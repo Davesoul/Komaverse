@@ -875,6 +875,9 @@ export const api = {
   getJob: (jobId: string) => req<Job>(`/api/v1/ai/jobs/${jobId}`),
   cancelJob: (jobId: string) =>
     req<Job>(`/api/v1/ai/jobs/${jobId}/cancel`, { method: "POST" }),
+  /** Clear a failed/cancelled generation from the gallery (204, no body). */
+  deleteJob: (jobId: string) =>
+    req<void>(`/api/v1/ai/jobs/${jobId}`, { method: "DELETE" }),
   listJobs: () => req<Job[]>("/api/v1/ai/jobs"),
   /** Save a web research image into a project's Media (returns a done @gen:-able job). */
   importImageToMedia: (projectId: string, url: string, title?: string) =>

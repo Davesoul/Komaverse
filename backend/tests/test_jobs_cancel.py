@@ -60,6 +60,29 @@ def test_cancel_terminal_job_409(factory, user):
     assert exc.value.status_code == 409
 
 
+def test_delete_failed_and_cancelled_jobs(factory, user):
+    """Failed generations clear from the gallery; done jobs and live
+    ones are refused, foreign/missing rows 404."""
+    from komaverse.api.ai import delete_job
+
+    failed = seed_queued_job(factory, user, status="failed")
+    cancelled = seed_queued_job(factory, user, status="cancelled")
+    done = seed_queued_job(factory, user, status="done")
+    with factory() as s:
+        delete_job(failed, s, user)
+        delete_job(cancelled, s, user)
+    with factory() as s:
+        assert s.get(JobRow, failed) is None
+        assert s.get(JobRow, cancelled) is None
+        assert s.get(JobRow, done) is not None
+    with factory() as s, pytest.raises(HTTPException) as exc:
+        delete_job(done, s, user)
+    assert exc.value.status_code == 409
+    with factory() as s, pytest.raises(HTTPException) as exc2:
+        delete_job("missing000000", s, user)
+    assert exc2.value.status_code == 404
+
+
 def test_cancel_missing_and_foreign_job(factory, user):
     with factory() as s:
         other = create_user(s, email="other@t.local")

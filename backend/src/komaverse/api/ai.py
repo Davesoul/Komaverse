@@ -634,6 +634,29 @@ def cancel_job(
     return row.to_schema()
 
 
+@router.delete("/ai/jobs/{job_id}", status_code=204)
+def delete_job(
+    job_id: str,
+    session: Session = Depends(get_session),
+    user: UserRow = Depends(get_current_user),
+):
+    """Clear a failed/cancelled generation from the Media gallery.
+
+    Only terminal failures are clearable: done jobs are gallery
+    artifacts (frames hold separate copies) and live jobs stop via
+    cancel. Failed/cancelled rows never attached result files, so a
+    row delete leaves no orphans.
+    """
+    row = session.get(JobRow, job_id)
+    if row is None or row.user_id != user.id:
+        raise HTTPException(404, "job not found")
+    if row.status not in ("failed", "cancelled"):
+        raise HTTPException(409, f"job is {row.status} — only failed or cancelled jobs can be cleared")
+    session.delete(row)
+    session.commit()
+    return None
+
+
 #: Cap for research-image imports: chat art is reference material, and
 #: the downloader bounds RAM to cap + one chunk either way.
 MAX_IMPORT_IMAGE_BYTES = 10 * 1024 * 1024

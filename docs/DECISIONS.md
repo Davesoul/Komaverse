@@ -1490,3 +1490,9 @@ color-theory (cel shadow colors, light logic), manga-literacy
 
 - Bug: `auto_direct_core` always collected every page's panels, so Scan's "send this page" dropped the whole project onto the new timeline. The route now takes `page_id` (404 when foreign); the Scan sender always passes the open page, so a new timeline carries only that page's panels. Render's auto-direct and the agent tool stay unscoped — whole-project cuts are their purpose.
 - Test `test_auto_direct_page_scope` pins it: two detected pages, scoped send lands exactly page 2's panels, unscoped still covers both, foreign page 404s.
+
+## ADR-66: Failed generations never build gallery cards (accepted)
+
+- Bug: failed provider runs (e.g. the Minimax/Hailuo image-input 400s) rendered full-size error cards in Videos & generations, masquerading as media. Failed/cancelled jobs are now excluded from the grid and counts; they collapse into one warning strip above the grid ("N generations failed — nothing was added to your media") with the raw error per row and a per-item Clear (×).
+- Clearing needed a backend path: new `DELETE /ai/jobs/{jobId}` (204) restricted to failed/cancelled rows — done jobs are gallery artifacts, live jobs stop via cancel — 404 on missing/foreign, 409 otherwise. Failed/cancelled rows never attached result files, so row delete leaves no orphans. Pinned by `test_delete_failed_and_cancelled_jobs`.
+- Verified in headless Chromium against the Demo project with a seeded Minimax-style failure: zero `.kv-media-card` elements mention it, the strip shows the provider error, Clear deletes the row and the strip disappears. Gates: new pytest passes, tsc + build green.

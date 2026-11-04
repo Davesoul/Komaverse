@@ -251,7 +251,7 @@ export default function MediaPage() {
   // generations, newest-first takes. All client-side — the listings are
   // already in memory and small.
   const [query, setQuery] = useState("");
-  const [genStatus, setGenStatus] = useState<"all" | "done" | "active" | "failed">("all");
+  const [genStatus, setGenStatus] = useState<"all" | "done" | "active">("all");
   const [takeSort, setTakeSort] = useState<"new" | "old" | "name">("new");
   const [transcripts, setTranscripts] = useState<Record<string, Transcript>>({});
   const [transcribing, setTranscribing] = useState<string | null>(null);
@@ -782,7 +782,12 @@ export default function MediaPage() {
       return takeSort === "new" ? bt.localeCompare(at) : at.localeCompare(bt);
     });
   const aiJobs = jobs.filter((j) => j.kind === "image" || j.kind === "video");
-  const gensShown = aiJobs.filter(
+  // Failures never build gallery cards: they collapse into the compact
+  // failed strip above the grid (with per-item Clear), so a dead
+  // provider run can't masquerade as media.
+  const failedJobs = aiJobs.filter((j) => j.status === "failed" || j.status === "cancelled");
+  const liveJobs = aiJobs.filter((j) => j.status !== "failed" && j.status !== "cancelled");
+  const gensShown = liveJobs.filter(
     (j) =>
       (genStatus === "all" ||
         (genStatus === "active"
@@ -790,6 +795,18 @@ export default function MediaPage() {
           : j.status === genStatus)) &&
       matches(j.prompt, j.id, j.status),
   );
+  const doClearJob = async (job: Job) => {
+    setBusy("Clearing…");
+    try {
+      await api.deleteJob(job.id);
+      await refresh(project!.id);
+      toast("Cleared the failed generation.");
+    } catch (e) {
+      toast(`Clear failed: ${(e as Error).message}`, "error");
+    } finally {
+      setBusy("");
+    }
+  };
   const exports = jobs.filter((j) => j.kind === "export");
   const quotaPct =
     usage && usage.quota_bytes > 0 ? (usage.bytes_used / usage.quota_bytes) * 100 : 0;
@@ -846,9 +863,9 @@ export default function MediaPage() {
       </div>
       <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 12, flexWrap: "wrap" }}>
         <span style={{ fontSize: 12, color: "var(--kv-muted)" }}>Generations:</span>
-        {(["all", "done", "active", "failed"] as const).map((s) => (
+        {(["all", "done", "active"] as const).map((s) => (
           <Btn key={s} small active={genStatus === s} onClick={() => setGenStatus(s)}>
-            {s === "all" ? "All" : s === "active" ? "Running" : s === "done" ? "Done" : "Failed"}
+            {s === "all" ? "All" : s === "active" ? "Running" : "Done"}
           </Btn>
         ))}
         <span style={{ fontSize: 12, color: "var(--kv-muted)", marginLeft: 8 }}>Takes:</span>
@@ -1106,10 +1123,33 @@ export default function MediaPage() {
             )}
           </MediaSection>
 
+          {failedJobs.length > 0 && (
+            <Notice tone="warn">
+              <div style={{ display: "flex", flexDirection: "column", gap: 6, width: "100%" }}>
+                <span>
+                  {failedJobs.length} generation{failedJobs.length === 1 ? "" : "s"} failed — nothing was added to
+                  your media. Clear them once you've read the error.
+                </span>
+                {failedJobs.map((j) => (
+                  <div key={j.id} style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12 }}>
+                    <span className="kv-nums" style={{ color: "var(--kv-muted)" }}>
+                      {j.kind} · {j.id}
+                    </span>
+                    <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                      {j.error ?? j.status}
+                    </span>
+                    <IconBtn danger label={`Clear this failed ${j.kind}`} onClick={() => void doClearJob(j)}>
+                      ×
+                    </IconBtn>
+                  </div>
+                ))}
+              </div>
+            </Notice>
+          )}
           <MediaSection
             title="Videos & generations"
             items={gensShown}
-            total={aiJobs.length}
+            total={liveJobs.length}
             cap={GEN_CAP}
             collapsed={collapsed.gens}
             showAll={showAll.gens}
@@ -1197,23 +1237,6 @@ export default function MediaPage() {
                           style={{ width: "100%", aspectRatio: "1 / 1", objectFit: "cover", display: "block" }}
                         />
                       </button>
-                    ) : j.status === "failed" ? (
-                      <div
-                        style={{
-                          width: "100%",
-                          aspectRatio: "1 / 1",
-                          background: "var(--kv-inset)",
-                          display: "flex",
-                          alignItems: "center",
-                          justifyContent: "center",
-                          fontSize: 12,
-                          color: "var(--kv-danger)",
-                          padding: 8,
-                          textAlign: "center",
-                        }}
-                      >
-                        {j.error ?? "failed"}
-                      </div>
                     ) : (
                       <div
                         role="status"
@@ -1469,7 +1492,7 @@ export default function MediaPage() {
             items={[
               `${project.pages.length} pages`,
               `${takes.length} takes`,
-              `${aiJobs.length} generations`,
+              `${liveJobs.length} generations`,
               `${frames.length} frames`,
               `${exports.length} renders`,
               usage ? `${fmtBytes(usage.bytes_used)} stored` : "",
