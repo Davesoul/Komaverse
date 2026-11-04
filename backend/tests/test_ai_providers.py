@@ -421,6 +421,19 @@ def test_openrouter_video_copyright_refusal_points_to_docs(monkeypatch):
     assert "docs/MODEL_ERRORS.md" in str(exc.value)  # hint appended
 
 
+def test_hailuo3max_floor_and_single_frame(monkeypatch):
+    """H3 Max constraints fail fast with the fix — never a cryptic 422,
+    never silently upscaled billed seconds."""
+    monkeypatch.setattr(settings, "openrouter_api_key", "or-test")
+    with pytest.raises(ProviderError, match="5-15 seconds"):
+        OpenRouterProvider().generate_video("x", 4.0, model="minimax/hailuo-3-max")
+    with pytest.raises(ProviderError, match="one frame only"):
+        OpenRouterProvider().generate_video(
+            "x", 6.0, model="minimax/hailuo-3-max",
+            start_frame=b"1", end_frame=b"2",
+        )
+
+
 def test_openrouter_video_silent_filter_explains_itself(monkeypatch):
     """completed with no media AND a dead content URL = output-side filter."""
     monkeypatch.setattr(settings, "openrouter_api_key", "or-test")

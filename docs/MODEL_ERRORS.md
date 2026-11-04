@@ -56,6 +56,16 @@ provider's billing page, not Komaverse.
   commercial/demo use — can infringe even when a model *allows* it. A filter
   refusal is the provider protecting you (and itself).
 
+## Per-model constraints we enforce client-side
+
+- **Hailuo 3 Max (`minimax/hailuo-3-max`)**: 5–15s only (our 4s default is
+  rejected), one frame max (first *or* last — never both), 480p/768p, and at
+  $0.05–0.08/s the cheapest video in the catalog. Komaverse fails fast with
+  the fix instead of sending a doomed request: pick 5+ seconds, one frame.
+  Sources: [H3 Max skill](https://github.com/finpeakinc/frevana-skills/blob/HEAD/skills/minimax-h3-max/SKILL.md),
+  [video-model survey](https://seminal.ai/reference/categories/video-generation-models/).
+  Policy strictness: unknown — treat as untested, not as lax.
+
 ## 3. What to do instead (in order)
 
 1. **Original characters.** Design your own fighter in-app (`create_image`),

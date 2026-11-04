@@ -4692,7 +4692,7 @@ _TOOLS_SCHEMA = [
                 "type": "object",
                 "properties": {
                     "prompt": {"type": "string", "description": "Clean scene text, no @-mentions. Fold any framing words from the conversation into the scene ('wide 16:9 framing' or 'vertical 9:16 framing'); with none stated, describe the subject plainly."},
-                    "seconds": {"type": "number", "description": "Seconds of video (Seedance bills per second; default 4). Pass the conversation's number when stated - digits or words ('four seconds'); otherwise omit."},
+                    "seconds": {"type": "number", "description": "Seconds of video (Seedance bills per second; default 4; Hailuo 3 Max needs 5+). Pass the conversation's number when stated - digits or words ('four seconds'); otherwise omit."},
                     "size": {"type": "string", "description": "WxH (1280x720, 720x1280, 1920x1080...). Pass the conversation's value when stated; otherwise omit for the provider default (cheapest)."},
                     "generate_audio": {"type": "boolean", "description": "Always false or omitted: the video model renders silent. Dialogue and music come from synthesize_voice takes and timeline audio, never the video model."},
                     "model": {"type": "string"},

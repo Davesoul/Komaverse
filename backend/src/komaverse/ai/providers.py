@@ -1470,6 +1470,21 @@ class OpenRouterProvider:
         size: str | None = None,
         generate_audio: bool = False,
     ) -> bytes:
+        resolved = model or settings.openrouter_video_model
+        if "hailuo-3-max" in resolved:
+            # H3 Max floor is 5s and it takes a single frame (first xor
+            # last). Fail fast with the fix instead of a cryptic provider
+            # 422 — and never silently upscale billed seconds.
+            if int(seconds) < 5:
+                raise ProviderError(
+                    "hailuo-3-max needs 5-15 seconds "
+                    f"(got {int(seconds)}s) — pick 5 or more seconds"
+                )
+            if start_frame is not None and end_frame is not None:
+                raise ProviderError(
+                    "hailuo-3-max takes one frame only — attach a start "
+                    "frame or an end frame, not both"
+                )
         # Async Video API (docs/.../multimodal/video-generation): POST
         # /videos {model, prompt, duration, size?, generate_audio,
         # seed?, frame_images?, input_references?}; frame_images entries
