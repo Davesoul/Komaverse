@@ -1158,3 +1158,43 @@ def test_export_overlay_video_brings_audio(factory, user):
     assert audio_has_stream(
         settings.media_dir / out["url"].removeprefix("/media/")
     )
+
+
+def test_clip_head_trim_offset_patch_and_export(factory, user):
+    """Head-trim: PATCH offset persists and a head-trimmed V1 video still
+    exports with its native audio (the timeline position never moves)."""
+    from komaverse.db_models import JobRow
+    from komaverse.renderer import audio_has_stream
+
+    with factory() as s:
+        project = create_project(ProjectCreate(name="HeadTrim"), s, user)
+        vdir = settings.media_dir / "testvid"
+        noisy = vdir / "headtrim_noisy.mp4"
+        _video_file(noisy, seconds=4.0, with_audio=True)
+        s.add(JobRow(
+            id="headtrimjob1", user_id=user.id, project_id=project.id,
+            kind="video", status="done", prompt="noisy",
+            result_url="/media/testvid/headtrim_noisy.mp4",
+        ))
+        s.commit()
+        scenes = list_scenes(project.id, s, user)
+        clip = add_clip(
+            scenes[0].id,
+            ClipCreate(kind="video", source_id="headtrimjob1", duration=4.0),
+            s, user,
+        )
+        assert clip.offset == 0.0
+    # A negative head-trim clamps to the source start, never 400s.
+    with factory() as s:
+        clamped = patch_clip(clip.id, ClipPatch(offset=-1.0), s, user)
+    assert clamped.offset == 0.0
+    with factory() as s:
+        trimmed = patch_clip(clip.id, ClipPatch(offset=2.0), s, user)
+    assert trimmed.offset == 2.0
+    with factory() as s:
+        out = render_project(project.id, s, fps=5, width=160, height=120)
+    assert out["url"].endswith(".mp4")
+    assert out["duration_sec"] == pytest.approx(4.0, abs=0.05)
+    assert audio_has_stream(
+        settings.media_dir / out["url"].removeprefix("/media/")
+    )

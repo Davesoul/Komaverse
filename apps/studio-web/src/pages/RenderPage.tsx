@@ -546,6 +546,7 @@ export default function RenderPage() {
     id: string,
     patch: {
       duration?: number;
+      offset?: number;
       motion?: string;
       transition?: string;
       transition_duration?: number;
@@ -564,6 +565,15 @@ export default function RenderPage() {
   ) => {
     if (!project || !scene) return;
     pushClipHistory();
+    // Optimistic: the timeline, totals, and preview derive from `scene`,
+    // so the edit shows instantly; the refresh below reconciles.
+    setScenes((prev) =>
+      prev.map((s) =>
+        s.id === scene.id
+          ? { ...s, clips: s.clips.map((c) => (c.id === id ? { ...c, ...patch } : c)) }
+          : s,
+      ),
+    );
     try {
       await api.patchClip(id, patch);
       if (
@@ -588,6 +598,7 @@ export default function RenderPage() {
       }
     } catch (e) {
       setNotice(`Clip update failed: ${(e as Error).message}`);
+      await refresh(project.id, scene.id);
     }
   };
 
@@ -605,11 +616,20 @@ export default function RenderPage() {
     },
   ) => {
     if (!project || !scene) return;
+    // Optimistic like clips: the lane, waveform, and preview mix react now.
+    setScenes((prev) =>
+      prev.map((s) =>
+        s.id === scene.id
+          ? { ...s, cues: s.cues.map((c) => (c.id === id ? { ...c, ...patch } : c)) }
+          : s,
+      ),
+    );
     try {
       await api.patchCue(id, patch);
       await refresh(project.id, scene.id);
     } catch (e) {
       setNotice(`Sound update failed: ${(e as Error).message}`);
+      await refresh(project.id, scene.id);
     }
   };
 
@@ -655,6 +675,7 @@ export default function RenderPage() {
           image: clipImageFor(c, project, true, artNonce),
           video: videoJobs[c.source_id]?.url,
           duration: c.duration,
+          offset: c.offset ?? 0,
           motion: c.motion,
           transition: c.transition,
           transition_duration: c.transition_duration,
@@ -675,6 +696,7 @@ export default function RenderPage() {
             label: `V${(c.lane ?? 1) + 1} · ${c.kind === "video" ? (videoJobs[c.source_id]?.label ?? "Video") : labelFor(c, project, frames)}`,
             image: clipImageFor(c, project, true, artNonce),
             video: videoJobs[c.source_id]?.url,
+            offset: c.offset ?? 0,
             start,
             end: start + Math.max(c.duration, 0.1),
           };
@@ -2145,6 +2167,7 @@ export default function RenderPage() {
                       image: clipImageFor(c, project, false, artNonce),
                       video: videoJobs[c.source_id]?.url,
                       duration: c.duration,
+                      offset: c.offset ?? 0,
                       lane: c.lane ?? 0,
                       startSec: Math.max(c.start ?? 0, 0),
                       motion: c.motion,
@@ -2162,7 +2185,7 @@ export default function RenderPage() {
                     onDragStart={setDragId}
                     onDrop={(id) => void dropClip(id)}
                     onDragEnd={() => setDragId(null)}
-                    onTrimClip={(id, duration) => void commitClipPatch(id, { duration })}
+                    onTrimClip={(id, patch) => void commitClipPatch(id, patch)}
                     onTrimCue={(id, patch) => void commitCuePatch(id, patch)}
                     onMoveOverlay={(id, startSec) =>
                       void commitClipPatch(id, { start: Math.round(startSec * 10) / 10 })
@@ -2279,6 +2302,47 @@ export default function RenderPage() {
                     ))}
                   </div>
                 </div>
+                {selectedClip.kind === "video" && (
+                  <div style={{ display: "flex", gap: 6, alignItems: "center", marginTop: 10, flexWrap: "wrap" }}>
+                    <span style={{ fontSize: 12, color: "var(--kv-muted)" }}>Head trim</span>
+                    <Btn
+                      small
+                      title="Trim 0.5s less from the head (restores tail)"
+                      onClick={() => {
+                        const off = Math.max(0, Math.round(((selectedClip.offset ?? 0) - 0.5) * 10) / 10);
+                        const restored = Math.round(((selectedClip.offset ?? 0) - off) * 10) / 10;
+                        void commitClipPatch(selectedClip.id, {
+                          offset: off,
+                          duration: Math.round((selectedClip.duration + restored) * 10) / 10,
+                          ...(selectedClip.lane > 0 ? { start: Math.max(0, Math.round(((selectedClip.start ?? 0) - restored) * 10) / 10) } : {}),
+                        });
+                      }}
+                    >
+                      −
+                    </Btn>
+                    <DurationInput
+                      value={selectedClip.offset ?? 0}
+                      onCommit={(v) => void commitClipPatch(selectedClip.id, { offset: Math.max(0, v) })}
+                    />
+                    <Btn
+                      small
+                      title="Trim 0.5s more from the head (timeline position stays)"
+                      onClick={() => {
+                        const off = Math.round(((selectedClip.offset ?? 0) + 0.5) * 10) / 10;
+                        void commitClipPatch(selectedClip.id, {
+                          offset: off,
+                          duration: Math.max(0.1, Math.round((selectedClip.duration - 0.5) * 10) / 10),
+                          ...(selectedClip.lane > 0 ? { start: Math.round(((selectedClip.start ?? 0) + 0.5) * 10) / 10 } : {}),
+                        });
+                      }}
+                    >
+                      +
+                    </Btn>
+                    <span style={{ fontSize: 11, color: "var(--kv-faint)" }}>
+                      Skips the head of the source video; the tail shortens with it.
+                    </span>
+                  </div>
+                )}
                 <div style={{ display: "flex", gap: 6, alignItems: "center", marginTop: 10, flexWrap: "wrap" }}>
                   <span style={{ fontSize: 12, color: "var(--kv-muted)" }}>Motion</span>
                   <SelectInput

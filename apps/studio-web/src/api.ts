@@ -50,6 +50,8 @@ export interface Clip {
   source_id: string;
   start: number;
   duration: number;
+  /** Seconds skipped at the source head (video head-trim). */
+  offset: number;
   motion: string;
   transition: string;
   transition_duration: number;

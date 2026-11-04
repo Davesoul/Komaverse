@@ -109,6 +109,7 @@ def init_db() -> None:
         "ALTER TABLE cloned_voices ADD COLUMN engine VARCHAR(32)",
         "ALTER TABLE cloned_voices ADD COLUMN ref_audio VARCHAR(500)",
         "ALTER TABLE usage_events ADD COLUMN project_id VARCHAR(12) DEFAULT ''",
+        "ALTER TABLE clips ADD COLUMN offset FLOAT DEFAULT 0.0",
     ):
         try:
             with engine.begin() as conn:

@@ -262,6 +262,8 @@ class ClipRow(Base):
     source_id: Mapped[str] = mapped_column(String(500), default="")
     start: Mapped[float] = mapped_column(default=0)
     duration: Mapped[float] = mapped_column(default=2.0)
+    # Source-head skip in seconds (video head-trim). Old rows predate it.
+    offset: Mapped[float] = mapped_column(default=0.0)
     motion: Mapped[str] = mapped_column(String(32), default="none")
     transition: Mapped[str] = mapped_column(String(32), default="none")
     transition_duration: Mapped[float] = mapped_column(default=0.5)
@@ -286,6 +288,8 @@ class ClipRow(Base):
             source_id=self.source_id,
             start=self.start,
             duration=self.duration,
+            # Pre-offset rows hold NULL (ALTER backfill): same guard as clips.
+            offset=self.offset if self.offset is not None else 0.0,
             motion=self.motion,
             # Pre-transition rows hold NULL (ALTER backfill): serialize
             # them as the schema defaults instead of 500ing the list.

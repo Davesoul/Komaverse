@@ -222,6 +222,7 @@ class FrameOrder(BaseModel):
 
 class ClipPatch(BaseModel):
     duration: float | None = None
+    offset: float | None = None
     lane: int | None = None
     motion: str | None = None
     transition: str | None = None
@@ -836,6 +837,10 @@ def patch_clip(
     ensure_owner(session, user, row.scene.project_id)
     if body.duration is not None:
         row.duration = max(body.duration, 0.1)
+    if body.offset is not None:
+        # Source-head skip (video head-trim): never negative. The mix
+        # clamps playback to the source remainder, so overshoot is safe.
+        row.offset = max(body.offset, 0.0)
     if body.motion is not None:
         if body.motion not in MOTIONS:
             raise HTTPException(400, f"unknown motion: {body.motion}")

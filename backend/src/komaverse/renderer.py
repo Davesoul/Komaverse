@@ -707,16 +707,17 @@ def render_project(
             if ocdur <= 0 or not audio_has_stream(ovpath):
                 continue
             ofade_out = max(oclip.fade_out or 0.0, 0.0)
+            _ov_off = max((oclip.offset or 0.0), 0.0)
             tracks.append(
                 {
                     "path": ovpath,
                     "start_sec": ov["start"],
-                    "offset_sec": 0.0,
+                    "offset_sec": _ov_off,
                     "volume": 1.0,
                     "fade_in": max(oclip.fade_in or 0.0, 0.0),
                     "fade_out": ofade_out,
                     "end_sec": max(ov["start"] + ocdur - ofade_out, ov["start"] + 0.1),
-                    "loop_sec": ovdur if ocdur > ovdur else None,
+                    "loop_sec": (ovdur - _ov_off) if ocdur > (ovdur - _ov_off) else None,
                     "trim_dur": ocdur,
                 }
             )
@@ -737,16 +738,17 @@ def render_project(
             if cdur <= 0 or not audio_has_stream(vpath):
                 continue
             fade_out = max(clip.fade_out or 0.0, 0.0)
+            _clip_off = max((clip.offset or 0.0), 0.0)
             tracks.append(
                 {
                     "path": vpath,
                     "start_sec": start,
-                    "offset_sec": 0.0,
+                    "offset_sec": _clip_off,
                     "volume": 1.0,
                     "fade_in": max(clip.fade_in or 0.0, 0.0),
                     "fade_out": fade_out,
                     "end_sec": max(start + cdur - fade_out, start + 0.1),
-                    "loop_sec": vdur if cdur > vdur else None,
+                    "loop_sec": (vdur - _clip_off) if cdur > (vdur - _clip_off) else None,
                     "trim_dur": cdur,
                 }
             )
@@ -829,7 +831,9 @@ def render_project(
                     _got = None
                     _cap = overlay_caps.get(_oi)
                     if _cap is not None:
-                        _t_src = (t - _ov["start"]) % _vdur if _vdur > 0 else 0.0
+                        _ov_pic_off = max((_clip.offset or 0.0), 0.0)
+                        _t_span = max(_vdur - _ov_pic_off, 0.1)
+                        _t_src = _ov_pic_off + ((t - _ov["start"]) % _t_span) if _vdur > 0 else _ov_pic_off
                         _cap.set(cv2.CAP_PROP_POS_MSEC, _t_src * 1000)
                         _ok, _read = _cap.read()
                         if _ok and _read is not None:
@@ -920,7 +924,9 @@ def render_project(
                         last = None
                         for i in range(k_in, n - k_out):
                             t_out = i / fps
-                            t_src = t_out if t_out < vdur else t_out % vdur
+                            _pic_off = max((clip.offset or 0.0), 0.0)
+                            _span = max(vdur - _pic_off, 0.1)
+                            t_src = _pic_off + (t_out if t_out < _span else t_out % _span)
                             cap.set(cv2.CAP_PROP_POS_MSEC, t_src * 1000)
                             ok, frame = cap.read()
                             if ok and frame is not None:

@@ -9,6 +9,8 @@ export interface PreviewClip {
   /** Set for video clips: the playable file URL (stills use image). */
   video?: string;
   duration: number;
+  /** Seconds skipped at the source head (video head-trim). */
+  offset?: number;
   motion: string;
   /** CSS filter preview of the export color grade ("" = none). */
   filter?: string;
@@ -35,6 +37,8 @@ export interface PreviewOverlay {
   image: string;
   /** Set for video overlays: the playable file URL (audible, like base). */
   video?: string;
+  /** Seconds skipped at the source head (video head-trim). */
+  offset?: number;
   start: number;
   end: number;
 }
@@ -304,7 +308,7 @@ export function PreviewPlayer({
     setBaseId((b) => b ?? current.id);
     setCover({
       clip: current,
-      at: Math.max(0, timeRef.current - startOf(current.id)),
+      at: (current.offset ?? 0) + Math.max(0, timeRef.current - startOf(current.id)),
       shown: false,
       gen,
       ms,
@@ -502,7 +506,7 @@ export function PreviewPlayer({
             src={base.video}
             // Frozen while the cover fades in over it, live otherwise.
             playing={cover ? false : playing}
-            offset={Math.max(0, time - startOf(base.id))}
+            offset={(base.offset ?? 0) + Math.max(0, time - startOf(base.id))}
             seekNonce={seek?.nonce ?? 0}
             label={base.label}
           />
@@ -572,7 +576,7 @@ export function PreviewPlayer({
                   key={o.id}
                   src={o.video}
                   playing={playing}
-                  offset={Math.max(0, time - o.start)}
+                  offset={(o.offset ?? 0) + Math.max(0, time - o.start)}
                   seekNonce={seek?.nonce ?? 0}
                   label={o.label}
                 />

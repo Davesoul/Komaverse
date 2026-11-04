@@ -9,6 +9,8 @@ export interface TimelineClipInfo {
   /** Set for video clips: muted thumbnail playback. */
   video?: string;
   duration: number;
+  /** Source-head offset in seconds (video head-trim); 0 = play from start. */
+  offset: number;
   /** 0 = V1 sequential base; >=1 = fullscreen overlay placed at startSec. */
   lane: number;
   /** Absolute overlay start in scene seconds (V1 ignores this). */
@@ -191,7 +193,10 @@ export function Timeline({
   onDragStart: (id: string) => void;
   onDrop: (id: string) => void;
   onDragEnd: () => void;
-  onTrimClip: (id: string, duration: number) => void;
+  onTrimClip: (
+    id: string,
+    patch: { duration: number; offset?: number; start?: number },
+  ) => void;
   /** Overlay V2+ move: absolute scene start (pointer drag or inspector). */
   onMoveOverlay: (id: string, startSec: number) => void;
   /** Open the subtitle uploader for the next free lane (S1, then S2). */
@@ -260,6 +265,8 @@ export function Timeline({
     edge: "l" | "r";
     a: number;
     b: number;
+    /** Overlay absolute start while left-trimming (V1 keeps position). */
+    c?: number;
   }>(null);
   const gestureRef = useRef<null | {
     kind: "clip" | "cue";
@@ -273,8 +280,15 @@ export function Timeline({
     takeDur: number;
     cueRate: number;
     moved: boolean;
+    /** Source-head offset at grab (video head-trim). */
+    clipOff: number;
+    /** Overlay absolute start at grab. */
+    clipStart: number;
+    /** 0 = V1 sequential base, >=1 fullscreen overlay. */
+    clipLane: number;
     pa: number;
     pb: number;
+    pc: number;
   }>(null);
   const justTrimmedRef = useRef(false);
 
@@ -300,8 +314,20 @@ export function Timeline({
     const dx = (e.clientX - g.startX) / ppsRef.current;
     g.moved = true;
     if (g.kind === "clip") {
-      g.pa = round1(Math.min(60, Math.max(0.1, g.base + (g.edge === "l" ? -dx : dx))));
-      setTrim({ kind: "clip", id: g.id, edge: g.edge, a: g.pa, b: 0 });
+      if (g.edge === "l") {
+        // Video head-trim: the V1 position stays put, an overlay start
+        // slides right, and the source head moves instead of the tail.
+        // Stills have no head to trim (their left handle is hidden).
+        const off = round1(Math.max(0, g.clipOff + dx));
+        const shaved = round1(off - g.clipOff);
+        g.pa = round1(Math.max(0.1, g.base - shaved));
+        g.pb = off;
+        g.pc = g.clipLane > 0 ? round1(Math.max(0, g.clipStart + shaved)) : g.clipStart;
+        setTrim({ kind: "clip", id: g.id, edge: g.edge, a: g.pa, b: g.pb, c: g.pc });
+      } else {
+        g.pa = round1(Math.min(60, Math.max(0.1, g.base + dx)));
+        setTrim({ kind: "clip", id: g.id, edge: g.edge, a: g.pa, b: 0 });
+      }
     } else if (g.edge === "l") {
       // Head trim: shift timeline start and take offset together, end stays.
       const endCap = g.cueEnd != null ? g.cueEnd - 0.1 - g.cueStart : Infinity;
@@ -326,7 +352,17 @@ export function Timeline({
     if (!g || !g.moved) return;
     justTrimmedRef.current = true;
     if (g.kind === "clip") {
-      if (g.pa !== g.base) onTrimClip(g.id, g.pa);
+      if (g.edge === "l") {
+        if (g.pb !== g.clipOff) {
+          onTrimClip(g.id, {
+            duration: g.pa,
+            offset: g.pb,
+            ...(g.clipLane > 0 ? { start: g.pc } : {}),
+          });
+        }
+      } else if (g.pa !== g.base) {
+        onTrimClip(g.id, { duration: g.pa });
+      }
     } else if (g.edge === "l") {
       if (g.pa !== g.cueStart || g.pb !== g.cueOff) {
         onTrimCue(g.id, { start_sec: g.pa, offset_sec: g.pb });
@@ -619,6 +655,7 @@ export function Timeline({
                 const selected = clip.id === selectedId;
                 const trimming = trim?.kind === "clip" && trim.id === clip.id ? trim : null;
                 const dur = trimming ? trimming.a : clip.duration;
+                const off = trimming && trimming.edge === "l" ? (trimming.b ?? 0) : (clip.offset ?? 0);
                 // Left-edge drags anchor the right edge while resizing.
                 const left =
                   trimming && trimming.edge === "l"
@@ -633,7 +670,7 @@ export function Timeline({
                     role="button"
                     tabIndex={0}
                     aria-label={`${clip.label}, ${dur.toFixed(1)} seconds, ${clip.motion}${clip.transition !== "none" ? `, blends in with ${clip.transition}` : ""}`}
-                    title={`${clip.label} (${dur.toFixed(1)}s · ${clip.motion}${clip.transition !== "none" ? ` · ${clip.transition}` : ""}) — click to edit, drag edges to trim, drag body to reorder`}
+                    title={`${clip.label} (${dur.toFixed(1)}s · ${clip.motion}${clip.transition !== "none" ? ` · ${clip.transition}` : ""}${clip.kind === "video" && off > 0 ? ` · head trimmed ${off.toFixed(1)}s` : ""}) — click to edit, ${clip.kind === "video" ? "drag left edge to trim the head, right edge for the tail" : "drag right edge to trim"}, drag body to reorder`}
                     draggable
                     onDragStart={(e) => {
                       if (gestureRef.current) {
@@ -707,6 +744,7 @@ export function Timeline({
                       </div>
                       <div className="kv-nums" style={{ fontSize: 11, color: "var(--kv-muted)", whiteSpace: "nowrap" }}>
                         {dur.toFixed(1)}s · {clip.motion}
+                        {clip.kind === "video" && off > 0 && ` · ⏮ ${off.toFixed(1)}s`}
                         {clip.transition !== "none" && (
                           <>
                             {" · "}
@@ -725,18 +763,20 @@ export function Timeline({
                         )}
                       </div>
                     </div>
-                    {edgeHandle("l", handlesVisible, (e) =>
+                    {clip.kind === "video" && edgeHandle("l", handlesVisible, (e) =>
                       beginTrim(e, {
                         kind: "clip", id: clip.id, edge: "l",
                         startX: e.clientX, base: clip.duration,
-                        cueStart: 0, cueOff: 0, cueEnd: null, takeDur: 0, cueRate: 1, moved: false, pa: 0, pb: 0,
+                        cueStart: 0, cueOff: 0, cueEnd: null, takeDur: 0, cueRate: 1, moved: false, pa: 0, pb: 0, pc: 0,
+                        clipOff: clip.offset, clipStart: 0, clipLane: 0,
                       }),
                     )}
                     {edgeHandle("r", handlesVisible, (e) =>
                       beginTrim(e, {
                         kind: "clip", id: clip.id, edge: "r",
                         startX: e.clientX, base: clip.duration,
-                        cueStart: 0, cueOff: 0, cueEnd: null, takeDur: 0, cueRate: 1, moved: false, pa: 0, pb: 0,
+                        cueStart: 0, cueOff: 0, cueEnd: null, takeDur: 0, cueRate: 1, moved: false, pa: 0, pb: 0, pc: 0,
+                        clipOff: clip.offset, clipStart: 0, clipLane: 0,
                       }),
                     )}
                   </div>
@@ -762,7 +802,12 @@ export function Timeline({
                     const trimming = trim?.kind === "clip" && trim.id === clip.id ? trim : null;
                     const moving = moveOv?.id === clip.id ? moveOv : null;
                     const dur = trimming ? trimming.a : clip.duration;
-                    const start = moving ? moving.start : clip.startSec;
+                    const start =
+                      trimming && trimming.edge === "l" && trimming.c != null
+                        ? trimming.c
+                        : moving
+                          ? moving.start
+                          : clip.startSec;
                     const w = Math.max(dur * pps - 3, trimming || moving ? 10 : 22);
                     if (start >= total && total > 0) return null;
                     const handlesVisible = hoverId === clip.id || selected || trimming !== null;
@@ -845,11 +890,20 @@ export function Timeline({
                             {fmtTC(start)} → {fmtTC(start + dur)}
                           </div>
                         </div>
+                        {clip.kind === "video" && edgeHandle("l", handlesVisible, (e) =>
+                          beginTrim(e, {
+                            kind: "clip", id: clip.id, edge: "l",
+                            startX: e.clientX, base: clip.duration,
+                            cueStart: 0, cueOff: 0, cueEnd: null, takeDur: 0, cueRate: 1, moved: false, pa: 0, pb: 0, pc: 0,
+                            clipOff: clip.offset, clipStart: clip.startSec, clipLane: clip.lane,
+                          }),
+                        )}
                         {edgeHandle("r", handlesVisible, (e) =>
                           beginTrim(e, {
                             kind: "clip", id: clip.id, edge: "r",
                             startX: e.clientX, base: clip.duration,
-                            cueStart: 0, cueOff: 0, cueEnd: null, takeDur: 0, cueRate: 1, moved: false, pa: 0, pb: 0,
+                            cueStart: 0, cueOff: 0, cueEnd: null, takeDur: 0, cueRate: 1, moved: false, pa: 0, pb: 0, pc: 0,
+                            clipOff: clip.offset, clipStart: clip.startSec, clipLane: clip.lane,
                           }),
                         )}
                       </div>
@@ -964,14 +1018,14 @@ export function Timeline({
                       beginTrim(e, {
                         kind: "cue", id: cue.id, edge: "l",
                         startX: e.clientX, base: 0,
-                        cueStart: cue.start, cueOff: cue.offset, cueEnd: cue.endSec, takeDur: cue.takeDur, cueRate: cue.rate, moved: false, pa: 0, pb: 0,
+                        cueStart: cue.start, cueOff: cue.offset, cueEnd: cue.endSec, takeDur: cue.takeDur, cueRate: cue.rate, moved: false, pa: 0, pb: 0, clipOff: 0, clipStart: 0, clipLane: 0, pc: 0,
                       }),
                     )}
                     {edgeHandle("r", handlesVisible, (e) =>
                       beginTrim(e, {
                         kind: "cue", id: cue.id, edge: "r",
                         startX: e.clientX, base: cueDisplayLen(cue, total),
-                        cueStart: cue.start, cueOff: cue.offset, cueEnd: cue.endSec, takeDur: cue.takeDur, cueRate: cue.rate, moved: false, pa: 0, pb: 0,
+                        cueStart: cue.start, cueOff: cue.offset, cueEnd: cue.endSec, takeDur: cue.takeDur, cueRate: cue.rate, moved: false, pa: 0, pb: 0, clipOff: 0, clipStart: 0, clipLane: 0, pc: 0,
                       }),
                     )}
                   </button>

@@ -93,6 +93,9 @@ class Clip(BaseModel):
     source_id: str  # panel id, frame id, or media/asset id ("" for text)
     start: float = 0.0  # seconds on timeline
     duration: float = 2.0
+    # Seconds skipped at the source head (video only): head-trimming a
+    # video clip grows this and shrinks duration instead of moving it.
+    offset: float = 0.0
     motion: str = "none"  # none | zoom-* | pan-* | drift
     transition: str = "none"  # into this clip: none | crossfade | fade-black | fade-white | wipe-left | wipe-right | push-left | impact
     transition_duration: float = 0.5

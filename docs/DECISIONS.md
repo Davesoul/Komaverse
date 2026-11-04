@@ -1181,4 +1181,23 @@ color-theory (cel shadow colors, light logic), manga-literacy
   with cue, ask-without-line, skill registration); full suite
   green; `:8001` restarted for the new tool/prompt.
 
+## ADR-44: Clip head-trim offset + live timeline updates (accepted)
 
+- Clips gain a source-head `offset` (Clip.offset, ClipRow.offset +
+  ALTER backfill, ClipPatch.offset clamped >= 0): video-only left
+  trim. V1 position never moves; overlay `start` slides with the
+  shave; duration shrinks for stills, restores on un-trim. Stills
+  hide the left handle (no head to trim).
+- Export honors the offset on all paths: base V1 native audio
+  (`offset_sec` + loop remainder), overlay native audio at absolute
+  time (fixed an `_ov`/`ov` NameError the overlay-audio test
+  caught), and picture (`_pic_off` span + modulo for base/overlay).
+- Frontend is optimistic: `setScenes` applies clip/cue patches
+  instantly and rolls back on server error; the timeline shows the
+  live drag value (head-trim seconds) and the Render inspector
+  edits offset with +/-0.5s and a numeric field.
+- Live: PATCH offset=2.0 persists; scene export (6s clip, offset
+  2s) renders 6.0s with video+audio streams, no warnings. New
+  `test_clip_head_trim_offset_patch_and_export` (clamp + persist +
+  export-with-audio); `tsc` + build green; full suite re-run at
+  commit time; `:8001` restarted.
