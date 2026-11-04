@@ -17,13 +17,19 @@ dock. Full clip: [demo.mp4](docs/assets/readme/demo.mp4) (13s, 720p).*
 
 | | |
 |---|---|
-| ![Landing](docs/assets/readme/01-landing.png) | ![AI dock](docs/assets/readme/04-agent.png) |
-| Manga-hero landing with Netflix-style ident intro | Studio agent on `muse-spark-1.3-contributor`, threads, @-refs, inline art |
-| ![Draw](docs/assets/readme/03-draw.png) | ![Media](docs/assets/readme/03-media.png) |
-| Layered canvas, free pan, per-frame @-refs | Scanned pages, panel counts, takes, generations |
+| [Ident intro clip](docs/assets/demo/00-intro.mp4) | ![AI dock](docs/assets/demo/05-agent.png) |
+| Netflix-style ident intro (logo sting + audio) | Studio agent on `muse-spark-1.3-contributor`, threads, @-refs, inline art |
+| ![Scan](docs/assets/demo/01-scan.png) | ![Draw](docs/assets/demo/02-draw.png) |
+| Art page, SAM panels, destination-choice popup | Framed manga page, layers, per-frame @-refs |
+| ![Render](docs/assets/demo/03-render.png) | ![Media](docs/assets/demo/04-media.png) |
+| Multi-lane timeline, clip details that match preview | Library with `<video>` thumbs, per-project usage |
 
-More: [home](docs/assets/readme/02-home.png) · [scan](docs/assets/readme/03-scan.png) ·
-[render](docs/assets/readme/03-render.png)
+Motion: [timeline export playback](docs/assets/demo/06-timeline-export.mp4) ·
+[in-app render playback](docs/assets/demo/07-render-playback.mp4).
+Full set with regeneration notes:
+[docs/assets/demo/DEMO-ASSETS.md](docs/assets/demo/DEMO-ASSETS.md).
+Older captures: [01-landing](docs/assets/readme/01-landing.png) ·
+[home](docs/assets/readme/02-home.png).
 
 ## Made with Komaverse
 

@@ -32,7 +32,13 @@ ONE keyed run plus one retake, nothing more. Rules:
   footage you have, cut around it, never narrate a spinner.
 
 Cold open: the ident sting, fullscreen, with sound (0:00–0:05).
-`apps/studio-web/public/ident.html` + `/audio/ident-sting.mp3`.
+`apps/studio-web/public/ident.html` + `/audio/ident-sting.mp3`
+(or the captured [00-intro.mp4](../assets/demo/00-intro.mp4)).
+
+Ready-made B-roll: [docs/assets/demo/](../assets/demo/DEMO-ASSETS.md) —
+scan/draw/render/media/agent stills plus timeline-export and render-playback
+clips, all captured from the `cleanDemo` project (index in DEMO-ASSETS.md).
+Cut these under the narration for the middle beats instead of recording live.
 
 ## 0:05 — The problem (25s, relaxed, one breath)
 
