@@ -1661,6 +1661,94 @@ def test_generation_loop_delegation_rides_the_turn(factory, user, monkeypatch):
     assert "Before generating I need" not in out
 
 
+def test_delegation_accepts_wish_and_bare_affirmation():
+    """'As you wish' and a bare 'ok'/'yes' after a question mean proceed
+    with defaults — not another lap of the same question."""
+    from komaverse import agent as agent_mod
+
+    for text in (
+        "as you wish", "do what you want", "i trust you", "fine by me",
+        "sounds good", "whatever you want", "ok", "okay, do it", "yes",
+        "yes, but make it 8 seconds",
+    ):
+        assert agent_mod._delegates_decisions(text), text
+    assert not agent_mod._delegates_decisions("yesterday we talked")
+
+
+def test_create_video_asks_once_then_defaults(factory, user, monkeypatch):
+    """The reported loop: the model re-calls create_video with the same
+    blanks instead of asking, so a repeated identical call in one turn
+    must generate with defaults instead of re-asking."""
+    from komaverse.agent import tool_create_video
+    from komaverse.db_models import JobRow
+
+    pid = seed_project(factory, user)
+    monkeypatch.setattr(settings, "openrouter_api_key", "test-key")
+    asked: set = set()
+    with factory() as s:
+        first = tool_create_video(
+            s, user, pid, "colored video of the page", 4.0, None, factory, asked=asked
+        )
+    assert "Before generating I need" in first
+    with factory() as s:
+        second = tool_create_video(
+            s, user, pid, "colored video of the page", 4.0, None, factory, asked=asked
+        )
+    assert "Video job started" in second
+    assert "Before generating I need" not in second
+    with factory() as s:
+        assert s.query(JobRow).filter(JobRow.kind == "video").count() == 1
+
+
+def test_create_video_prefails_frame_only_model(factory, user, monkeypatch):
+    """Hailuo 3 Max takes first/last frames, not style refs: the turn
+    steers immediately instead of burning a doomed async job the user
+    waits on."""
+    from komaverse.agent import tool_create_video
+    from komaverse.db_models import JobRow
+
+    pid = seed_project(factory, user)
+    monkeypatch.setattr(settings, "openrouter_api_key", "test-key")
+    with factory() as s:
+        ref = JobRow(
+            user_id=user.id, project_id=pid, kind="image",
+            status="done", prompt="fighter", result_url="/media/x.png",
+        )
+        s.add(ref)
+        s.commit()
+        jid = ref.id
+    with factory() as s:
+        out = tool_create_video(
+            s, user, pid, "fight scene", 6.0, "minimax/hailuo-3-max", factory,
+            references=[{"kind": "gen", "id": jid}], delegated=True,
+        )
+    assert "Video job started" not in out
+    assert "start frame" in out and "switch model" in out
+    with factory() as s:
+        assert s.query(JobRow).filter(JobRow.kind == "video").count() == 0
+
+
+def test_look_at_repeat_answers_from_context(factory, user):
+    """A repeated identical look_at in one turn costs no vision round."""
+    from komaverse import agent as agent_mod
+
+    pid = seed_project(factory, user)
+    seen: set = set()
+    with factory() as s:
+        first = agent_mod._exec_cloud_tool(
+            "look_at", {"target": "@frame:missing", "question": "what is it"},
+            message="look", session=s, user=user, project_id=pid,
+            job_factory=factory, media_seen=seen,
+        )
+        second = agent_mod._exec_cloud_tool(
+            "look_at", {"target": "@frame:missing", "question": "what is it"},
+            message="look", session=s, user=user, project_id=pid,
+            job_factory=factory, media_seen=seen,
+        )
+    assert "Already viewed this turn" in second
+    assert second != first
+
+
 def test_generation_guidance_reuses_context():
     """Look/skill guidance must exempt what the conversation already saw:
     re-reading the same ref or skill every turn burns steps for nothing."""

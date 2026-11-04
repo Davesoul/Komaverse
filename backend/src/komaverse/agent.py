@@ -33,6 +33,7 @@ from komaverse.ai.direction import genre_suffix
 from komaverse.ai.providers import (
     MetaProvider,
     ProviderError,
+    _validate_video_model,
     chat_complete,
     chat_configured,
     get_chat_config,
@@ -369,13 +370,21 @@ def parse_seconds(text: str) -> float | None:
 
 
 #: The user handed blank dimensions to the agent ("decide the rest",
-#: "go"): documented defaults apply, no questions. Checked before every
-#: ask-gate so an answer turn can never re-ask what it was told to fill.
+#: "go", "as you wish", a bare "ok"): documented defaults apply, no
+#: questions. Checked before every ask-gate so an answer turn can never
+#: re-ask what it was told to fill.
 _DELEGATED_RE = re.compile(
     r"\bgo\b"
     r"|\b(decide|whatever|you\s+choose|your\s+call|go\s+ahead|surprise\s+me|"
     r"i\s+don'?t\s+mind|up\s+to\s+you|use\s+whatever|your\s+choice|"
-    r"you\s+decide|as\s+you\s+like|dealers?\s+choice|defaults?)\b",
+    r"you\s+decide|as\s+you\s+like|dealers?\s+choice|defaults?)\b"
+    r"|\bas\s+you\s+wish\b"
+    r"|\bdo\s+what\s+you\s+want\b"
+    r"|\bi\s+trust\s+you\b"
+    r"|\bwhatever\s+you\s+(want|think|like|decide)\b"
+    r"|\bfine\s+by\s+me\b"
+    r"|\bsounds?\s+good\b"
+    r"|^\s*(ok(ay)?|yes?|yeah?|yep|sure|please(\s+do)?|do\s+it|go)\b",
     re.IGNORECASE,
 )
 
@@ -601,15 +610,18 @@ def _ask_before_generating(tool: str, missing: list[tuple[str, str, str]]) -> st
     Asked at most once per subject: one short question for the listed
     pieces only — never re-ask answered or delegated pieces, and call
     the tool on the next turn with defaults for anything still blank.
+    (The caller enforces the once-only part: a repeated identical call
+    in the same turn proceeds with defaults instead of asking again.)
     """
     bits = "; ".join(f"{what} ({detail} — suggest {choices})" for what, detail, choices in missing)
     n = "one detail" if len(missing) == 1 else f"{len(missing)} details"
     return (
         f"Before generating I need {n}: {bits}. "
-        "Ask ONE short question for these pieces only — nothing else, "
-        "and never re-ask pieces the conversation already answered. "
-        f"Call {tool} on the next turn with the answers, taking the "
-        "stated defaults for anything still blank."
+        f"Reply to the user with this ONE question now and STOP — do not "
+        f"call {tool} again until the user answers. When they answer "
+        "(even 'go', 'whatever', 'as you wish', or 'ok'), call "
+        f"{tool} with what they gave, taking the stated defaults for "
+        "anything still blank, and never ask these pieces again."
     )
 
 
@@ -642,6 +654,29 @@ def tool_list_skills():
         return "No craft skills installed."
     lines = ["- " + s["name"] + ": " + s["description"] for s in found]
     return "Studio craft skills: " + "; ".join(lines)
+
+
+_skills_index_cache: dict = {}
+
+
+def _skills_index() -> str:
+    """One-line craft-skill index for the turn system prompt.
+
+    The model otherwise spends a whole round on list_skills before every
+    anime-styled generation; the index lets it jump straight to
+    read_skill. Rebuilt only when the installed set changes.
+    """
+    try:
+        found = list_skills()
+    except Exception:
+        return ""
+    key = tuple(s.get("name", "") for s in found)
+    if _skills_index_cache.get("key") != key:
+        _skills_index_cache["key"] = key
+        _skills_index_cache["text"] = "; ".join(
+            f"{s.get('name', '')} — {s.get('description', '')}" for s in found
+        )
+    return _skills_index_cache["text"]
 
 
 def tool_read_skill(name, section=None):
@@ -1758,11 +1793,14 @@ def tool_generate(
     height=None,
     attach_frame: bool = False,
     delegated: bool = False,
+    asked: set | None = None,
 ) -> str:
     raw = prompt or ""
     prompt = clean_prompt_text(raw)
     if not prompt:
         return "Tell me what to generate - e.g. \"generate a moonlit robot\"."
+    # Fail-open note when a repeated identical call skips the question.
+    repeat_note = ""
     locked = _locked_style(session, user, project_id)
     # Intent checks read the raw text: token scrubbing above removes the
     # @-references that can carry the value ("in the style of @panel:X").
@@ -1781,7 +1819,14 @@ def tool_generate(
             "a style, e.g. shonen manga, photoreal, watercolor",
         ))
     if missing and not (delegated or _delegates_decisions(raw)):
-        return _ask_before_generating("create_image", missing)
+        sig = ("create_image", tuple(sorted(w for w, _, _ in missing)))
+        if asked is not None and sig in asked:
+            repeat_note = (" Asked once already with no new answers — "
+                           "proceeding with the stated defaults.")
+        else:
+            if asked is not None:
+                asked.add(sig)
+            return _ask_before_generating("create_image", missing)
     refs = _generation_references(raw, references, fallback_references)
     snaps, notes = gather_reference_snapshots(session, user, project_id, prompt, refs, entity_ids)
     if locked and STYLE_TALK_RE.search(prompt or "") and style == "none" and genre == "none":
@@ -1842,7 +1887,7 @@ def tool_generate(
         threading.Thread(target=run_ai_job, args=(job.id, job_factory), daemon=True).start()
         ref_bit = f" with {len(snaps)} reference(s)" if snaps else ""
         note_bit = (" " + " ".join(notes)) if notes else ""
-        return f"Image job started [job {job.id}]{ref_bit} - reply now with the job id; the UI follows it live, do not poll check_job.{note_bit}"
+        return f"Image job started [job {job.id}]{ref_bit} - reply now with the job id; the UI follows it live, do not poll check_job.{note_bit}{repeat_note}"
     run_ai_job(job.id, job_factory)
     session.refresh(job)
     if job.status == "done":
@@ -1858,7 +1903,7 @@ def tool_generate(
         note_bit = (" " + " ".join(notes)) if notes else ""
         return (
             f"Generated{' and attached as a frame' if frame_bit else ''}: {job.result_url}{spent} "
-            f"[job {job.id}]{frame_bit}{ref_bit}.{note_bit}"
+            f"[job {job.id}]{frame_bit}{ref_bit}.{note_bit}{repeat_note}"
         )
     return f"Generation failed: {job.error}"
 
@@ -1877,6 +1922,7 @@ def tool_create_video(
     fallback_references=None,
     size: str | None = None,
     delegated: bool = False,
+    asked: set | None = None,
 ) -> str:
     """Start an async OpenRouter video job; watch it with check_job.
 
@@ -1887,6 +1933,8 @@ def tool_create_video(
     prompt = clean_prompt_text(raw)
     if not prompt:
         return "Tell me what to render - e.g. \"generate a video of a robot walking\"."
+    # Fail-open note when a repeated identical call skips the question.
+    repeat_note = ""
     locked = _locked_style(session, user, project_id)
     # Intent checks read the raw text (see create_image): scrubbing
     # removes the @-references that can carry the value.
@@ -1933,7 +1981,14 @@ def tool_create_video(
             "a style, e.g. anime, cinematic, photorealistic",
         ))
     if missing and not (delegated or _delegates_decisions(raw)):
-        return _ask_before_generating("create_video", missing)
+        sig = ("create_video", tuple(sorted(w for w, _, _ in missing)))
+        if asked is not None and sig in asked:
+            repeat_note = (" Asked once already with no new answers — "
+                           "proceeding with the stated defaults.")
+        else:
+            if asked is not None:
+                asked.add(sig)
+            return _ask_before_generating("create_video", missing)
     refs = _generation_references(raw, references, fallback_references)
     snaps, notes = gather_reference_snapshots(session, user, project_id, prompt, refs, entity_ids)
     if locked and STYLE_TALK_RE.search(prompt or "") and genre == "none":
@@ -1954,6 +2009,23 @@ def tool_create_video(
             return f"Not enough credits (need {cost})."
         add_entry(session, user.id, -cost, "video generation")
     dims = _parse_video_size(size or "") or _parse_video_size(raw) or (0, 0)
+    # Fail fast on model-impossible combos (frame-only models with style
+    # refs, unsupported durations/sizes) so the turn steers immediately
+    # instead of burning a doomed async job the user waits on.
+    style_refs = [s for s in snaps if s.get("role") not in ("start", "end")]
+    try:
+        _validate_video_model(
+            model or settings.openrouter_video_model,
+            int(seconds),
+            f"{dims[0]}x{dims[1]}" if dims != (0, 0) else None,
+            bool(style_refs),
+        )
+    except ProviderError as exc:
+        return (
+            f"That request can't run on this model: {exc}. "
+            "Restate which frame opens the video ('X as the start frame'), "
+            "or name another video model, then call create_video again."
+        )
     job = JobRow(
         user_id=user.id,
         project_id=project_id,
@@ -1976,7 +2048,7 @@ def tool_create_video(
     note_bit = (" " + " ".join(notes)) if notes else ""
     return (
         f"Video job started [job {job.id}]{ref_bit}{size_bit}, silent by design - "
-        f"reply now with the job id; the UI follows it live, do not poll check_job.{note_bit} Add sound with a voiceover take "
+        f"reply now with the job id; the UI follows it live, do not poll check_job.{note_bit}{repeat_note} Add sound with a voiceover take "
         f"(synthesize_voice) or timeline audio."
     )
 
@@ -4717,7 +4789,7 @@ _TOOLS_SCHEMA = [
                     "seconds": {"type": "number", "description": "Seconds of video (Seedance bills per second; default 4; Hailuo 3 Max needs 5+). Pass the conversation's number when stated - digits or words ('four seconds'); otherwise omit."},
                     "size": {"type": "string", "description": "WxH (1280x720, 720x1280, 1920x1080...). Pass the conversation's value when stated; otherwise omit for the provider default (cheapest)."},
                     "generate_audio": {"type": "boolean", "description": "Always false or omitted: the video model renders silent. Dialogue and music come from synthesize_voice takes and timeline audio, never the video model."},
-                    "model": {"type": "string", "description": "Video model id. Durations, sizes, and image inputs differ per model and are validated automatically (errors name the supported values): Hailuo 3 Max takes 5-15s and frames (first/last) but no style references; Wan 2.6 takes 5s/10s; Veo takes 4/6/8s."},
+                    "model": {"type": "string", "description": "Video model id. Durations, sizes, and image inputs differ per model and are validated BEFORE submit — a rejection names the supported values with the fix, so restate the request or switch model instead of retrying: Hailuo 3 Max takes 5-15s and frames (first/last) but no style references; Wan 2.6 takes 5s/10s; Veo takes 4/6/8s."},
                     "genre": {"type": "string"},
                     "references": {"type": "array", "description": "[{kind, id}] for user-mentioned refs to reuse. Omit otherwise."},
                 },
@@ -5166,7 +5238,7 @@ def _stub_skill_bodies(messages, skill_bodies, current_id=None):
 
 def _exec_cloud_tool(
     name, args, *, message, session, user, project_id, job_factory,
-    turn_references=None, skills_read=None,
+    turn_references=None, skills_read=None, asked=None, media_seen=None,
 ) -> str:
     """Run one model-requested tool; shared by sync turns and streams.
 
@@ -5278,6 +5350,7 @@ def _exec_cloud_tool(
                 width=args.get("width"), height=args.get("height"),
                 attach_frame=bool(args.get("attach_frame")),
                 delegated=_delegates_decisions(message),
+                asked=asked,
             )
         elif name == "create_video":
             try:
@@ -5298,6 +5371,7 @@ def _exec_cloud_tool(
                 fallback_references=turn_references,
                 size=args.get("size") if isinstance(args.get("size"), str) else None,
                 delegated=_delegates_decisions(message),
+                asked=asked,
             )
             if args.get("generate_audio"):
                 result += " (Model sound stays off even when asked: the video renders silent.)"
@@ -5350,11 +5424,21 @@ def _exec_cloud_tool(
                 args.get("name"), args.get("sequence"),
             )
         elif name == "look_at":
-            result = tool_look_at(
-                session, user, project_id,
-                str(args.get("target") or message),
-                str(args.get("question") or ""),
-            )
+            _target = str(args.get("target") or message)
+            _seen_key = (_target, str(args.get("question") or ""))
+            if media_seen is not None and _seen_key in media_seen:
+                result = (
+                    "Already viewed this turn — the earlier look_at result "
+                    "is in context above; use that copy, do not re-view it."
+                )
+            else:
+                if media_seen is not None:
+                    media_seen.add(_seen_key)
+                result = tool_look_at(
+                    session, user, project_id,
+                    _target,
+                    str(args.get("question") or ""),
+                )
         elif name == "watch_video":
             result = tool_watch_video(
                 session, user, project_id,
@@ -5512,8 +5596,18 @@ def _cloud_loop(
                 "content": prefix + str(h.get("text") or "")[:600],
             }
         )
+    _index = _skills_index()
+    _system = (
+        _SYSTEM
+        + (
+            "\n\nStudio craft skills (skip list_skills — read one with "
+            f"read_skill only before anime-styled generation): {_index}"
+            if _index
+            else ""
+        )
+    )
     messages: list[dict] = [
-        {"role": "system", "content": _SYSTEM},
+        {"role": "system", "content": _system},
         *past,
         {"role": "user", "content": user_content},
     ]
@@ -5522,6 +5616,11 @@ def _cloud_loop(
     total_tokens = 0
     skills_read: set[tuple[str, str]] = set()
     skill_bodies: dict[str, str] = {}
+    # Per-turn once-only guards: a repeated identical create_* question
+    # or look_at re-view answers from the earlier result instead of
+    # burning another model round.
+    asked: set[tuple[str, tuple[str, ...]]] = set()
+    media_seen: set[tuple[str, str]] = set()
     for _ in range(CLOUD_MAX_STEPS):
         # Older skill bodies collapse to pointers; the newest full body
         # stays for the step about to read it.
@@ -5556,6 +5655,7 @@ def _cloud_loop(
                 name, args, message=message, session=session, user=user,
                 project_id=project_id, job_factory=job_factory,
                 turn_references=turn_references, skills_read=skills_read,
+                asked=asked, media_seen=media_seen,
             )
             summary = result[:200]
             actions.append({"tool": name, "summary": summary})

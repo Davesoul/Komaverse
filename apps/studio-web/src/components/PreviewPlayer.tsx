@@ -53,6 +53,7 @@ function VideoPreviewClip({
   seekNonce,
   label,
   onReady,
+  onError,
 }: {
   src: string;
   playing: boolean;
@@ -61,6 +62,8 @@ function VideoPreviewClip({
   label: string;
   /** Fires when the first frame can paint (cover handoff). */
   onReady?: () => void;
+  /** Fail-open: a media error still releases the holdout below. */
+  onError?: () => void;
 }) {
   const ref = useRef<HTMLVideoElement>(null);
   const tryPlay = (el: HTMLVideoElement) => {
@@ -96,6 +99,7 @@ function VideoPreviewClip({
       preload="auto"
       aria-label={label}
       onCanPlay={onReady}
+      onError={onError}
       style={{ width: "100%", height: "100%", objectFit: "contain", background: "#000" }}
     />
   );
@@ -258,6 +262,14 @@ export function PreviewPlayer({
    * never flashes the black stage while React remounts the layer.
    * "none" (the default) and motion moves cut hard — no fade. */
   const [baseId, setBaseId] = useState<string | null>(null);
+  /** Frozen outgoing clip kept mounted UNDER the incoming base until the
+   * incoming media can actually paint — this is what kills the black
+   * flash between back-to-back clips: the joint cuts from frozen frame
+   * to live frame with the black stage never exposed. */
+  const [holdout, setHoldout] = useState<PreviewClip | null>(null);
+  /** Incoming base stays transparent until its media signals ready
+   * (img onLoad / video onCanPlay), then cuts in over the holdout. */
+  const [baseReady, setBaseReady] = useState(false);
   const [cover, setCover] = useState<{
     clip: PreviewClip;
     at: number;
@@ -280,22 +292,36 @@ export function PreviewPlayer({
     const promote = window.setTimeout(() => {
       if (gen !== coverGen.current) return;
       setCover((c) => {
-        if (c && c.gen === gen) setBaseId(c.clip.id);
+        if (c && c.gen === gen) {
+          setBaseId(c.clip.id);
+          setHoldout(null);
+        }
         return null;
       });
     }, Math.max(240, ms));
     coverTimers.current.push(promote);
   };
   const base = (baseId ? clips.find((c) => c.id === baseId) : undefined) ?? current ?? clips[0]!;
+  // The outgoing base drops out the moment the incoming base can paint.
+  useEffect(() => {
+    if (baseReady) setHoldout(null);
+  }, [baseReady]);
   useEffect(() => {
     if (!current) return;
     if (liveRef.current === null) {
       liveRef.current = current.id;
+      setHoldout(null);
+      setBaseReady(false);
       setBaseId(current.id);
       return;
     }
     if (liveRef.current === current.id) return;
+    const prev = clips.find((c) => c.id === liveRef.current) ?? null;
     liveRef.current = current.id;
+    // Freeze the outgoing clip underneath: the incoming base cuts in
+    // over it the moment it can paint, so the joint never shows black.
+    if (prev && prev.id !== current.id) setHoldout(prev);
+    setBaseReady(false);
     const gen = ++coverGen.current;
     // Hard cut unless the incoming clip opts into a fade: reduced
     // motion always cuts, and so does every non-fade transition.
@@ -386,6 +412,8 @@ export function PreviewPlayer({
     // A new clip list invalidates any in-flight cover handoff.
     coverGen.current += 1;
     setCover(null);
+    setHoldout(null);
+    setBaseReady(false);
     if (current) {
       setBaseId(current.id);
       liveRef.current = current.id;
@@ -500,35 +528,72 @@ export function PreviewPlayer({
           marginBottom: 8,
         }}
       >
-        {base.video ? (
-          <VideoPreviewClip
-            key={base.id}
-            src={base.video}
-            // Frozen while the cover fades in over it, live otherwise.
-            playing={cover ? false : playing}
-            offset={(base.offset ?? 0) + Math.max(0, time - startOf(base.id))}
-            seekNonce={seek?.nonce ?? 0}
-            label={base.label}
-          />
-        ) : (
-          <img
-            key={base.id}
-            crossOrigin="use-credentials"
-            src={base.image}
-            alt={base.label}
-            style={{
-              width: "100%",
-              height: "100%",
-              // Contain, not cover: panel crops are portrait, and cover scaled
-              // them up until they filled 16/9 — the "zoomed" look. The black
-              // stage letterboxes the rest, which the Ken Burns drift plays on.
-              objectFit: "contain",
-              background: "#000",
-              filter: base.filter || undefined,
-              ...motionStyle(base.motion, local, motionOff),
-            }}
-          />
-        )}
+        {holdout && holdout.id !== base.id ? (
+          <div aria-hidden="true" style={{ position: "absolute", inset: 0, pointerEvents: "none" }}>
+            {holdout.video ? (
+              <VideoPreviewClip
+                key={holdout.id}
+                src={holdout.video}
+                playing={false}
+                offset={(holdout.offset ?? 0) + holdout.duration}
+                seekNonce={seek?.nonce ?? 0}
+                label={holdout.label}
+              />
+            ) : (
+              <img
+                key={holdout.id}
+                crossOrigin="use-credentials"
+                src={holdout.image}
+                alt=""
+                style={{
+                  width: "100%",
+                  height: "100%",
+                  objectFit: "contain",
+                  background: "#000",
+                  filter: holdout.filter || undefined,
+                  ...motionStyle(holdout.motion, 1, motionOff),
+                }}
+              />
+            )}
+          </div>
+        ) : null}
+        <div style={{ position: "absolute", inset: 0, opacity: baseReady ? 1 : 0 }}>
+          {base.video ? (
+            <VideoPreviewClip
+              key={base.id}
+              src={base.video}
+              // Live only once it can paint: audio and picture start
+              // together on the cut instead of sound leaking early.
+              // Frozen while the cover fades in over it.
+              playing={baseReady && !cover && playing}
+              offset={(base.offset ?? 0) + Math.max(0, time - startOf(base.id))}
+              seekNonce={seek?.nonce ?? 0}
+              label={base.label}
+              onReady={() => setBaseReady(true)}
+              onError={() => setBaseReady(true)}
+            />
+          ) : (
+            <img
+              key={base.id}
+              crossOrigin="use-credentials"
+              src={base.image}
+              alt={base.label}
+              onLoad={() => setBaseReady(true)}
+              onError={() => setBaseReady(true)}
+              style={{
+                width: "100%",
+                height: "100%",
+                // Contain, not cover: panel crops are portrait, and cover scaled
+                // them up until they filled 16/9 — the "zoomed" look. The black
+                // stage letterboxes the rest, which the Ken Burns drift plays on.
+                objectFit: "contain",
+                background: "#000",
+                filter: base.filter || undefined,
+                ...motionStyle(base.motion, local, motionOff),
+              }}
+            />
+          )}
+        </div>
         {cover && (
           <div
             key={`${cover.clip.id}:${cover.gen}`}

@@ -23,7 +23,7 @@ import {
   type SerializedLayer,
   type ToolId,
 } from "../lib/draw/engine";
-import { getCurrentProject, getCurrentScene, getCurrentSequence, getDrawFrame, setCurrentProject, setCurrentScene, setCurrentSequence, setDrawFrame } from "../lib/studio";
+import { getCurrentProject, getCurrentScene, getCurrentSequence, getDrawFrame, gotoTab, setCurrentProject, setCurrentScene, setCurrentSequence, setDrawFrame } from "../lib/studio";
 import {
   BRUSH_PRESETS,
   paintStroke,
@@ -467,6 +467,25 @@ export default function DrawPage() {
       if (saveStateRef.current.dirty && !document.hidden) void save(true);
     }, AUTOSAVE_MS);
   }, [save]);
+
+  // Navigation flush: persist the open frame to the server BEFORE the
+  // engine loads anything else, so new/duplicate/switch/send never
+  // strand dirty strokes in memory or drop them when the autosave timer
+  // hasn't fired yet. The save payload serializes synchronously at call
+  // time, so even an in-flight save lands the pre-switch canvas.
+  const flushCurrent = async () => {
+    const engine = engineRef.current;
+    const prev = frameIdRef.current;
+    if (!engine || !prev) return;
+    if (saveTimerRef.current) window.clearTimeout(saveTimerRef.current);
+    if (saveStateRef.current.saving) {
+      saveStateRef.current.queued = true;
+      return;
+    }
+    if (!saveStateRef.current.dirty) return;
+    engine.commitFloat();
+    await save(true);
+  };
 
   const pushRecent = useCallback((color: string) => {
     setRecents((prev) => {
@@ -978,14 +997,12 @@ export default function DrawPage() {
     }
   };
 
-  const openFrame = (id: string) => {
+  const openFrame = async (id: string) => {
     stopPlayback();
     if (id === frameIdRef.current) return;
-    const engine = engineRef.current;
-    const prev = frameIdRef.current;
-    if (engine && prev && saveStateRef.current.dirty) {
-      stashRef.current.set(prev, engine.serialize());
-    }
+    // Persist before the engine loads the new frame — the server copy
+    // must not lose strokes the autosave timer hadn't flushed yet.
+    await flushCurrent();
     // Frames opened from another sequence (agent, Media) switch the
     // sequence instead of stranding the strip.
     const target = frames.find((f) => f.id === id);
@@ -999,13 +1016,9 @@ export default function DrawPage() {
     setFrameId(id);
   };
 
-  const pickSequence = (sid: string, openId?: string) => {
+  const pickSequence = async (sid: string, openId?: string) => {
     stopPlayback();
-    const engine = engineRef.current;
-    const prev = frameIdRef.current;
-    if (engine && prev && saveStateRef.current.dirty) {
-      stashRef.current.set(prev, engine.serialize());
-    }
+    if (sid !== sequenceIdRef.current) await flushCurrent();
     sequenceIdRef.current = sid;
     setSequenceIdState(sid);
     if (projectId) setCurrentSequence(projectId, sid);
@@ -1029,11 +1042,7 @@ export default function DrawPage() {
   const newSequence = async () => {
     stopPlayback();
     if (!projectId) return;
-    const engine = engineRef.current;
-    const prev = frameIdRef.current;
-    if (engine && prev && saveStateRef.current.dirty) {
-      stashRef.current.set(prev, engine.serialize());
-    }
+    await flushCurrent();
     try {
       const seq = await api.createSequence(projectId, `Sequence ${sequences.length + 1}`);
       setSequences((prevSeqs) => [...prevSeqs, seq]);
@@ -1045,7 +1054,7 @@ export default function DrawPage() {
         sequence_id: seq.id,
       });
       setFrames((prev) => [...prev, frame]);
-      pickSequence(seq.id, frame.id);
+      await pickSequence(seq.id, frame.id);
       setNotice(`Switched to "${seq.name}".`);
     } catch (e) {
       setNotice(`New sequence failed: ${(e as Error).message}`);
@@ -1055,6 +1064,7 @@ export default function DrawPage() {
   const newFrame = async () => {
     stopPlayback();
     if (!projectId) return;
+    await flushCurrent();
     const sid = sequenceIdRef.current;
     const frame = await api.createFrame(projectId, {
       name: `Frame ${seqFrames.length + 1}`,
@@ -1169,6 +1179,7 @@ export default function DrawPage() {
     stopPlayback();
     const f = frames.find((x) => x.id === frameId);
     if (!f) return;
+    await flushCurrent();
     try {
       const copy = await api.duplicateFrame(f.id);
       setFrames((prev) => [...prev, copy]);
@@ -1233,6 +1244,9 @@ export default function DrawPage() {
     if (!projectId || !drawSend) return;
     const send = drawSend;
     setDrawSend(null);
+    // The clips render from the server copies, so flush first — the open
+    // frame's fresh strokes must be what lands on the timeline.
+    await flushCurrent();
     try {
       const target =
         dest === "new"
@@ -1245,15 +1259,16 @@ export default function DrawPage() {
       if (send.kind === "frame") {
         const f = frames.find((x) => x.id === send.id);
         await api.addClip(target.id, { kind: "frame", source_id: send.id, duration: 2 });
-        toast(`Sent "${f?.name || "frame"}" to "${target.name}" — open Render to cut.`);
+        toast(`Sent "${f?.name || "frame"}" to "${target.name}" — opening Render.`);
       } else {
         await api.addClipsBatch(
           target.id,
           seqFrames.map((f) => ({ kind: "frame", source_id: f.id, duration: 2 })),
         );
-        toast(`Sent ${seqFrames.length} frames to "${target.name}" — open Render to cut.`);
+        toast(`Sent ${seqFrames.length} frames to "${target.name}" — opening Render.`);
       }
       setCurrentScene(projectId, target.id);
+      gotoTab("render");
     } catch (e) {
       toast(`Send failed: ${(e as Error).message}`, "error");
     }
@@ -2210,7 +2225,7 @@ export default function DrawPage() {
                     <div key={f.id} style={{ position: "relative", flexShrink: 0 }}>
                       <button
                         type="button"
-                        onClick={() => openFrame(f.id)}
+                        onClick={() => void openFrame(f.id)}
                         title={f.name || `Frame ${i + 1}`}
                         aria-label={`Open ${f.name || `frame ${i + 1}`}`}
                         style={{
@@ -2382,7 +2397,7 @@ export default function DrawPage() {
               <div style={{ display: "flex", alignItems: "center", gap: 8, rowGap: 8, flexWrap: "wrap", marginBottom: 8 }}>
                 <SelectInput
                   value={sequenceId}
-                  onChange={(e) => pickSequence(e.target.value)}
+                  onChange={(e) => void pickSequence(e.target.value)}
                   title="Animation sequence — switch the shot you are drawing"
                   aria-label="Animation sequence"
                   style={{ maxWidth: 190 }}
@@ -2518,7 +2533,7 @@ export default function DrawPage() {
                       role="option"
                       aria-selected={selected}
                       title={`${f.name || `Frame ${i + 1}`} — drag to reorder (Alt+←/→ also moves)`}
-                      onClick={() => openFrame(f.id)}
+                      onClick={() => void openFrame(f.id)}
                       draggable
                       onDragStart={(e) => {
                         setDragFrameId(f.id);
