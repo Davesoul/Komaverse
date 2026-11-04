@@ -19,5 +19,9 @@ cache/
 !backend/models/leoxs22_yolo26n_panel_detector.pt
 *.onnx
 *.db
+*.db-shm
+*.db-wal
+.media-orig/
+generated_images/
 .DS_Store
 *.log
