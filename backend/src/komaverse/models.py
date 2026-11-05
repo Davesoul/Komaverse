@@ -195,6 +195,32 @@ class Project(BaseModel):
     audios: list[AudioTake] = Field(default_factory=list)
 
 
+class ProjectSummary(BaseModel):
+    """Lightweight project header for lists and tab bootstraps.
+
+    Counts let tabs render instantly; each tab then fetches only its own
+    slice (pages, timeline, …) instead of the full tree with layer pixels.
+    """
+
+    id: str = Field(default_factory=uuid_short)
+    user_id: str
+    name: str = "Untitled"
+    fps: int = 24
+    canvas_width: int = 1920
+    canvas_height: int = 1080
+    page_count: int = 0
+    scene_count: int = 0
+    frame_count: int = 0
+    sequence_count: int = 0
+    take_count: int = 0
+
+
+class ProjectView(ProjectSummary):
+    """One-round-trip tab bootstrap: header counts plus the pages slice."""
+
+    pages: list[Page] = Field(default_factory=list)
+
+
 class ExportReport(BaseModel):
     """What an export job actually produced (SPEC §Export)."""
 
@@ -221,11 +247,13 @@ class Job(BaseModel):
     # (the column already exists on JobRow)
     seed: int | None = None  # seed sent to the provider (random when unset)
     negative_prompt: str = ""
+    cost_credits: int = 0  # debited at creation (0 when free)
     style: str = "none"
     genre: str = "none"  # GENRE_TAGS key (anime direction grammar)
     camera_move: str = "none"
     enhance: bool = False
     reference_frame_id: str | None = None
+    layer_frame_id: str | None = None  # paint target: finished image lands as a layer on this frame
     final_prompt: str = ""  # exact text sent after entities/genre/style/camera/negative
     entities_json: str = "[]"  # snapshot [{name, kind}] for the UI
     status: Literal["queued", "running", "done", "failed", "cancelled"] = "queued"
@@ -252,3 +280,44 @@ class CreditEntry(BaseModel):
     delta: int  # +grant, -spend
     reason: str
     job_id: str | None = None
+
+
+class Purchase(BaseModel):
+    id: str = Field(default_factory=uuid_short)
+    amount_usd_cents: int
+    credits: int
+    status: str  # pending | done | expired
+    created_at: str = ""
+
+
+class PortalPack(BaseModel):
+    id: str  # topup-5 | topup-10 | topup-25
+    usd_cents: int
+    credits: int
+
+
+class PortalPlan(BaseModel):
+    id: str  # hobby | studio | atelier
+    name: str
+    usd_cents: int
+    credits: int  # granted every billing month while active
+    blurb: str
+
+
+class Subscription(BaseModel):
+    plan_id: str
+    status: str  # active | canceled
+    renews: str = ""  # ISO current_period_end, "" when unknown
+
+
+class PortalOut(BaseModel):
+    balance: int
+    free_monthly_credits: int
+    free_remaining: int  # grant not yet taken this month (0 when taken/disabled)
+    paywall_enabled: bool
+    publishable_key: str | None  # None = top-ups unavailable, freemium only
+    packs: list[PortalPack]
+    costs: dict[str, int]  # credits per action (video = per second)
+    purchases: list[Purchase]
+    plans: list[PortalPlan] = []
+    subscription: Subscription | None = None

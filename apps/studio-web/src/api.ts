@@ -37,6 +37,26 @@ export interface Project {
   pages: Page[];
 }
 
+/** Lightweight header for lists and tab bootstraps (no pages, no pixels). */
+export interface ProjectSummary {
+  id: string;
+  user_id: string;
+  name: string;
+  fps: number;
+  canvas_width: number;
+  canvas_height: number;
+  page_count: number;
+  scene_count: number;
+  frame_count: number;
+  sequence_count: number;
+  take_count: number;
+}
+
+/** What the Scan tab holds: header + pages slice (no scenes or layers). */
+export interface ProjectView extends ProjectSummary {
+  pages: Page[];
+}
+
 export interface DetectResult {
   panels: Panel[];
   detector_used: string;
@@ -265,6 +285,46 @@ export interface StorageUsage {
 export interface Balance {
   balance: number;
   entries: CreditEntry[];
+}
+export interface PortalPack {
+  id: string;
+  usd_cents: number;
+  credits: number;
+}
+export interface Purchase {
+  id: string;
+  amount_usd_cents: number;
+  credits: number;
+  status: string;
+  created_at: string;
+}
+export interface PortalPlan {
+  id: string;
+  name: string;
+  usd_cents: number;
+  credits: number;
+  blurb: string;
+}
+export interface PlanSubscription {
+  plan_id: string;
+  status: string;
+  renews: string;
+}
+export interface PortalOut {
+  balance: number;
+  free_monthly_credits: number;
+  free_remaining: number;
+  paywall_enabled: boolean;
+  publishable_key: string | null;
+  packs: PortalPack[];
+  costs: Record<string, number>;
+  purchases: Purchase[];
+  plans: PortalPlan[];
+  subscription: PlanSubscription | null;
+}
+export interface LedgerOut {
+  balance: number;
+  entries: { id: string; delta: number; reason: string; job_id: string | null }[];
 }
 
 export interface User {
@@ -505,7 +565,7 @@ async function req<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 export const api = {
-  listProjects: () => req<Project[]>("/api/v1/projects"),
+  listProjects: () => req<ProjectSummary[]>("/api/v1/projects"),
   createProject: (name: string) =>
     req<Project>("/api/v1/projects", {
       method: "POST",
@@ -513,6 +573,12 @@ export const api = {
       body: JSON.stringify({ name }),
     }),
   getProject: (id: string) => cachedProject(id),
+  /** Tab bootstrap: header first, then only the slice the tab needs. */
+  getProjectSummary: (id: string) => req<ProjectSummary>(`/api/v1/projects/${id}/summary`),
+  getProjectPages: (id: string) => req<Page[]>(`/api/v1/projects/${id}/pages`),
+  getProjectTimeline: (id: string) => req<Scene[]>(`/api/v1/projects/${id}/timeline`),
+  /** Scan tab view: one round trip for summary + pages (no scenes, frames, takes). */
+  getProjectView: (id: string) => req<ProjectView>(`/api/v1/projects/${id}/view`),
   deleteProject: (id: string) =>
     req<void>(`/api/v1/projects/${id}`, { method: "DELETE" }),
   projectStorage: (id: string) =>
@@ -998,6 +1064,24 @@ export const api = {
       body: JSON.stringify(body ?? {}),
     }),
   getBalance: () => req<Balance>("/api/v1/billing/me"),
+  billingPortal: () => req<PortalOut>("/api/v1/billing/portal"),
+  billingLedger: () => req<LedgerOut>("/api/v1/billing/ledger"),
+  checkoutTopup: (pack_id: string) =>
+    req<{ url: string; purchase_id: string }>("/api/v1/billing/checkout", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ pack_id }),
+    }),
+  subscribePlan: (plan_id: string) =>
+    req<{ url: string }>("/api/v1/billing/subscribe", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ plan_id }),
+    }),
+  cancelSubscription: () =>
+    req<{ status: string }>("/api/v1/billing/subscription/cancel", {
+      method: "POST",
+    }),
   usageSummary: (days: number, projectId?: string) =>
     req<UsageSummary>(
       `/api/v1/usage/summary?days=${days}${projectId ? `&project_id=${encodeURIComponent(projectId)}` : ""}`,

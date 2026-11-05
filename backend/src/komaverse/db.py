@@ -30,8 +30,32 @@ def _sqlite_pragmas(dbapi_conn, _record) -> None:
         cur.close()
 
 
+def _sqlite_file_for_url(url: str):
+    """Local file for a sqlite URL, or None (memory/shared cache)."""
+    path = url.split("sqlite:///", 1)[-1].split("?", 1)[0]
+    if not path or path == ":memory:" or path.startswith("file:"):
+        return None
+    from pathlib import Path as _Path
+
+    return _Path(path)
+
+
 def get_engine():
+    from pathlib import Path as _Path
+
     url = settings.database_url
+    if url.startswith("sqlite"):
+        target = _sqlite_file_for_url(url)
+        # Docker mounts /data but dev defaults to ./komaverse.db: create the
+        # parent so a volume-backed DATABASE_URL never fails on first boot.
+        if target is not None:
+            target.parent.mkdir(parents=True, exist_ok=True)
+    # MEDIA_DIR is volume-backed too (/data/media in Docker); ensure it here
+    # so readiness and uploads share one creation path with main.py.
+    try:
+        _Path(settings.media_dir).mkdir(parents=True, exist_ok=True)
+    except Exception:
+        pass
     kwargs = (
         {"connect_args": {"check_same_thread": False}}
         if url.startswith("sqlite")
@@ -87,6 +111,7 @@ def init_db() -> None:
         "ALTER TABLE jobs ADD COLUMN entities_json TEXT",
         "ALTER TABLE jobs ADD COLUMN enhance BOOLEAN",
         "ALTER TABLE jobs ADD COLUMN reference_frame_id VARCHAR(12)",
+        "ALTER TABLE jobs ADD COLUMN layer_frame_id VARCHAR(12)",
         "ALTER TABLE jobs ADD COLUMN created_at DATETIME",
         "ALTER TABLE frames ADD COLUMN sequence_id VARCHAR(12)",
         "ALTER TABLE clips ADD COLUMN transition VARCHAR(32)",
@@ -112,6 +137,8 @@ def init_db() -> None:
         "ALTER TABLE clips ADD COLUMN offset FLOAT DEFAULT 0.0",
         "ALTER TABLE chat_turns ADD COLUMN actions TEXT",
         "ALTER TABLE chat_turns ADD COLUMN thread_id VARCHAR(12)",
+        "ALTER TABLE jobs ADD COLUMN cost_credits INTEGER",
+        "ALTER TABLE users ADD COLUMN stripe_customer_id VARCHAR(200)",
     ):
         try:
             with engine.begin() as conn:

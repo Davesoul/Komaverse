@@ -10,7 +10,7 @@ Every claim links to repo evidence. Conservative where a judge decides.
 |---|---|---|---|
 | 1. Impact | 3.0 | 3.0 | Active repo, frontier Meta scope, vision+audio domain, Docker, multi-module, README 6.4 KB, eval F1 0.933 |
 | 2. Meta AI Tooling | 2.0 | 2.5 | dev.meta.ai integration, Muse Spark brain, SAM 3.1 + Muse Image/Voice, multi-model pipeline, Baseten |
-| 3. Technical Depth | 1.9 | 2.0 | 86 in-window commits, 533-test suite, modular src, agent+MCP harness, CI; no PR history |
+| 3. Technical Depth | 1.9 | 2.0 | 86 in-window commits, 565-test backend + 9-test frontend suites, modular src, agent+MCP harness, CI; no PR history |
 | 4. Demo Completeness | 2.1 | 2.5 | 3-min video published, README > 6 KB, no live URL |
 | **Total** | **9.0** | **10** | |
 
@@ -135,3 +135,32 @@ Ceiling after 2–4: **9.2**. After 5: **9.5**.
   (`apps/studio-web/src/pages/DrawPage.tsx`).
 - React style fix: frame-strip `border` shorthand + `borderLeft/Right`
   split into longhands (no-shorthand-mix rule).
+- Koma Portal billing: Stripe top-ups ($5/500, $10/1100, $25/3000),
+  signed idempotent webhook, 100 free credits/month, grounded costs
+  (image 3, video 25/s, chat 1, voice 2, vision 1 — docs/BILLING.md),
+  per-second video debit with exact stored-cost refunds, cloud
+  enforcement (generate/chat/vision/voice, local always free), broke
+  users drop to the free demo brain instead of 402ing, Portal tab +
+  UsageCard entry (`backend/src/komaverse/api/billing.py`,
+  `apps/studio-web/src/pages/PortalPage.tsx`).
+- Animator agent: erase/text/copy/resize canvas ops, sequence extension
+  without generating images, open-frame-aware draw routing, skill
+  pointers to drawing-fundamentals + anime-animation-production
+  (`backend/src/komaverse/agent.py`, `tests/test_animator.py`).
+- Export completion popup: finished renders announce with a player +
+  Download + Open-in-Media jump; Media Renders rows gained inline
+  video previews (`RenderPage.tsx`, `MediaPage.tsx`).
+- Media as cards: timelines and renders render as thumbnail cards
+  (lazy first-frame thumbs, per-card player), each render card has an
+  explained Report button (export report: duration, clips, audio cues,
+  warnings) + Open-in-Render jump restoring project + scene.
+- Subscriptions: Hobby $9/1200 · Studio $29/5000 · Atelier $79/15000
+  monthly plans, subscription-mode Checkout reusing one Stripe
+  customer per user, first-month + per-invoice webhook grants
+  (idempotent on subscription id / invoice id), 409 on double
+  subscribe, cancel keeps granted credits; Portal Subscribe card with
+  two-click cancel (`api/billing.py`, `PortalPage.tsx`,
+  `tests/test_billing.py` 25 green).
+- Business model doc: per-model cost/credit, margin floors per plan,
+  1k-user revenue/profit worked example, repricing playbook
+  (`docs/BUSINESS_MODEL.md`, subscriptions in `docs/BILLING.md`).

@@ -6,9 +6,9 @@ Foreign keys and lookup columns are indexed (perf); emails/token hashes unique.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
-from sqlalchemy import DateTime, Float, ForeignKey, String, Text, UniqueConstraint
+from sqlalchemy import DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 from komaverse import models as schemas
@@ -20,7 +20,7 @@ class Base(DeclarativeBase):
 
 
 def _utcnow() -> datetime:
-    return datetime.now(timezone.utc).replace(tzinfo=None)
+    return datetime.now(UTC).replace(tzinfo=None)
 
 
 class UserRow(Base):
@@ -30,6 +30,7 @@ class UserRow(Base):
     email: Mapped[str] = mapped_column(String(320), unique=True, index=True)
     name: Mapped[str] = mapped_column(String(200), default="")
     password_hash: Mapped[str] = mapped_column(String(300))
+    stripe_customer_id: Mapped[str] = mapped_column(String(200), default="")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
 
     sessions: Mapped[list[SessionRow]] = relationship(
@@ -105,6 +106,21 @@ class ProjectRow(Base):
             frames=[f.to_schema() for f in self.frames],
             sequences=[s.to_schema() for s in self.sequences],
             audios=[a.to_schema() for a in self.audios],
+        )
+
+    def to_summary(self) -> schemas.ProjectSummary:
+        return schemas.ProjectSummary(
+            id=self.id,
+            user_id=self.user_id,
+            name=self.name,
+            fps=self.fps,
+            canvas_width=self.canvas_width,
+            canvas_height=self.canvas_height,
+            page_count=len(self.pages),
+            scene_count=len(self.scenes),
+            frame_count=len(self.frames),
+            sequence_count=len(self.sequences),
+            take_count=len(self.audios),
         )
 
 
@@ -484,10 +500,15 @@ class JobRow(Base):
     camera_move: Mapped[str] = mapped_column(String(32), default="none")
     enhance: Mapped[bool] = mapped_column(default=False)
     reference_frame_id: Mapped[str | None] = mapped_column(String(12), default=None)
+    layer_frame_id: Mapped[str | None] = mapped_column(String(12), default=None)
     final_prompt: Mapped[str] = mapped_column(Text, default="")
     entities_json: Mapped[str] = mapped_column(Text, default="[]")
     status: Mapped[str] = mapped_column(String(16), default="queued")
     progress: Mapped[float] = mapped_column(default=0)
+    # Credits debited at creation (0 when the paywall is off or the
+    # provider is local; NULL on rows written before this column existed).
+    # Refunds credit exactly this back — never a recomputed estimate.
+    cost_credits: Mapped[int | None] = mapped_column(Integer, default=None)
     result_url: Mapped[str | None] = mapped_column(String(500), default=None)
     error: Mapped[str | None] = mapped_column(Text, default=None)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, index=True)
@@ -502,6 +523,7 @@ class JobRow(Base):
             model=self.model,
             seed=self.seed,
             negative_prompt=self.negative_prompt or "",
+            cost_credits=self.cost_credits or 0,
             style=self.style or "none",
             # Pre-genre rows hold NULL (ALTER backfill): same guard as clips.
             genre=self.genre if self.genre is not None else "none",
@@ -509,6 +531,7 @@ class JobRow(Base):
             # Pre-enhance rows hold NULL (ALTER backfill): same guard as clips.
             enhance=self.enhance if self.enhance is not None else False,
             reference_frame_id=self.reference_frame_id,
+            layer_frame_id=self.layer_frame_id,
             final_prompt=self.final_prompt or "",
             entities_json=self.entities_json or "[]",
             status=self.status,  # type: ignore[arg-type]
@@ -628,6 +651,62 @@ class LedgerRow(Base):
             delta=self.delta,
             reason=self.reason,
             job_id=self.job_id,
+        )
+
+
+class PurchaseRow(Base):
+    """One Stripe top-up: pending until the webhook confirms payment.
+
+    Idempotency key is stripe_session_id (unique): retried webhooks and
+    double-clicks credit exactly once. status: pending → done | expired.
+    """
+
+    __tablename__ = "purchases"
+
+    id: Mapped[str] = mapped_column(String(12), primary_key=True, default=uuid_short)
+    user_id: Mapped[str] = mapped_column(String(64), index=True, default="local")
+    stripe_session_id: Mapped[str] = mapped_column(String(200), unique=True, index=True)
+    amount_usd_cents: Mapped[int] = mapped_column(default=0)
+    credits: Mapped[int] = mapped_column(default=0)
+    status: Mapped[str] = mapped_column(String(16), default="pending")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, index=True)
+
+    def to_schema(self) -> schemas.Purchase:
+        return schemas.Purchase(
+            id=self.id,
+            amount_usd_cents=self.amount_usd_cents,
+            credits=self.credits,
+            status=self.status,
+            created_at=self.created_at.isoformat() if self.created_at else "",
+        )
+
+
+class SubscriptionRow(Base):
+    """One Stripe subscription: credits land every paid month.
+
+    Monthly credits come from invoice.payment_succeeded; the idempotency
+    key is last_invoice_id (Stripe retries the same invoice, never
+    double-mints). status: active → canceled (credits already granted
+    stay — no mid-month clawback).
+    """
+
+    __tablename__ = "subscriptions"
+
+    id: Mapped[str] = mapped_column(String(12), primary_key=True, default=uuid_short)
+    user_id: Mapped[str] = mapped_column(String(64), index=True, default="local")
+    stripe_subscription_id: Mapped[str] = mapped_column(String(200), unique=True, index=True)
+    stripe_customer_id: Mapped[str] = mapped_column(String(200), default="")
+    plan_id: Mapped[str] = mapped_column(String(32), default="")
+    status: Mapped[str] = mapped_column(String(16), default="active")
+    last_invoice_id: Mapped[str] = mapped_column(String(200), default="")
+    current_period_end: Mapped[datetime | None] = mapped_column(DateTime, default=None)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
+
+    def to_schema(self) -> schemas.Subscription:
+        return schemas.Subscription(
+            plan_id=self.plan_id,
+            status=self.status,
+            renews=self.current_period_end.isoformat() if self.current_period_end else "",
         )
 
 

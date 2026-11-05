@@ -420,6 +420,20 @@ export default function MediaPage() {
     gotoTab("draw");
   };
 
+  /** Reopen an export where it was made: project + timeline, then Render. */
+  const openRenderInRender = (job: Job) => {
+    const pid = job.project_id ?? project?.id;
+    if (!pid) return;
+    setCurrentProject(pid);
+    try {
+      const sceneId = (JSON.parse(job.prompt || "{}") as { scene_id?: string }).scene_id;
+      if (sceneId) setCurrentScene(pid, sceneId);
+    } catch {
+      // Prompt is opaque text on old rows — project jump is still right.
+    }
+    gotoTab("render");
+  };
+
   /** Copy an @kind:id mention for the agent composer. */
   const copyRef = async (token: string) => {
     try {
@@ -1448,39 +1462,79 @@ export default function MediaPage() {
             emptyFiltered={<EmptyState title="No matches" hint="Nothing matches the current search." />}
           >
             {(list) => (
-              <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+              <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
                 <div>
                   <Btn small onClick={() => void doNewSequence()}>
                     New sequence
                   </Btn>
                 </div>
-                {list.map((s) => (
-                  <div
-                    key={s.id}
-                    style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}
-                  >
-                    <span style={{ fontSize: 13, fontWeight: 700 }}>{s.name}</span>
-                    <span className="kv-nums" style={{ fontSize: 12, color: "var(--kv-muted)" }}>
-                      {s.frames.length} frame{s.frames.length === 1 ? "" : "s"}
-                      {s.frames.length > 0 &&
-                        ` · ${s.frames.reduce((n, f) => n + f.layer_count, 0)} layers`}
-                    </span>
-                    <span style={{ marginLeft: "auto", display: "flex", gap: 6 }}>
-                      <IconBtn
-                        label={`Copy reference @sequence:${s.id} for the AI chat`}
-                        onClick={() => void copyRef(`@sequence:${s.id}`)}
-                      >
-                        ⧉
-                      </IconBtn>
-                      <Btn small onClick={() => openSequenceInDraw(s)}>
-                        Open in Draw
-                      </Btn>
-                      <IconBtn danger onClick={() => void doDeleteSequence(s)} label={`Delete sequence "${s.name}" and its frames`}>
-                        ×
-                      </IconBtn>
-                    </span>
-                  </div>
-                ))}
+                <div
+                  style={{
+                    display: "grid",
+                    gridTemplateColumns: "repeat(auto-fill, minmax(190px, 1fr))",
+                    gap: 10,
+                  }}
+                >
+                  {list.map((s) => (
+                    <div
+                      key={s.id}
+                      style={{
+                        border: "1px solid var(--kv-border)",
+                        borderRadius: 10,
+                        overflow: "hidden",
+                        background: "var(--kv-surface)",
+                        display: "flex",
+                        flexDirection: "column",
+                      }}
+                    >
+                      {s.frames.length > 0 ? (
+                        <img
+                          src={api.frameThumbnailUrl(s.frames[0].id)}
+                          alt=""
+                          loading="lazy"
+                          style={{ width: "100%", aspectRatio: "16 / 9", objectFit: "cover", background: "var(--kv-raised)" }}
+                        />
+                      ) : (
+                        <div
+                          style={{
+                            width: "100%",
+                            aspectRatio: "16 / 9",
+                            display: "flex",
+                            alignItems: "center",
+                            justifyContent: "center",
+                            fontSize: 12,
+                            color: "var(--kv-muted)",
+                            background: "var(--kv-raised)",
+                          }}
+                        >
+                          No frames yet
+                        </div>
+                      )}
+                      <div style={{ padding: "8px 10px", display: "flex", flexDirection: "column", gap: 6 }}>
+                        <div style={{ fontSize: 13, fontWeight: 700 }}>{s.name}</div>
+                        <div className="kv-nums" style={{ fontSize: 12, color: "var(--kv-muted)" }}>
+                          {s.frames.length} frame{s.frames.length === 1 ? "" : "s"}
+                          {s.frames.length > 0 &&
+                            ` · ${s.frames.reduce((n, f) => n + f.layer_count, 0)} layers`}
+                        </div>
+                        <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                          <IconBtn
+                            label={`Copy reference @sequence:${s.id} for the AI chat`}
+                            onClick={() => void copyRef(`@sequence:${s.id}`)}
+                          >
+                            ⧉
+                          </IconBtn>
+                          <Btn small onClick={() => openSequenceInDraw(s)}>
+                            Open in Draw
+                          </Btn>
+                          <IconBtn danger onClick={() => void doDeleteSequence(s)} label={`Delete sequence "${s.name}" and its frames`}>
+                            ×
+                          </IconBtn>
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
               </div>
             )}
           </MediaSection>
@@ -1499,36 +1553,69 @@ export default function MediaPage() {
             emptyFiltered={<EmptyState title="No matches" hint="Nothing matches the current search or filter." />}
           >
             {(list) => (
-              <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+              <div
+                style={{
+                  display: "grid",
+                  gridTemplateColumns: "repeat(auto-fill, minmax(250px, 1fr))",
+                  gap: 10,
+                }}
+              >
                 {list.map((j) => (
                   <div
                     key={j.id}
-                    style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}
+                    style={{
+                      border: "1px solid var(--kv-border)",
+                      borderRadius: 10,
+                      overflow: "hidden",
+                      background: "var(--kv-surface)",
+                      display: "flex",
+                      flexDirection: "column",
+                    }}
                   >
-                    <span className="kv-nums" style={{ fontSize: 12 }}>{j.id}</span>
-                    <span style={{ fontSize: 13, color: "var(--kv-muted)" }}>{j.status}</span>
+                    <div style={{ padding: "8px 10px 0", display: "flex", gap: 8, alignItems: "baseline" }}>
+                      <span className="kv-nums" style={{ fontSize: 12 }}>{j.id}</span>
+                      <span style={{ fontSize: 13, color: "var(--kv-muted)" }}>{j.status}</span>
+                    </div>
                     {j.status === "failed" && j.error && (
-                      <span style={{ fontSize: 12, color: "var(--kv-danger)" }}>{j.error}</span>
+                      <span style={{ fontSize: 12, color: "var(--kv-danger)", padding: "0 10px" }}>{j.error}</span>
                     )}
-                    {j.status === "done" && (
-                      <>
-                        <a href={api.exportDownloadUrl(j.id)} style={{ fontSize: 13 }}>
-                          Download MP4
-                        </a>
-                        <Btn small onClick={() => showReport(j)}>
-                          Report
-                        </Btn>
-                      </>
+                    {j.status === "done" && j.result_url && (
+                      <video
+                        crossOrigin="use-credentials"
+                        src={api.exportDownloadUrl(j.id)}
+                        controls
+                        preload="none"
+                        style={{ width: "100%", aspectRatio: "16 / 9", background: "#000" }}
+                      />
                     )}
-                    <IconBtn
-                      danger
-                      disabled={!!busy}
-                      label={`Delete render ${j.id}`}
-                      onClick={() => void doDeleteRender(j)}
-                      title="Delete this render"
-                    >
-                      ×
-                    </IconBtn>
+                    <div style={{ padding: "8px 10px", display: "flex", gap: 6, flexWrap: "wrap" }}>
+                      {j.status === "done" && (
+                        <>
+                          <a href={api.exportDownloadUrl(j.id)} style={{ fontSize: 13 }}>
+                            Download MP4
+                          </a>
+                          <Btn
+                            small
+                            onClick={() => showReport(j)}
+                            title="Show the export report below: duration, clips, audio cues and warnings"
+                          >
+                            Report
+                          </Btn>
+                          <Btn small onClick={() => openRenderInRender(j)}>
+                            Open in Render
+                          </Btn>
+                        </>
+                      )}
+                      <IconBtn
+                        danger
+                        disabled={!!busy}
+                        label={`Delete render ${j.id}`}
+                        onClick={() => void doDeleteRender(j)}
+                        title="Delete this render"
+                      >
+                        ×
+                      </IconBtn>
+                    </div>
                   </div>
                 ))}
               </div>
