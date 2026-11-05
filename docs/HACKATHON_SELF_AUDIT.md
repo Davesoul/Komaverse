@@ -164,3 +164,17 @@ Ceiling after 2–4: **9.2**. After 5: **9.5**.
 - Business model doc: per-model cost/credit, margin floors per plan,
   1k-user revenue/profit worked example, repricing playbook
   (`docs/BUSINESS_MODEL.md`, subscriptions in `docs/BILLING.md`).
+- Draw tab live-sync: agent edits used to need a tab switch (header
+  reload preserved stale pixels). Timeline events now carry touched
+  frame ids; the Draw tab refetches those frames' pixels, busts strip
+  thumbnails, and hot-swaps the open canvas into the running engine
+  (no blank flash); finished generation jobs funnel through the same
+  sync. Stash/live-stroke always wins (`AgentDock.tsx`, `DrawPage.tsx`).
+- Agent brushwork: new server-side brush renderer mirroring the Draw
+  tab (tapered ink: pen/g-pen/maru/fude/brush/marker/pencil/fineliner;
+  stamped dabs: chalk/hatch/calligraphy/chisel/toneline/
+  watercolor/sumi/airbrush/splatter) with pressures + opacity;
+  `draw` strokes take brush/size/pressures/opacity, erase cuts the
+  same marks; tool docs teach multi-stroke cel construction; demo
+  shapes draw hand-inked (`brush.py`, `agent.py`, `tests/test_brushes.py`
+  7 green; strengthened meta-fallback test to the real call path).

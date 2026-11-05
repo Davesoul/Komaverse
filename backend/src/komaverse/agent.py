@@ -19,12 +19,12 @@ import logging
 import math
 import re
 import threading
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
+from html.parser import HTMLParser
 
 import httpx
 from fastapi import HTTPException
-from html.parser import HTMLParser
-from PIL import Image, ImageDraw
+from PIL import Image, ImageChops, ImageDraw, ImageFont
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
@@ -34,13 +34,23 @@ from komaverse.ai.providers import (
     MetaProvider,
     ProviderError,
     _validate_video_model,
-    chat_complete,
+    chat_complete_stream,
+    chat_complete_with_usage,
     chat_configured,
     get_chat_config,
-    chat_complete_with_usage,
-    chat_complete_stream,
 )
-from komaverse.api.ai import COSTS, PROVIDERS, add_entry, cancel_job, get_balance, list_entities, run_ai_job
+from komaverse.api.ai import (
+    COSTS,
+    PROVIDERS,
+    cancel_job,
+    ensure_monthly_grant,
+    get_balance,
+    is_free_provider,
+    list_entities,
+    quote_cost,
+    run_ai_job,
+    spend_credits,
+)
 from komaverse.api.animate import (
     BLEND_MODES,
     MAX_LAYERS,
@@ -51,8 +61,6 @@ from komaverse.api.animate import (
     ClipPatch,
     FrameCreate,
     FrameOrder,
-    frame_from_media_source,
-    load_media_image,
     SceneCreate,
     ScenePatch,
     SequenceCreate,
@@ -71,8 +79,10 @@ from komaverse.api.animate import (
     duplicate_frame,
     duplicate_scene,
     duplicate_sequence,
+    frame_from_media_source,
     list_scenes,
     list_sequences,
+    load_media_image,
     order_clips,
     order_frames,
     patch_clip,
@@ -92,23 +102,24 @@ from komaverse.api.scans import (
 from komaverse.api.subtitles import save_subtitles_track
 from komaverse.api.usage import record_usage
 from komaverse.auth import own_project
+from komaverse.brush import render_stroke_mask, stroke_spec
 from komaverse.config import settings
-from komaverse.studio_settings import provider_for
-from komaverse.subtitles import SubSegment, segments_to_srt
 from komaverse.db_models import (
     AudioTakeRow,
     ChatTurnRow,
     ClipRow,
-    LayerRow,
     ExportReportRow,
     FrameRow,
     JobRow,
+    LayerRow,
     PageRow,
     PanelRow,
     SceneRow,
     SequenceRow,
     UserRow,
 )
+from komaverse.studio_settings import provider_for
+from komaverse.subtitles import SubSegment, segments_to_srt
 
 
 def _panel_count(session: Session, project_id: str) -> int:
@@ -137,11 +148,33 @@ def _clip_count(session: Session, project_id: str) -> int:
     )
 
 
+def _vision_bills() -> bool:
+    """True when a vision read spends studio money (keyed cloud vision)."""
+    p = provider_for("vision")
+    if p == "meta":
+        return bool(settings.meta_api_key)
+    if p == "openrouter":
+        return bool(settings.openrouter_api_key)
+    if p == "cloud":
+        return bool(settings.ai_api_key)
+    if p == "baseten":
+        return bool(settings.baseten_api_key)
+    return False
+
+
+def _voice_bills(voice: str | None) -> bool:
+    """True when TTS spends studio money (ElevenLabs, not local clones)."""
+    v = (voice or "")
+    if v.startswith("xtts:") or any(k in v for k in ("free-tts", "kokoro", "espeak", "sapi")):
+        return False
+    return provider_for("voice") == "elevenlabs"
+
+
 def _fmt_when(dt) -> str:
     """UTC 'YYYY-MM-DD HH:MM' stamp for history/observability lines."""
     try:
         if getattr(dt, "tzinfo", None):
-            return dt.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+            return dt.astimezone(UTC).strftime("%Y-%m-%d %H:%M UTC")
         return dt.strftime("%Y-%m-%d %H:%M UTC")
     except Exception:
         return "unknown time"
@@ -227,9 +260,10 @@ def tool_recent_jobs(session: Session, user: UserRow, project_id: str | None, li
             f"{(j.prompt or '')[:100]} [job {j.id}]"
         )
     return "\n".join(lines)
+from pydantic import BaseModel
+
 from komaverse.security import limiter
 from komaverse.skills import SkillError, list_skills, read_skill
-from pydantic import BaseModel
 
 logger = logging.getLogger("komaverse.agent")
 
@@ -1478,6 +1512,9 @@ def tool_detect_all(
         detector = "yolo-leoxs22"
     if direction not in ("rtl", "ltr"):
         direction = "rtl"
+    if detector in ("sam", "meta", "openrouter", "cloud"):
+        if not spend_credits(session, user.id, COSTS["vision"], "cloud detection"):
+            return "Not enough credits (need 1)."
     own_project(session, user, project_id)  # 404 unless owned; pages below are scoped.
     page_ids = (
         session.execute(
@@ -1779,7 +1816,7 @@ def _latest_done_image_job(session, user, project_id) -> str | None:
 def _latest_done_image_row(session, user, project_id):
     """Newest finished image generation row in this project, if recent."""
     try:
-        cutoff = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(
+        cutoff = datetime.now(UTC).replace(tzinfo=None) - timedelta(
             hours=RECENT_GEN_HOURS
         )
         return (
@@ -2067,11 +2104,9 @@ def tool_generate(
         provider = "fake"
     if provider == "fake" and settings.is_production:
         return "No AI provider configured."
-    cost = COSTS["image"]
-    if settings.paywall_enabled:
-        if get_balance(session, user.id) < cost:
-            return f"Not enough credits (need {cost})."
-        add_entry(session, user.id, -cost, "image generation")
+    cost = 0 if is_free_provider(provider) else quote_cost("image")
+    if not spend_credits(session, user.id, cost, "image generation"):
+        return f"Not enough credits (need {cost})."
     if reference_frame_id is not None:
         frame = session.get(FrameRow, reference_frame_id)
         if frame is None or frame.project_id != project_id:
@@ -2098,6 +2133,7 @@ def tool_generate(
         style=style or "none",
         genre=genre or "none",
         negative_prompt=negative_prompt or "",
+        cost_credits=cost,
         reference_frame_id=reference_frame_id,
         layer_frame_id=paint_target.id if paint_target is not None else None,
         entities_json=json.dumps(snaps),
@@ -2119,7 +2155,7 @@ def tool_generate(
     run_ai_job(job.id, job_factory)
     session.refresh(job)
     if job.status == "done":
-        spent = f" ({cost} credits)" if settings.paywall_enabled else ""
+        spent = f" ({cost} credits)" if settings.paywall_enabled and cost else ""
         after = set(
             session.execute(
                 select(FrameRow.id).where(FrameRow.project_id == project_id)
@@ -2240,11 +2276,9 @@ def tool_create_video(
             "No video provider configured (OPENROUTER_API_KEY is missing) — "
             "set it for video jobs, or generate an image instead."
         )
-    cost = COSTS["video"]
-    if settings.paywall_enabled:
-        if get_balance(session, user.id) < cost:
-            return f"Not enough credits (need {cost})."
-        add_entry(session, user.id, -cost, "video generation")
+    cost = 0 if is_free_provider(provider) else quote_cost("video", float(seconds or 0))
+    if not spend_credits(session, user.id, cost, "video generation"):
+        return f"Not enough credits (need {cost})."
     dims = _parse_video_size(size or "") or _parse_video_size(raw) or (0, 0)
     # Fail fast on model-impossible combos (frame-only models with style
     # refs, unsupported durations/sizes) so the turn steers immediately
@@ -2271,6 +2305,7 @@ def tool_create_video(
         provider=provider,
         model=model,
         seconds=seconds,
+        cost_credits=cost,
         width=dims[0],
         height=dims[1],
         attach_frame=False,
@@ -2810,6 +2845,8 @@ def tool_look_at(session, user, project_id, target, question="") -> str:
             "Nothing to look at - pass @frame:, @panel:, @media:, @gen:, "
             "@sequence:, an id or name, or 'latest'."
         )
+    if _vision_bills() and not spend_credits(session, user.id, COSTS["vision"], "vision read"):
+        return "Not enough credits (need 1)."
     answer = _vision_answer(f"{extra} {q}".strip(), [_vision_png(png)])
     return answer
 
@@ -2910,6 +2947,8 @@ def tool_watch_video(session, user, project_id, target, question="", frames=6) -
     job = session.get(JobRow, jid)
     if job is None or job.status != "done" or not job.result_url:
         return f"Video {jid} is not finished yet - check it with check_job."
+    if _vision_bills() and not spend_credits(session, user.id, COSTS["vision"], "video watch"):
+        return "Not enough credits (need 1)."
     try:
         rel = job.result_url.split("/media/", 1)[-1]
         vpath = str(storage.resolve(rel))
@@ -3096,6 +3135,10 @@ def tool_synthesize_voice(session, user, project_id, text, voice=None, lang="en"
             cue_scene_id = _resolve_scene(session, user, project_id, scene).id
         except HTTPException as exc:
             return str(exc.detail)
+    if _voice_bills(voice) and not spend_credits(
+        session, user.id, COSTS["voice"], "voice synthesis"
+    ):
+        return "Not enough credits (need 2)."
     try:
         take = synthesize_take(
             project_id,
@@ -3183,6 +3226,30 @@ def _resolve_frame(session, user, project_id, frame, sequence=None):
     return f"Unknown frame '{frame}'. Frames: {names}."
 
 
+def _with_open_frame(session, user, project_id, message, current_frame_id):
+    """Append the open-frame token when the message names no frame.
+
+    The Draw tab keeps working on whatever is open; bare verbs like
+    'make it bigger' then target the open frame instead of asking
+    which frame. Explicit mentions, names, and frame words win."
+    """
+    if not current_frame_id or "@frame:" in (message or ""):
+        return message
+    if re.search(r"\bframes?\b", message or "", re.IGNORECASE):
+        return message
+    frames = _project_frames(session, user, project_id)
+    if not any(f.id == current_frame_id for f in frames):
+        # Forged or stale id (even from another project): never inject it,
+        # so error paths cannot echo it back.
+        return message
+    if any(
+        f.name and len(f.name) > 2 and f.name.lower() in (message or "").lower()
+        for f in frames
+    ):
+        return message
+    return f"{message} @frame:{current_frame_id}"
+
+
 def _layer_desc(layer) -> str:
     flags = []
     if not layer.visible:
@@ -3261,6 +3328,40 @@ def _layer_rgba(layer, width, height):
     return Image.new("RGBA", (width, height), (0, 0, 0, 0))
 
 
+def _top_layer_of(frame):
+    """Topmost layer or an error string (frames start empty)."""
+    layers = sorted(frame.layers, key=lambda l: l.layer_order)
+    if not layers:
+        return "That frame has no layers yet - add one first ('add layer')."
+    return layers[-1]
+
+
+def _parse_box_arg(box, W, H):
+    """[x, y, w, h] clamped ints, or an error string."""
+    if (
+        not isinstance(box, (list, tuple)) or len(box) != 4
+        or not all(isinstance(v, (int, float)) for v in box)
+        or box[2] < 1 or box[3] < 1
+    ):
+        return "box must be [x, y, w, h] with w, h >= 1."
+    x, y = min(max(box[0], 0), W), min(max(box[1], 0), H)
+    w, h = min(box[2], W - x), min(box[3], H - y)
+    if w < 1 or h < 1:
+        return "box lies outside the frame."
+    return (int(x), int(y), int(w), int(h))
+
+
+def _parse_scale_arg(scale):
+    """float | [sx, sy], each 0.05..8, or an error string."""
+    try:
+        sx, sy = (float(scale[0]), float(scale[1])) if isinstance(scale, (list, tuple)) else (float(scale), float(scale))
+    except (TypeError, ValueError, IndexError):
+        return "scale must be a number (or [sx, sy])."
+    if not (0.05 <= sx <= 8 and 0.05 <= sy <= 8):
+        return "scale must be 0.05..8 per axis."
+    return (sx, sy)
+
+
 def tool_list_frames(session, user, project_id, sequence=None) -> str:
     # Fresh reads: this session may have cached relations from an
     # earlier tool call in the same turn.
@@ -3316,9 +3417,12 @@ def _parse_draw_color(value):
 def tool_manage_layers(
     session, user, project_id, frame, op="list", layer=None, name=None,
     opacity=None, visible=None, locked=None, blend=None, position=None,
-    sequence=None, shapes=None,
+    sequence=None, shapes=None, from_frame=None, to_frame=None, to_layer=None,
+    box=None, scale=None, at=None,
 ) -> str:
-    """Draw-layer ops: list/add/rename/set/move/remove/duplicate/clear/merge/draw."""
+    """Draw-layer ops: list/add/rename/set/move/remove/duplicate/clear/
+    merge/draw/erase-aware-draw/text/copy/resize. Frame-to-frame work
+    (copy, extend) is how sequences grow without generating images."""
     # Fresh reads: this session may have cached relations from an
     # earlier tool call in the same turn.
     session.expire_all()
@@ -3345,6 +3449,7 @@ def tool_manage_layers(
         session.add(row)
         session.commit()
         return f"Added layer '{row.name}' [{row.id}] to '{f.name or 'Untitled'}'."
+    target = None
     if op == "draw" and not f.layers:
         target = LayerRow(
             frame_id=f.id,
@@ -3358,8 +3463,12 @@ def tool_manage_layers(
         )
         session.add(target)
         session.flush()
-    elif op == "draw" and not str(layer or "").strip():
+    elif op in ("draw", "resize", "clear") and not str(layer or "").strip():
+        if not f.layers:
+            return "That frame has no layers yet - add one first ('add layer')."
         target = sorted(f.layers, key=lambda l: l.layer_order)[-1]
+    elif op == "copy":
+        target = None  # source/dest resolve inside the op
     else:
         target = _resolve_layer(f, layer)
         if isinstance(target, str):
@@ -3413,7 +3522,7 @@ def tool_manage_layers(
         session.delete(target)
         session.commit()
         return f"Removed layer '{target.name}'."
-    if op in ("duplicate", "copy"):
+    if op == "duplicate":
         if len(f.layers) >= MAX_LAYERS:
             return f"Too many layers ({len(f.layers)}), remove one first."
         row = LayerRow(
@@ -3457,7 +3566,8 @@ def tool_manage_layers(
         if not isinstance(shapes, list) or not shapes:
             return (
                 "Draw needs shapes: a list of {type, color, ...} "
-                "(stroke, rect, ellipse, fill)."
+                "(stroke, rect, ellipse, fill, text; any shape takes "
+                "erase:true to cut instead of paint)."
             )
         if len(shapes) > 100:
             return "Draw takes at most 100 shapes per call."
@@ -3486,10 +3596,11 @@ def tool_manage_layers(
                         return f"Shape {i}: every point must be [x, y] numbers."
                     xy.append((min(max(pt[0], 0), W), min(max(pt[1], 0), H)))
                 try:
-                    width = min(max(int(float(shape.get("width", 4))), 1), 64)
-                except (TypeError, ValueError):
-                    return f"Shape {i}: width must be 1..64."
-                jobs.append(("stroke", rgba, width, xy))
+                    spec = stroke_spec(shape, len(xy))
+                except ValueError as exc:
+                    return f"Shape {i}: {exc}."
+                erase = bool(shape.get("erase", False))
+                jobs.append(("stroke", rgba, spec, xy, erase))
             elif kind in ("rect", "ellipse"):
                 box = shape.get("box")
                 if (
@@ -3505,42 +3616,171 @@ def tool_manage_layers(
                     width = min(max(int(float(shape.get("width", 3))), 1), 64)
                 except (TypeError, ValueError):
                     return f"Shape {i}: width must be 1..64."
-                jobs.append((kind, rgba, width, fill, (x, y, x + w, y + h)))
+                erase = bool(shape.get("erase", False))
+                jobs.append((kind, rgba, width, fill, (x, y, x + w, y + h), erase))
             elif kind == "fill":
-                jobs.append(("fill", rgba))
+                jobs.append(("fill", rgba, bool(shape.get("erase", False))))
+            elif kind == "text":
+                content = str(shape.get("text") or "")[:200]
+                if not content:
+                    return f"Shape {i}: text needs a 'text' string."
+                txy = shape.get("xy") or shape.get("points")
+                if (
+                    not isinstance(txy, (list, tuple)) or len(txy) != 2
+                    or not all(isinstance(v, (int, float)) for v in txy)
+                ):
+                    return f"Shape {i}: text needs xy [x, y]."
+                try:
+                    size = min(max(int(float(shape.get("size", 36))), 8), 256)
+                except (TypeError, ValueError):
+                    return f"Shape {i}: size must be 8..256."
+                erase = bool(shape.get("erase", False))
+                jobs.append(("text", rgba, content, (txy[0], txy[1]), size, erase))
             else:
                 return (
                     f"Shape {i}: unknown type '{shape.get('type')}'. "
-                    "Valid: stroke, rect, ellipse, fill."
+                    "Valid: stroke, rect, ellipse, fill, text."
                 )
         img = _layer_rgba(target, W, H)
         d = ImageDraw.Draw(img)
+        mask = Image.new("L", (W, H), 0)
+        md = ImageDraw.Draw(mask)
+        erase_shapes: list = []
         for job in jobs:
+            if job[0] == "text":
+                _, rgba, content, txy, size, erase = job
+                try:
+                    font = ImageFont.load_default(size=size)
+                except TypeError:
+                    font = ImageFont.load_default()
+                (md if erase else d).text(txy, content, fill=(255 if erase else rgba), font=font)
+                continue
             if job[0] == "stroke":
-                _, rgba, width, xy = job
-                d.line(xy, fill=rgba, width=width, joint="curve")
-            elif job[0] == "fill":
+                _, rgba, spec, xy, erase = job
+                coverage = render_stroke_mask(
+                    W, H, xy, brush=spec["brush"], size=spec["size"],
+                    opacity=spec["opacity"], pressures=spec["pressures"],
+                )
+                if erase:
+                    erase_shapes.append(coverage)
+                    continue
+                colored = Image.new("RGBA", (W, H), rgba[:3] + (255,))
+                colored.putalpha(coverage)
+                img = Image.alpha_composite(img, colored)
+            elif job[0] == "fill" and not job[2]:
                 d.rectangle([0, 0, W, H], fill=job[1])
+            elif job[0] == "fill":
+                md.rectangle([0, 0, W, H], fill=255)
             else:
-                _, rgba, width, fill, box = job
+                _, rgba, width, fill, box, erase = job
+                pen = md if erase else d
                 if job[0] == "rect":
-                    if fill:
-                        d.rectangle(box, fill=rgba)
+                    if fill or erase:
+                        pen.rectangle(box, fill=(255 if erase else rgba))
                     else:
-                        d.rectangle(box, outline=rgba, width=width)
-                elif fill:
-                    d.ellipse(box, fill=rgba)
+                        pen.rectangle(box, outline=rgba, width=width)
+                elif fill or erase:
+                    pen.ellipse(box, fill=(255 if erase else rgba))
                 else:
-                    d.ellipse(box, outline=rgba, width=width)
+                    pen.ellipse(box, outline=rgba, width=width)
+        for shape in erase_shapes:
+            mask = ImageChops.add(mask, shape)
+        if mask.getbbox():
+            img.putalpha(ImageChops.subtract(img.getchannel("A"), mask))
         target.data_url = _png_data_url(img)
         session.commit()
         return (
             f"Drew {len(jobs)} shape(s) on layer '{target.name}' [{target.id}] "
             f"of frame '{f.name or 'Untitled'}' [frame {f.id}]."
         )
+    if op == "copy":
+        src_frame = f
+        if from_frame:
+            r = _resolve_frame(session, user, project_id, from_frame, sequence)
+            if isinstance(r, str):
+                return r
+            src_frame = r
+        if str(layer or "").strip():
+            src_layer = _resolve_layer(src_frame, layer)
+            if isinstance(src_layer, str):
+                return src_layer
+        else:
+            src_layer = _top_layer_of(src_frame)
+            if isinstance(src_layer, str):
+                return src_layer
+        SW, SH = int(src_frame.width), int(src_frame.height)
+        parsed_box = _parse_box_arg(box if box is not None else [0, 0, SW, SH], SW, SH)
+        if isinstance(parsed_box, str):
+            return parsed_box
+        parsed_scale = _parse_scale_arg(scale if scale is not None else 1)
+        if isinstance(parsed_scale, str):
+            return parsed_scale
+        sx, sy = parsed_scale
+        dst_frame = src_frame
+        if to_frame:
+            r = _resolve_frame(session, user, project_id, to_frame, sequence)
+            if isinstance(r, str):
+                return r
+            dst_frame = r
+        if str(to_layer or "").strip():
+            dst_layer = _resolve_layer(dst_frame, to_layer)
+            if isinstance(dst_layer, str):
+                return dst_layer
+        else:
+            dst_layer = _top_layer_of(dst_frame)
+            if isinstance(dst_layer, str):
+                dst_layer = LayerRow(
+                    frame_id=dst_frame.id,
+                    name="Pasted",
+                    opacity=100,
+                    visible=True,
+                    locked=False,
+                    blend_mode="normal",
+                    layer_order=max([l.layer_order for l in dst_frame.layers], default=-1) + 1,
+                    data_url=_blank_png_data_url(dst_frame.width, dst_frame.height),
+                )
+                session.add(dst_layer)
+                session.flush()
+        if dst_layer.locked:
+            return f"Layer '{dst_layer.name}' is locked - unlock it first."
+        region = _layer_rgba(src_layer, SW, SH).crop(
+            (parsed_box[0], parsed_box[1], parsed_box[0] + parsed_box[2], parsed_box[1] + parsed_box[3])
+        )
+        nw, nh = max(1, round(region.width * sx)), max(1, round(region.height * sy))
+        if (nw, nh) != region.size:
+            region = region.resize((nw, nh), Image.BILINEAR)
+        DW, DH = int(dst_frame.width), int(dst_frame.height)
+        px, py = (parsed_box[0], parsed_box[1]) if at is None else (int(at[0]), int(at[1]))
+        canvas = _layer_rgba(dst_layer, DW, DH)
+        canvas.alpha_composite(region, (min(max(px, -nw), DW), min(max(py, -nh), DH)))
+        dst_layer.data_url = _png_data_url(canvas)
+        session.commit()
+        return (
+            f"Copied {nw}x{nh}px from '{src_layer.name}' "
+            f"(frame '{src_frame.name or 'Untitled'}') onto layer '{dst_layer.name}' "
+            f"(frame '{dst_frame.name or 'Untitled'}')."
+        )
+    if op == "resize":
+        if target is None:
+            return "Resize needs a layer - add one first."
+        if target.locked:
+            return f"Layer '{target.name}' is locked - unlock it first."
+        W, H = int(f.width), int(f.height)
+        parsed_scale = _parse_scale_arg(scale)
+        if isinstance(parsed_scale, str):
+            return "Resize needs " + parsed_scale
+        sx, sy = parsed_scale
+        img = _layer_rgba(target, W, H)
+        nw, nh = max(1, round(W * sx)), max(1, round(H * sy))
+        small = img.resize((nw, nh), Image.BILINEAR)
+        canvas = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+        canvas.alpha_composite(small, ((W - nw) // 2, (H - nh) // 2))
+        target.data_url = _png_data_url(canvas)
+        session.commit()
+        return f"Resized layer '{target.name}' to {nw}x{nh}px (centered)."
     return (
         f"Unknown layer op '{op}'. Valid: list, add, rename, set, move, "
-        "remove, duplicate, clear, merge, draw."
+        'remove, duplicate, clear, merge, draw, copy, resize.'
     )
 
 
@@ -3750,7 +3990,7 @@ def tool_manage_frames(
         f.name = str(name).strip()[:200]
         session.commit()
         return f"Renamed frame to '{f.name}'."
-    return "Unknown frame op '{op}'. Valid: list, duplicate, delete, rename, reorder.".format(op=op)
+    return f"Unknown frame op '{op}'. Valid: list, duplicate, delete, rename, reorder."
 
 
 def tool_manage_clips(
@@ -4064,8 +4304,9 @@ def _demo_layer_name(message):
     return None
 
 
-def _demo_layer_turn(session, user, project_id, message):
+def _demo_layer_turn(session, user, project_id, message, current_frame_id=None):
     """Demo-brain layer control: verbs map to manage_layers ops."""
+    message = _with_open_frame(session, user, project_id, message, current_frame_id)
     text = message.lower()
     name = _demo_layer_name(message)
     if "merge" in text:
@@ -4289,6 +4530,42 @@ def _wants_draw_shape(text: str) -> bool:
 
 
 _PAINT_VERB_RE = re.compile(r"\b(draw|paint|sketch)\b")
+_QUOTED_RE = re.compile(r"""'([^']{1,120})'|"([^"]{1,120})""")
+_CANVAS_STRONG_WORDS = (
+    "eras", "fill", "copy", "copies", "resize", "scale", "bigger",
+    "smaller", "shrink", "grow", "caption", "label",
+    "extend", "expand", "continu",
+)
+# Ambiguous alone ('cel shading' is research, 'write' is prose): these
+# only count beside an explicit canvas context.
+_CANVAS_CONTEXT_WORDS = (
+    "select", "text", "write", "word", "trace", "ink", "shading", "outline",
+)
+_CANVAS_CONTEXT_RE = re.compile(r"frame|draw|paint|sketch|layer|pixel|@frame:")
+_FRAME_MGMT_RE = re.compile(
+    r"\bframes?\b.*\b(duplicate|delete|remove|rename|reorder|order|list|show|how many)\b"
+    r"|\b(list|show|how many|duplicate|delete|remove|rename|reorder)\b.*\bframes?\b"
+)
+
+
+def _wants_canvas_op(text: str) -> bool:
+    """Pixel/layer work on the draw canvas, not generation or frames mgmt.
+
+    Erase, fill, copy, resize, text, sequence expansion, and stroke
+    craft route to manage_layers. Explicit generate/video stays on
+    generation; pure frame management (duplicate/delete/list frames)
+    stays on manage_frames."""
+    if "video" in text or "generat" in text:
+        return False
+    if "layer" in text or "pixel" in text:
+        return True
+    if _FRAME_MGMT_RE.search(text or ""):
+        return False
+    if any(k in text for k in _CANVAS_STRONG_WORDS):
+        return True
+    if not _CANVAS_CONTEXT_RE.search(text or ""):
+        return False
+    return any(k in text for k in _CANVAS_CONTEXT_WORDS)
 _REF_SOURCE_RE = re.compile(r"@(media|panel|gen):")
 
 
@@ -4313,42 +4590,176 @@ def _wants_paint_on_frame(text: str) -> bool:
     return bool(FRAME_DIRECTED_RE.search(text))
 
 
-def _demo_draw_turn(session, user, project_id, message):
-    """Paint one centered shape on a draw layer (demo brain)."""
-    text = message.lower()
+def tool_extend_sequence(session, user, project_id, frame, sequence=None, count=1) -> str:
+    """Duplicate a frame N times at the end of its sequence.
+
+    Frame-by-frame continuation without generating images: the copies
+    carry the drawing forward, then paint each motion delta with
+    manage_layers draw (strokes/shapes per frame). For stroke craft
+    (line weight, construction, limited-animation holds) read the
+    drawing-fundamentals and anime-animation-production skills first.
+    """
+    session.expire_all()
+    f = _resolve_frame(session, user, project_id, frame, sequence)
+    if isinstance(f, str):
+        return f
+    try:
+        n = min(max(int(count or 1), 1), 12)
+    except (TypeError, ValueError):
+        return "Count must be 1..12."
+    ids = []
+    for _ in range(n):
+        copied = duplicate_frame(f.id, session, user)
+        ids.append(f"'{copied.name}' [frame {copied.id}]")
+    return (
+        f"Extended '{f.name or 'Untitled'}' with {n} frame(s): "
+        + ", ".join(ids)
+        + ". Paint each motion delta with manage_layers draw; hold each "
+        "drawing 2-3 frames for limited-animation cadence."
+    )
+
+
+_FRAME_COUNT_WORDS = {
+    "one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6,
+    "seven": 7, "eight": 8, "nine": 9, "ten": 10, "eleven": 11,
+    "twelve": 12, "couple": 2, "few": 3,
+}
+
+
+def _parse_frame_count(text: str) -> int:
+    """How many frames an expansion asks for (digits or words, 1..12)."""
+    m = re.search(r"(\d+)\s*(?:more\s+)?frames?", text or "")
+    if m:
+        return min(max(int(m.group(1)), 1), 12)
+    for word, n in _FRAME_COUNT_WORDS.items():
+        if re.search(r"\b" + word + r"\b", text or ""):
+            return n
+    return 1
+
+
+def _parse_scale(text: str):
+    """Grow/shrink factor from plain words (2, 0.5, 1.5, 0.67, 150%)."""
+    m = re.search(r"(\d+(?:\.\d+)?)\s*%", text or "")
+    if m:
+        return min(max(float(m.group(1)) / 100, 0.05), 8)
+    m = re.search(r"(\d+(?:\.\d+)?)\s*(?:x|times)\b", text or "")
+    if m:
+        return min(max(float(m.group(1)), 0.05), 8)
+    if re.search(r"\b(twice|double)\b", text or ""):
+        return 2.0
+    if re.search(r"\bhalf\b", text or ""):
+        return 0.5
+    if re.search(r"\b(bigger|grow|growing|enlarge|expanding|expand)\b", text or ""):
+        return 1.5
+    if re.search(r"\b(smaller|shrink|shrinking|reduce)\b", text or ""):
+        return 0.67
+    return 1.5
+
+
+def _demo_shape_for(text: str, W: int, H: int) -> dict:
+    """Centered default shape from shape/color/size/position words."""
     color = next(
         (c for c in _DRAW_COLORS if re.search(r"\b" + c + r"\b", text)), "ink"
     )
-    f = _resolve_frame(session, user, project_id, message)
-    if isinstance(f, str):
-        return f
-    W, H = int(f.width), int(f.height)
     scale = 0.36 if "big" in text else 0.15 if "small" in text else 0.25
     cx = W * 0.2 if "left" in text else W * 0.8 if "right" in text else W / 2
     cy = H * 0.2 if "top" in text else H * 0.8 if "bottom" in text else H / 2
     r = min(W, H) * scale
     if "dot" in text:
-        shape = {
+        return {
             "type": "ellipse", "color": color,
             "box": [cx - r / 3, cy - r / 3, r * 2 / 3, r * 2 / 3], "fill": True,
         }
-    elif any(k in text for k in ("circle", "ellipse", "oval", "ring")):
-        shape = {
+    if any(k in text for k in ("circle", "ellipse", "oval", "ring")):
+        return {
             "type": "ellipse", "color": color,
             "box": [cx - r, cy - r, r * 2, r * 2], "fill": False, "width": 6,
+            "brush": "g-pen",
         }
-    elif any(k in text for k in ("square", "rectangle", "box")):
+    if any(k in text for k in ("square", "rectangle", "box")):
         side = r * 2
-        shape = {
+        return {
             "type": "rect", "color": color,
             "box": [cx - side / 2, cy - side / 2, side, side],
-            "fill": False, "width": 6,
+            "fill": False, "width": 6, "brush": "g-pen",
         }
-    else:
-        shape = {
-            "type": "stroke", "color": color, "width": 6,
-            "points": [[cx - r, cy - r], [cx + r, cy + r]],
-        }
+    return {
+        "type": "stroke", "color": color, "brush": "g-pen",
+        "width": max(4, min(64, r / 6)),
+        "points": [[cx - r, cy - r], [cx + r, cy + r]],
+    }
+
+
+def _demo_draw_turn(session, user, project_id, message, current_frame_id=None):
+    """Paint one centered shape on a draw layer (demo brain)."""
+    message = _with_open_frame(session, user, project_id, message, current_frame_id)
+    f = _resolve_frame(session, user, project_id, message)
+    if isinstance(f, str):
+        return f
+    shape = _demo_shape_for(message.lower(), int(f.width), int(f.height))
+    return tool_manage_layers(
+        session, user, project_id, frame=message, op="draw", shapes=[shape]
+    )
+
+
+def _demo_canvas_turn(session, user, project_id, message, current_frame_id=None):
+    """Pixel/layer ops the demo brain parses directly (no geometry Q&A)."""
+    message = _with_open_frame(session, user, project_id, message, current_frame_id)
+    text = (message or "").lower()
+    if any(k in text for k in ("extend", "expand", "continu")) and any(
+        k in text for k in ("sequence", "frame", "motion", "shot", "drawing", "animation", "scene")
+    ):
+        return tool_extend_sequence(
+            session, user, project_id, frame=message, count=_parse_frame_count(text)
+        )
+    if "copy" in text:
+        refs = re.findall(r"@frame:([A-Za-z0-9_-]+)", message or "")
+        if len(refs) < 2:
+            nums = re.findall(r"\bframe\s*(\d+)\b", text)
+            refs = [f"frame {n}" for n in nums[:2]]
+        if len(refs) < 2:
+            return (
+                "Copy what to where? Name two frames, e.g. "
+                "'copy frame 1 to frame 3' or '@frame:A to @frame:B'."
+            )
+        return tool_manage_layers(
+            session, user, project_id, frame=refs[0], op="copy", to_frame=refs[1]
+        )
+    if any(
+        k in text
+        for k in ("bigger", "smaller", "grow", "shrink", "scale", "resize", "twice", "double", "half")
+    ) or "%" in text:
+        return tool_manage_layers(
+            session, user, project_id, frame=message, op="resize", scale=_parse_scale(text)
+        )
+    m = _QUOTED_RE.search(message or "")
+    if m or any(k in text for k in ("write", "caption", "label")):
+        content = (m.group(1) or m.group(2)) if m else None
+        if not content:
+            return "What should the text say? Quote it, e.g. 'write BANG! on the frame'."
+        f = _resolve_frame(session, user, project_id, message)
+        if isinstance(f, str):
+            return f
+        W, H = int(f.width), int(f.height)
+        return tool_manage_layers(
+            session, user, project_id, frame=message, op="draw",
+            shapes=[{"type": "text", "text": content, "xy": [W / 2, H / 2], "size": 64}],
+        )
+    if "eras" in text:
+        if any(k in text for k in ("all", "everything", "clear")):
+            return tool_manage_layers(session, user, project_id, frame=message, op="clear")
+        f = _resolve_frame(session, user, project_id, message)
+        if isinstance(f, str):
+            return f
+        shape = _demo_shape_for(text, int(f.width), int(f.height))
+        shape["erase"] = True
+        return tool_manage_layers(
+            session, user, project_id, frame=message, op="draw", shapes=[shape]
+        )
+    f = _resolve_frame(session, user, project_id, message)
+    if isinstance(f, str):
+        return f
+    shape = _demo_shape_for(text, int(f.width), int(f.height))
     return tool_manage_layers(
         session, user, project_id, frame=message, op="draw", shapes=[shape]
     )
@@ -4364,6 +4775,7 @@ def demo_turn(
     ref_context: str = "",
     history: list[dict] | None = None,
     fallback_references=None,
+    current_frame_id: str | None = None,
 ) -> tuple[str, list[dict]]:
     text = message.lower().strip()
     actions: list[dict] = []
@@ -4418,7 +4830,8 @@ def demo_turn(
         else:
             reply = run("check_job", tool_check_job, session, user, jid)
     elif _wants_draw_shape(text):
-        reply = run("manage_layers", _demo_draw_turn, session, user, project_id, message)
+        reply = run("manage_layers", _demo_draw_turn, session, user, project_id,
+                    message, current_frame_id=current_frame_id)
     elif _wants_paint_on_frame(text):
         target = _resolve_frame(session, user, project_id, message)
         if isinstance(target, str):
@@ -4598,7 +5011,11 @@ def demo_turn(
         density = min(max(int(m.group(1)), 2), 100) / 100 if m else 0.2
         reply = run("tone_layer", tool_tone_layer, session, user, project_id, message, density)
     elif "layer" in text:
-        reply = run("manage_layers", _demo_layer_turn, session, user, project_id, message)
+        reply = run("manage_layers", _demo_layer_turn, session, user, project_id,
+                    message, current_frame_id=current_frame_id)
+    elif _wants_canvas_op(text):
+        reply = run("manage_layers", _demo_canvas_turn, session, user, project_id,
+                    message, current_frame_id=current_frame_id)
     elif (
         any(k in text for k in ("list frames", "show frames", "show me frames", "what frames", "how many frames", "my frames"))
         or (
@@ -5041,9 +5458,12 @@ _TOOLS_SCHEMA = [
                 "frame via paint_on_frame — the pixels land on the canvas "
                 "as a layer, never as a separate gallery image. generate/"
                 "create verbs (or no frame) make standalone gallery media. "
-                "Geometric shapes (circle, line, rect) are never yours: "
-                "they go to manage_layers draw. Never say you are 'drawing "
-                "on a frame' for a gallery generation. "
+                "Canvas ops are your own hands, never generation: strokes, "
+                "shapes, erase, fill, text, copy, resize, and frame-to-frame "
+                "extension go to manage_layers / extend_sequence. Only a "
+                "named subject with an explicit generate/create verb (or no "
+                "frame at all) becomes a gallery image. Never say you are "
+                "'drawing on a frame' for a gallery generation. "
                 "Pass what the conversation "
                 "states; omit the rest. Blanks take defaults (square, "
                 "standard quality); ask only for cost-affecting blanks "
@@ -5280,14 +5700,29 @@ _TOOLS_SCHEMA = [
         "function": {
             "name": "manage_layers",
             "description": (
-                "Draw-layer ops on one frame (frame id, @frame: mention, or name). "
+                "Draw-canvas ops: your hands for frame-by-frame animation. "
                 "Ops: list, add, rename, set (opacity/visible/locked/blend), "
                 "move (position 0 is bottom), remove, duplicate, clear, merge down, "
-                "draw (paint GEOMETRIC SHAPES ONLY: stroke/rect/ellipse/fill in "
-                "frame pixels; omitted layer means the top layer). The draw op "
-                "cannot freehand a subject — a named subject on a frame ('draw a "
-                "samurai on the current frame') is create_image with "
-                "paint_on_frame, never this tool."
+                "draw (stroke/rect/ellipse/fill/text in frame pixels; any shape takes "
+                "erase:true to cut instead of paint; omitted layer means the top layer), "
+                "copy (pixels from a box/frame/layer onto another frame/layer, optional scale), "
+                "resize (scale layer pixels about center). "
+                "Strokes take a brush (same marks as the Draw tab): g-pen/maru "
+                "tapered manga linework, fineliner constant lines, pencil sketch, "
+                "brush/fude expressive ink, marker flat cel fills, chalk grain, "
+                "hatch manga shading, watercolor/sumi/airbrush soft tone, "
+                "calligraphy/chisel shaped marks, toneline dotted contours, "
+                "splatter droplets; pressures [0..1] per point tapers the mark "
+                "(default 0.5), opacity 0..1 layers tone. Compose like an "
+                "animator: pencil construction strokes, g-pen clean linework, "
+                "marker flats, hatch shade — many strokes per drawing, never "
+                "one flat line. Cel craft: hard-edge flat color on characters, "
+                "airbrush/watercolor for backgrounds only. "
+                'Draw paints marks, not subjects: a named subject with an explicit '
+                'generate verb is create_image, never this tool. For stroke craft '
+                '(line weight, construction, limited-animation holds) read '
+                'drawing-fundamentals first; for sequence grammar read '
+                "anime-animation-production."
             ),
             "parameters": {
                 "type": "object",
@@ -5302,17 +5737,52 @@ _TOOLS_SCHEMA = [
                     "blend": {"type": "string"},
                     "position": {"type": "number"},
                     "sequence": {"type": "string"},
+                    "to_frame": {"type": "string"},
+                    "to_layer": {"type": "string"},
+                    "box": {"type": "array"},
+                    "scale": {"type": "number"},
+                    "from_frame": {"type": "string"},
+                    "to_frame": {"type": "string"},
                     "shapes": {
                         "type": "array",
                         "description": (
                             "draw op: up to 100 shapes, each "
-                            "{type: stroke|rect|ellipse|fill, color (name or #rrggbb), "
+                            "{type: stroke|rect|ellipse|fill|text, color (name or #rrggbb), "
                             "width 1..64, points [[x, y], ...] for stroke, "
-                            "box [x, y, w, h] for rect/ellipse, fill true to paint solid}."
+                            "box [x, y, w, h] for rect/ellipse, text/xy/size for text, "
+                            "fill true to paint solid, erase true to cut; stroke-only: "
+                            "brush pen|brush|marker|pencil|airbrush|g-pen|maru|fude|sumi|"
+                            "fineliner|calligraphy|chisel|chalk|hatch|toneline|watercolor|"
+                            "splatter (default fineliner), size 0.5..256 (default = brush "
+                            "preset), pressures [0..1] per point (default 0.5), "
+                            "opacity 0..1 (default = brush preset)}."
                         ),
                     },
                 },
                 "required": ["frame", "op"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "extend_sequence",
+            "description": (
+                "Duplicate a frame N times at the end of its sequence: "
+                "frame-by-frame continuation WITHOUT generating images. "
+                "Then paint each motion delta with manage_layers draw/copy. "
+                "For stroke craft read drawing-fundamentals; for limited-animation "
+                "grammar (holds, on-twos/threes, smears, impact frames) read "
+                "anime-animation-production."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "frame": {"type": "string"},
+                    "sequence": {"type": "string"},
+                    "count": {"type": "number"},
+                },
+                "required": ["frame"],
             },
         },
     },
@@ -5532,6 +6002,8 @@ def _finish_turn(target, session, user, reply, actions, brain, cloud_error=None)
             "brain": brain,
             "cloud_error": cloud_error,
         }
+    if brain != "demo":
+        spend_credits(session, user.id, COSTS["chat"], "chat turn")
     return {
         "reply": reply,
         "project_id": target,
@@ -5792,7 +6264,16 @@ def _exec_cloud_tool(
                 args.get("opacity"), args.get("visible"),
                 args.get("locked"), args.get("blend"),
                 args.get("position"), args.get("sequence"),
-                args.get("shapes"),
+                args.get("shapes"), args.get("from_frame"),
+                args.get("to_frame"), args.get("to_layer"),
+                args.get("box"),
+                args.get("scale"), args.get("at"),
+            )
+        elif name == "extend_sequence":
+            result = tool_extend_sequence(
+                session, user, project_id,
+                args.get("frame"), args.get("sequence"),
+                args.get("count", 1),
             )
         elif name == "tone_layer":
             result = tool_tone_layer(
@@ -5912,7 +6393,7 @@ def _cloud_loop(
     """
     context = tool_status(session, user, project_id)
     frame_line = f"\n\n{open_frame}" if open_frame else ""
-    now_line = f"\nNow: {_fmt_when(datetime.now(timezone.utc))}"
+    now_line = f"\nNow: {_fmt_when(datetime.now(UTC))}"
     user_content = f"Project: {context}{frame_line}{now_line}\n\n{message}"
     if ref_context:
         user_content = (
@@ -6358,7 +6839,20 @@ def run_agent_turn_stream(
     open_frame = resolved["open_frame"]
     ref_context = resolved["ref_context"]
     cloud_error: str | None = None
-    if chat_configured():
+    allow_cloud = chat_configured()
+    if settings.paywall_enabled and allow_cloud:
+        # Authorize the turn: the finish step debits exactly 1 credit for
+        # cloud brains. Broke users transparently drop to the free demo
+        # brain instead of 402ing; the grant runs first so new freemium
+        # users still reach the cloud.
+        ensure_monthly_grant(session, user.id)
+        if get_balance(session, user.id) < COSTS["chat"]:
+            allow_cloud = False
+            cloud_error = (
+                "out of credits - demo brain answering "
+                "(top up in the Koma Portal for cloud)"
+            )
+    if allow_cloud:
         try:
             result: dict = {}
             for event in _cloud_loop(
@@ -6382,7 +6876,7 @@ def run_agent_turn_stream(
             cloud_error = f"{type(exc).__name__}: {exc}"[:160]
     reply, actions = demo_turn(
         message, target, session, user, job_factory, clip_seconds, ref_context,
-        history, fallback_references=refs,
+        history, fallback_references=refs, current_frame_id=current_frame_id,
     )
     for action in actions:
         yield {
@@ -6457,7 +6951,20 @@ def run_agent_turn(
     open_frame = resolved["open_frame"]
     ref_context = resolved["ref_context"]
     cloud_error: str | None = None
-    if chat_configured():
+    allow_cloud = chat_configured()
+    if settings.paywall_enabled and allow_cloud:
+        # Authorize the turn: the finish step debits exactly 1 credit for
+        # cloud brains. Broke users transparently drop to the free demo
+        # brain instead of 402ing; the grant runs first so new freemium
+        # users still reach the cloud.
+        ensure_monthly_grant(session, user.id)
+        if get_balance(session, user.id) < COSTS["chat"]:
+            allow_cloud = False
+            cloud_error = (
+                "out of credits - demo brain answering "
+                "(top up in the Koma Portal for cloud)"
+            )
+    if allow_cloud:
         try:
             reply, actions = cloud_turn(
                 message, target, session, user, job_factory, ref_context,
@@ -6471,7 +6978,7 @@ def run_agent_turn(
             cloud_error = f"{type(exc).__name__}: {exc}"[:160]
     reply, actions = demo_turn(
         message, target, session, user, job_factory, clip_seconds, ref_context,
-        history, fallback_references=refs,
+        history, fallback_references=refs, current_frame_id=current_frame_id,
     )
     record_usage(session, user.id, "chat", "demo", (len(message) + len(reply)) // 4, project_id=target or "")
     return _finish_turn(target, session, user, reply, actions, "demo", cloud_error)

@@ -374,6 +374,13 @@ export default function DrawPage() {
   // (SequenceFrame metadata); full pixels arrive on demand per opened
   // frame, so painted projects no longer download every layer upfront.
   const loadedFullRef = useRef<Set<string>>(new Set());
+  // Synchronous mirror of `frames` for async agent-sync callbacks, which
+  // must compare fresh server pixels against the latest state without
+  // closing over a stale render's copy.
+  const framesRef = useRef<DrawFrame[]>([]);
+  useEffect(() => {
+    framesRef.current = frames;
+  });
   const headerOf = (f: DrawFrame): DrawFrame => ({ ...f, layers: [] });
   const metaToHeader = (m: SequenceFrame, sequenceId: string): DrawFrame => ({
     id: m.id,
@@ -715,20 +722,71 @@ export default function DrawPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [projectId]);
 
-  // Agent edits land live: reload the list, and reopen the canvas from the
-  // server when the open frame has no unsaved local work (a stash always
-  // wins over remote pixels).
+  // Agent edits land live without a tab switch. Headers reload first
+  // (they carry no pixels), then every touched frame refetches full
+  // pixels: the header keep-map would otherwise preserve stale ones.
+  // The open frame hot-swaps into the running engine — no dispose, no
+  // blank flash — but only when its pixels actually changed and there
+  // is no unsaved local work: a stash or a live stroke always wins
+  // over remote pixels. Finished generation jobs (generate-and-add
+  // lands when the job completes, after the turn) funnel through the
+  // same sync, so both canvas ops and job results repaint in place.
   useEffect(() => {
     if (!projectId) return;
+    const sig = (ls: DrawFrame["layers"]) =>
+      JSON.stringify(ls.map((l) => [l.id, l.data_url ?? null]));
+    const syncAgentEdits = async (explicitIds: string[]) => {
+      const fallback = frameIdRef.current ? [frameIdRef.current] : [];
+      const ids = [...new Set(explicitIds.length > 0 ? explicitIds : fallback)];
+      await loadDrawing();
+      for (const fid of ids) {
+        if (stashRef.current.has(fid)) continue;
+        if (fid !== frameIdRef.current) {
+          // Strip-only frame: headers are fresh and pixels arrive on
+          // open; just bust its thumbnail so the strip stops lying.
+          loadedFullRef.current.delete(fid);
+          setThumbBust((m) => ({ ...m, [fid]: (m[fid] ?? 0) + 1 }));
+          continue;
+        }
+        const engine = engineRef.current;
+        if (!engine || engine.isLiveStroke) continue;
+        try {
+          const full = await api.getFrame(fid);
+          if (frameIdRef.current !== fid || stashRef.current.has(fid)) continue;
+          const cur = framesRef.current.find((f) => f.id === fid);
+          if (cur && sig(cur.layers) === sig(full.layers)) continue;
+          loadedFullRef.current.add(fid);
+          setFrames((prev) => prev.map((f) => (f.id === fid ? full : f)));
+          setThumbBust((m) => ({ ...m, [fid]: (m[fid] ?? 0) + 1 }));
+          const live = engineRef.current;
+          if (live !== engine) continue;
+          await live.load(full.layers);
+          if (engineRef.current !== engine || frameIdRef.current !== fid) continue;
+          saveStateRef.current.dirty = false;
+          setDirty(false);
+          setLayers(live.getLayers());
+          setUndoDepth(0);
+          setRedoDepth(0);
+        } catch {
+          // Keep the stale canvas rather than blanking it; the next
+          // open or save reconciles with the server.
+        }
+      }
+    };
     const onAgent = (e: Event) => {
-      const pid = (e as CustomEvent).detail?.projectId as string | null | undefined;
-      if (pid && pid !== projectId) return;
-      const fid = frameIdRef.current;
-      if (fid && !stashRef.current.has(fid)) openedRef.current = "";
-      void loadDrawing();
+      const d = (e as CustomEvent).detail ?? {};
+      if (d.projectId && d.projectId !== projectId) return;
+      const ids = Array.isArray(d.frameIds)
+        ? d.frameIds.filter((x: unknown): x is string => typeof x === "string")
+        : [];
+      void syncAgentEdits(ids);
     };
     window.addEventListener("komaverse:agent-timeline-changed", onAgent);
-    return () => window.removeEventListener("komaverse:agent-timeline-changed", onAgent);
+    window.addEventListener("komaverse:agent-job-done", onAgent);
+    return () => {
+      window.removeEventListener("komaverse:agent-timeline-changed", onAgent);
+      window.removeEventListener("komaverse:agent-job-done", onAgent);
+    };
   }, [projectId]);
 
   // Engine init per frame; prefers the unsaved stash over server layers.

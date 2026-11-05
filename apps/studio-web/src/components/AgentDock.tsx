@@ -272,6 +272,7 @@ const SLASH_COMMANDS = [
 ];
 
 const JOB_RE = /\[job ([A-Za-z0-9_-]+)\]/g;
+const FRAME_RE = /\[frame ([A-Za-z0-9_-]+)\]/g;
 
 const LOG_KEY = "komaverse.agentLog";
 const GREETING: Msg = {
@@ -1446,6 +1447,17 @@ export default function AgentDock() {
       ),
     ].map((m) => m[1]);
     if (ids.length > 0) void followJobs(ids, out.project_id);
+    // Frame ids ride along so the Draw tab can hot-swap exactly the
+    // frames the turn touched instead of refetching the whole project.
+    const frameIds = [
+      ...new Set(
+        [
+          ...`${out.reply} ${(out.actions ?? []).map((a) => a.summary).join(" ")}`.matchAll(
+            FRAME_RE,
+          ),
+        ].map((m) => m[1]),
+      ),
+    ];
     // Timeline/data mutations land live in open tabs (Render, Scan, Draw).
     const MUTATING = [
       "detect_all",
@@ -1464,7 +1476,7 @@ export default function AgentDock() {
     if ((out.actions ?? []).some((a) => MUTATING.includes(a.tool))) {
       window.dispatchEvent(
         new CustomEvent("komaverse:agent-timeline-changed", {
-          detail: { projectId: out.project_id },
+          detail: { projectId: out.project_id, frameIds },
         }),
       );
     }
@@ -1946,6 +1958,10 @@ export default function AgentDock() {
     try {
       const st = await api.agentConfig(body);
       setAgentInfo(st);
+      // Keys/models may have changed: drop the cached pickers so the next
+      // panel open refetches catalogs against the new credentials.
+      setBrainCatalog(null);
+      setBrainVoices(null);
       if (!reset) {
         setBrainForm((f) => ({ ...f, chat: "", vision: "", image: "", video: "", transcribe: "", voice: "", meta_api_key: "", openrouter_api_key: "", baseten_api_key: "", elevenlabs_api_key: "", ai_api_key: "" }));
       }

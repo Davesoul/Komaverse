@@ -576,7 +576,7 @@ def test_generate_video_openrouter_roundtrip(factory, user, monkeypatch):
     assert done.status == "done"
     assert done.result_url and done.result_url.endswith(".mp4")
     with factory() as s:
-        assert get_balance(s, user.id) == 75  # 100 - 25 video cost
+        assert get_balance(s, user.id) == 150  # 100 grant + 100 free - 50 video
 
 
 def test_generate_stores_model_and_passes_to_provider(factory, user, monkeypatch):
@@ -871,7 +871,11 @@ def test_agent_falls_back_to_demo_when_meta_down(factory, user, monkeypatch):
     def _boom(**kw):
         raise ProviderError("down")
 
-    monkeypatch.setattr(agent_mod, "chat_complete", _boom)
+    # run_agent_turn reaches the cloud through chat_complete_with_usage /
+    # chat_complete_stream (not the unused chat_complete import): fail both
+    # so the test exercises the real fallback, not a vacuous patch.
+    monkeypatch.setattr(agent_mod, "chat_complete_with_usage", _boom)
+    monkeypatch.setattr(agent_mod, "chat_complete_stream", _boom)
     with factory() as s:
         project = create_project(ProjectCreate(name="AI"), s, user)
     with factory() as s:

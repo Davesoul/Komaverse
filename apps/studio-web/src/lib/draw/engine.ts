@@ -1807,6 +1807,29 @@ export class DrawEngine {
     });
   }
 
+  /** Release layer pixels, undo history, and the change callback so a
+   * replaced engine (frame switch) drops its canvases immediately instead
+   * of holding them until GC. Also neutralizes a pending live-paint rAF. */
+  /** True while a pointer stroke is in flight (dabs not yet committed). */
+  get isLiveStroke(): boolean {
+    return this.drawing;
+  }
+
+  dispose(): void {
+    this.strokeSeq++;
+    this.drawing = false;
+    this.onChange = null;
+    this.layers.clear();
+    this.order = [];
+    this.undoStack = [];
+    this.redoStack = [];
+    this.undoBytes = 0;
+    this.selection = null;
+    this.marquee = null;
+    this.float = null;
+    this.gesture = null;
+  }
+
   /** Load saved layers; usable afterwards even when some layers corrupt. */
   async load(
     layers: {
