@@ -17,7 +17,8 @@ Muse Voice, SAM 3.1) plus open-weight Muse models.
 ![Komaverse demo reel](docs/assets/readme/demo.gif)
 
 *Above: the real app — landing, home, scan, draw, render, media, and the AI
-dock. Full clip: [demo.mp4](docs/assets/readme/demo.mp4) (13s, 720p).*
+dock. Full clip: [demo.mp4](docs/assets/readme/demo.mp4) (13s, 720p).
+Hackathon walkthrough (3 min): [youtube.com/watch?v=npx_7S3tkvU](https://youtu.be/npx_7S3tkvU).*
 
 ## See it
 
@@ -76,6 +77,16 @@ no sign-up needed. Paste provider keys in the AI widget's **Brain** panel
 (Meta, OpenRouter, Baseten, ElevenLabs) or via env; see
 [backend/.env.example](backend/.env.example).
 
+## Data locations
+
+Local dev writes next to the checkout: `./komaverse.db` (SQLite) and
+`./media/` (uploads, takes, renders). The Dockerfile and
+[docker-compose.yml](docker-compose.yml) override both onto the persistent
+volume — `sqlite:////data/komaverse.db` and `/data/media` — so a rebuild
+never wipes the library. If you run the container without the volume (or
+without those env vars), the DB lives on the ephemeral layer: back up
+`/data` and keep the two vars in sync.
+
 ## AI models
 
 | Family | Default | Options include |
@@ -89,11 +100,21 @@ no sign-up needed. Paste provider keys in the AI widget's **Brain** panel
 Video is silent by design (4s default, provider cheapest); voice, music, and SFX
 are separate lanes you control.
 
+## Measured, not claimed
+
+- Detection accuracy: heuristic panel detector scores **F1 0.933** on
+  synthetic pages (IoU ≥ 0.5) — run `python ../eval/detect_f1.py` from `backend/`.
+- Export latency: a 1-scene project renders in **~0.2 s** (160×128 @ 5 fps) —
+  run `python ../eval/export_latency.py` from `backend/`.
+- Baselines live in [benchmarks/](benchmarks/README.md); CI enforces both
+  floors on every push. Details: [eval/README.md](eval/README.md).
+
 ## Docs
 
 - [docs/DEMO_SCRIPT.md](docs/DEMO_SCRIPT.md) — 3-minute demo video script (chill YouTuber vibe approved)
 - [docs/DECISIONS.md](docs/DECISIONS.md) — architecture decision records (ADR-1…ADR-60)
 - [docs/SPEC.md](docs/SPEC.md), [docs/BRAND.md](docs/BRAND.md), [docs/COMPETITIVE.md](docs/COMPETITIVE.md), [docs/ROADMAP.md](docs/ROADMAP.md), [docs/OBSERVABILITY.md](docs/OBSERVABILITY.md)
+- [docs/HACKATHON_SELF_AUDIT.md](docs/HACKATHON_SELF_AUDIT.md) — formula self-score with evidence links
 
 ## Capture pipeline (for contributors)
 

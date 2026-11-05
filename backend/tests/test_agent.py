@@ -10,7 +10,26 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 from starlette.datastructures import Headers
 
-from komaverse.agent import parse_motions, parse_seconds, run_agent_turn
+from komaverse.agent import (
+    _wants_paint_on_frame,
+    parse_motions,
+    parse_seconds,
+    run_agent_turn,
+)
+
+
+def test_paint_routing_draw_subject_on_frame():
+    """Draw/paint + frame-directed words paint; shapes stay shape ops;
+    generate verbs and bare subjects stay gallery generations."""
+    assert _wants_paint_on_frame("draw a samurai on the current frame")
+    assert _wants_paint_on_frame("paint this dragon")
+    assert _wants_paint_on_frame("sketch a village on frame one")
+    assert not _wants_paint_on_frame("draw a red circle on the frame")
+    assert not _wants_paint_on_frame("generate a samurai on the frame")
+    assert not _wants_paint_on_frame("draw a samurai")
+    assert not _wants_paint_on_frame("generate a video of a duel")
+    assert _wants_paint_on_frame("draw a samurai on frame")
+    assert not _wants_paint_on_frame("redraw @media:abc123 as night")
 from komaverse.api.agent import (
     AgentChatBody,
     agent_history,
@@ -1967,3 +1986,27 @@ def test_cloud_loop_step_cap_terminates(factory, user, monkeypatch):
     assert "ran out of steps" in events[-1]["reply"]
     assert agent_mod.CLOUD_MAX_STEPS > 6
     assert len(events[-1]["actions"]) == agent_mod.CLOUD_MAX_STEPS
+
+
+def test_agent_list_models_covers_all_kinds(factory, user):
+    from komaverse.agent import _parse_model_kind, tool_list_models
+
+    assert _parse_model_kind("which video model do you use") == "video"
+    assert _parse_model_kind("what image model is default") == "image"
+    assert _parse_model_kind("list models") is None
+    full = tool_list_models()
+    for token in ("muse-spark-1.3", "seedance-2.0", "flux-3-image-klein", "ElevenLabs", "heuristic"):
+        assert token in full, token
+    assert "hailuo-3-max" in tool_list_models("video")
+    assert "heuristic" not in tool_list_models("video")
+
+
+def test_agent_status_avoids_full_tree(factory, user, monkeypatch):
+    """tool_status answers from COUNTs: a poisoned get_project must not fire."""
+    from komaverse import agent as agent_mod
+
+    pid = seed_project(factory, user)
+    monkeypatch.setattr(agent_mod, "get_project", None, raising=False)
+    with factory() as s:
+        out = agent_mod.tool_status(s, user, pid)
+    assert "'Agent'" in out and "pages" in out

@@ -4,11 +4,11 @@ import {
   mediaUrl,
   type AudioTake,
   type Transcript,
-  type DrawFrame,
   type ExportReport,
   type Job,
   type Page,
-  type Project,
+  type ProjectSummary,
+  type ProjectView,
   type Scene,
   type Sequence,
   type StorageUsage,
@@ -103,7 +103,7 @@ function BlobImg({
     };
   }, [url]);
   return href ? (
-    <img src={href} alt={alt} loading={eager ? undefined : "lazy"} style={style} />
+    <img src={href} alt={alt} loading={eager ? undefined : "lazy"} decoding="async" style={style} />
   ) : (
     <div style={{ ...style, background: "var(--kv-inset)" }} />
   );
@@ -237,12 +237,12 @@ function MediaSection<T>({
 }
 
 export default function MediaPage() {
-  const [projects, setProjects] = useState<Project[]>([]);
-  const [project, setProject] = useState<Project | null>(null);
+  const [projects, setProjects] = useState<ProjectSummary[]>([]);
+  const [project, setProject] = useState<ProjectView | null>(null);
   const [takes, setTakes] = useState<AudioTake[]>([]);
   const [jobs, setJobs] = useState<Job[]>([]);
-  const [frames, setFrames] = useState<DrawFrame[]>([]);
   const [sequences, setSequences] = useState<Sequence[]>([]);
+  const frameCount = sequences.reduce((n, s) => n + s.frames.length, 0);
   const [usage, setUsage] = useState<StorageUsage | null>(null);
   const [report, setReport] = useState<ExportReport | null>(null);
   const [busy, setBusy] = useState("");
@@ -252,6 +252,7 @@ export default function MediaPage() {
   // already in memory and small.
   const [query, setQuery] = useState("");
   const [genStatus, setGenStatus] = useState<"all" | "done" | "active">("all");
+  const [renderStatus, setRenderStatus] = useState<"all" | "done" | "active" | "failed">("all");
   const [takeSort, setTakeSort] = useState<"new" | "old" | "name">("new");
   const [transcripts, setTranscripts] = useState<Record<string, Transcript>>({});
   const [transcribing, setTranscribing] = useState<string | null>(null);
@@ -308,26 +309,27 @@ export default function MediaPage() {
     const ps = await api.listProjects();
     setProjects(ps);
     const chosen = ps.find((p) => p.id === id) ?? ps[0] ?? null;
-    setProject(chosen);
     setCurrentProject(chosen?.id ?? null);
     if (!chosen) {
+      setProject(null);
       setTakes([]);
       setJobs([]);
-      setFrames([]);
       setSequences([]);
       setUsage(null);
       return;
     }
-    const [tk, allJobs, fr, sq, st] = await Promise.all([
+    const [pages, tk, allJobs, sq, st] = await Promise.all([
+      api.getProjectPages(chosen.id),
       api.listTakes(chosen.id),
       api.listJobs(),
-      api.listFrames(chosen.id).catch(() => [] as DrawFrame[]),
       api.listSequences(chosen.id).catch(() => [] as Sequence[]),
       api.projectStorage(chosen.id),
     ]);
+    setProject({ ...chosen, pages });
     setTakes(tk);
     setJobs(allJobs.filter((j) => j.project_id === chosen.id));
-    setFrames(fr);
+    // Frame counts come from sequence metadata (no pixels): the library
+    // never paints, so the full-pixel listFrames fetch is pure weight.
     setSequences(sq);
     setUsage(st);
   }, []);
@@ -339,12 +341,17 @@ export default function MediaPage() {
       .finally(() => setBusy(""));
   }, [refresh]);
 
-  // Agent uploads and generations refresh the library live.
+  // Agent uploads and generations refresh the library live. Scoped to the
+  // open project id so the listeners subscribe once per project instead
+  // of on every render, and failures surface instead of vanishing.
+  const mediaProjectId = project?.id ?? null;
   useEffect(() => {
     const onAgent = (e: Event) => {
       const pid = (e as CustomEvent).detail?.projectId as string | null | undefined;
-      if (pid && project && pid !== project.id) return;
-      void refresh(pid ?? getCurrentProject()).catch(() => {});
+      if (pid && mediaProjectId && pid !== mediaProjectId) return;
+      refresh(pid ?? getCurrentProject()).catch((err) =>
+        setNotice(`Refresh failed: ${(err as Error).message}`),
+      );
     };
     window.addEventListener("komaverse:agent-job-done", onAgent);
     window.addEventListener("komaverse:agent-timeline-changed", onAgent);
@@ -352,9 +359,13 @@ export default function MediaPage() {
       window.removeEventListener("komaverse:agent-job-done", onAgent);
       window.removeEventListener("komaverse:agent-timeline-changed", onAgent);
     };
-  });
+    // refresh is intentionally unlisted: resubscribing on every render is
+    // the bug being fixed.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mediaProjectId]);
 
   const doDeletePage = async (page: Page, index: number) => {
+    if (busy) return;
     if (
       !window.confirm(
         `Delete page ${index + 1} (${page.panels.length} panels)? The scan file is removed too. This can't be undone.`,
@@ -374,6 +385,7 @@ export default function MediaPage() {
   };
 
   const doDeleteTake = async (take: AudioTake) => {
+    if (busy) return;
     if (!window.confirm(`Delete take "${take.name}"? The recording is removed too.`))
       return;
     setBusy("Deleting take…");
@@ -381,6 +393,21 @@ export default function MediaPage() {
       await api.deleteTake(take.id);
       await refresh(project?.id ?? null);
       setNotice(`Deleted take "${take.name}".`);
+    } catch (e) {
+      setNotice(`Delete failed: ${(e as Error).message}`);
+    } finally {
+      setBusy("");
+    }
+  };
+
+  const doDeleteRender = async (job: Job) => {
+    if (busy) return;
+    if (!window.confirm(`Delete render ${job.id}? The MP4 file is removed too.`)) return;
+    setBusy("Deleting render…");
+    try {
+      await api.deleteJob(job.id);
+      await refresh(project?.id ?? null);
+      setNotice(`Deleted render ${job.id}.`);
     } catch (e) {
       setNotice(`Delete failed: ${(e as Error).message}`);
     } finally {
@@ -413,11 +440,15 @@ export default function MediaPage() {
   };
 
   const doNewSequence = async () => {
-    if (!project) return;
+    if (!project || busy) return;
     setBusy("Creating sequence…");
     try {
       const seq = await api.createSequence(project.id, `Sequence ${sequences.length + 1}`);
       await refresh(project.id);
+      // Reveal the new row: expand the section and show all so the
+      // created sequence is visible without hunting for it.
+      setCollapsed((prev) => ({ ...prev, frames: false }));
+      setShowAll((prev) => ({ ...prev, frames: true }));
       setNotice(`Created "${seq.name}" — open it in Draw.`);
     } catch (e) {
       setNotice(`New sequence failed: ${(e as Error).message}`);
@@ -427,7 +458,7 @@ export default function MediaPage() {
   };
 
   const doDeleteSequence = async (seq: Sequence) => {
-    if (!project) return;
+    if (!project || busy) return;
     if (
       !window.confirm(
         `Delete sequence "${seq.name}" with its ${seq.frames.length} frame(s)? This can't be undone.`,
@@ -545,7 +576,8 @@ export default function MediaPage() {
   const frameGen = async (job: Job) => {
     if (!project) throw new Error("no project");
     const f = await api.frameFromMedia(project.id, `@gen:${job.id}`);
-    setFrames(await api.listFrames(project.id));
+    // Metadata refresh only: counts (not pixels) are all this tab shows.
+    setSequences(await api.listSequences(project.id));
     return f;
   };
 
@@ -671,7 +703,7 @@ export default function MediaPage() {
         return;
       }
       const f = await api.frameFromMedia(project.id, send.source, undefined, target.id);
-      setFrames(await api.listFrames(project.id));
+      setSequences(await api.listSequences(project.id));
       setCurrentSequence(project.id, target.id);
       if (send.then === "open") {
         setDrawFrame(project.id, f.id);
@@ -808,6 +840,14 @@ export default function MediaPage() {
     }
   };
   const exports = jobs.filter((j) => j.kind === "export");
+  const rendersShown = exports.filter(
+    (j) =>
+      (renderStatus === "all" ||
+        (renderStatus === "active"
+          ? j.status === "queued" || j.status === "running"
+          : j.status === renderStatus)) &&
+      matches(j.id, j.status, j.prompt),
+  );
   const quotaPct =
     usage && usage.quota_bytes > 0 ? (usage.bytes_used / usage.quota_bytes) * 100 : 0;
   const tone = /fail|offline/i.test(notice) ? "warn" : "info";
@@ -866,6 +906,12 @@ export default function MediaPage() {
         {(["all", "done", "active"] as const).map((s) => (
           <Btn key={s} small active={genStatus === s} onClick={() => setGenStatus(s)}>
             {s === "all" ? "All" : s === "active" ? "Running" : "Done"}
+          </Btn>
+        ))}
+        <span style={{ fontSize: 12, color: "var(--kv-muted)", marginLeft: 8 }}>Renders:</span>
+        {(["all", "done", "active", "failed"] as const).map((s) => (
+          <Btn key={s} small active={renderStatus === s} onClick={() => setRenderStatus(s)}>
+            {s === "all" ? "All" : s === "active" ? "Running" : s === "done" ? "Done" : "Failed"}
           </Btn>
         ))}
         <span style={{ fontSize: 12, color: "var(--kv-muted)", marginLeft: 8 }}>Takes:</span>
@@ -1234,6 +1280,7 @@ export default function MediaPage() {
                           src={mediaUrl(j.result_url)}
                           alt={j.prompt || "AI generation"}
                           loading="lazy"
+                          decoding="async"
                           style={{ width: "100%", aspectRatio: "1 / 1", objectFit: "cover", display: "block" }}
                         />
                       </button>
@@ -1440,16 +1487,16 @@ export default function MediaPage() {
 
           <MediaSection
             title="Renders"
-            items={exports}
+            items={rendersShown}
             total={exports.length}
             cap={RENDER_CAP}
             collapsed={collapsed.renders}
             showAll={showAll.renders}
-            searching={q !== ""}
+            searching={q !== "" || renderStatus !== "all"}
             onToggleCollapse={() => toggleCollapsed("renders")}
             onToggleShowAll={() => toggleShowAll("renders")}
             emptyAll={<EmptyState title="No renders" hint="Export the timeline from the Render tab." />}
-            emptyFiltered={<EmptyState title="No matches" hint="Nothing matches the current search." />}
+            emptyFiltered={<EmptyState title="No matches" hint="Nothing matches the current search or filter." />}
           >
             {(list) => (
               <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
@@ -1473,6 +1520,15 @@ export default function MediaPage() {
                         </Btn>
                       </>
                     )}
+                    <IconBtn
+                      danger
+                      disabled={!!busy}
+                      label={`Delete render ${j.id}`}
+                      onClick={() => void doDeleteRender(j)}
+                      title="Delete this render"
+                    >
+                      ×
+                    </IconBtn>
                   </div>
                 ))}
               </div>
@@ -1493,7 +1549,7 @@ export default function MediaPage() {
               `${project.pages.length} pages`,
               `${takes.length} takes`,
               `${liveJobs.length} generations`,
-              `${frames.length} frames`,
+              `${frameCount} frames`,
               `${exports.length} renders`,
               usage ? `${fmtBytes(usage.bytes_used)} stored` : "",
             ]}

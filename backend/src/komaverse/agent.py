@@ -25,7 +25,7 @@ import httpx
 from fastapi import HTTPException
 from html.parser import HTMLParser
 from PIL import Image, ImageDraw
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from komaverse import storage
@@ -87,26 +87,54 @@ from komaverse.api.scans import (
     ProjectCreate,
     create_project,
     detect_panels,
-    get_project,
     list_projects,
 )
 from komaverse.api.subtitles import save_subtitles_track
 from komaverse.api.usage import record_usage
+from komaverse.auth import own_project
 from komaverse.config import settings
 from komaverse.studio_settings import provider_for
 from komaverse.subtitles import SubSegment, segments_to_srt
 from komaverse.db_models import (
     AudioTakeRow,
     ChatTurnRow,
+    ClipRow,
     LayerRow,
     ExportReportRow,
     FrameRow,
     JobRow,
     PageRow,
     PanelRow,
+    SceneRow,
     SequenceRow,
     UserRow,
 )
+
+
+def _panel_count(session: Session, project_id: str) -> int:
+    """Panels in a project as one COUNT — no tree load on the hot path."""
+    return (
+        session.execute(
+            select(func.count())
+            .select_from(PanelRow)
+            .join(PageRow, PanelRow.page_id == PageRow.id)
+            .where(PageRow.project_id == project_id)
+        ).scalar()
+        or 0
+    )
+
+
+def _clip_count(session: Session, project_id: str) -> int:
+    """Clips in a project as one COUNT — no tree load on the hot path."""
+    return (
+        session.execute(
+            select(func.count())
+            .select_from(ClipRow)
+            .join(SceneRow, ClipRow.scene_id == SceneRow.id)
+            .where(SceneRow.project_id == project_id)
+        ).scalar()
+        or 0
+    )
 
 
 def _fmt_when(dt) -> str:
@@ -219,7 +247,7 @@ def resolve_refs(
 ) -> str:
     """Turn @-mentions into ownership-scoped context lines.
 
-    Every id is resolved against the caller's own projects (get_project
+    Every id is resolved against the caller's own projects (own_project
     raises 404 unless owned); unknown or foreign ids are named as missing,
     never leaked.
     """
@@ -234,7 +262,7 @@ def resolve_refs(
                 row = session.get(FrameRow, rid)
                 if row is None:
                     raise _Missing()
-                get_project(row.project_id, session, user)
+                own_project(session, user, row.project_id)
                 layers = ", ".join(l.name for l in row.layers[:6]) or "no layers"
                 lines.append(
                     f"@frame:{rid} = Frame '{row.name or 'Untitled'}' "
@@ -247,7 +275,7 @@ def resolve_refs(
                 page = session.get(PageRow, row.page_id)
                 if page is None:
                     raise _Missing()
-                get_project(page.project_id, session, user)
+                own_project(session, user, page.project_id)
                 pname = page.name or f"PG {page.index + 1}"
                 rname = row.name or f"Panel {row.reading_order + 1}"
                 lines.append(
@@ -259,7 +287,7 @@ def resolve_refs(
                 row = session.get(AudioTakeRow, rid)
                 if row is None:
                     raise _Missing()
-                get_project(row.project_id, session, user)
+                own_project(session, user, row.project_id)
                 lines.append(
                     f"@take:{rid} = Voice take '{row.name}' "
                     f"({row.duration_sec:.1f}s, {row.mime or 'audio'})"
@@ -268,7 +296,7 @@ def resolve_refs(
                 row = session.get(JobRow, rid)
                 if row is None or row.kind not in ("image", "video"):
                     raise _Missing()
-                get_project(row.project_id, session, user) if row.project_id else None
+                own_project(session, user, row.project_id) if row.project_id else None
                 prompt = (row.prompt or "")[:200]
                 lock = ", ".join(
                     f"{label}: {value}"
@@ -290,7 +318,7 @@ def resolve_refs(
                 row = session.get(SequenceRow, rid)
                 if row is None:
                     raise _Missing()
-                get_project(row.project_id, session, user)
+                own_project(session, user, row.project_id)
                 frames = [f for f in _project_frames(session, user, row.project_id) if f.sequence_id == row.id]
                 layers = sum(len(f.layers) for f in frames)
                 lines.append(
@@ -301,7 +329,7 @@ def resolve_refs(
                 row = session.get(PageRow, rid)
                 if row is None:
                     raise _Missing()
-                get_project(row.project_id, session, user)
+                own_project(session, user, row.project_id)
                 mname = row.name or f"Scan page {row.index + 1}"
                 lines.append(
                     f"@media:{rid} = {mname} "
@@ -660,12 +688,19 @@ def _composition_hint(text: str) -> str:
 
 
 def tool_status(session: Session, user: UserRow, project_id: str) -> str:
-    p = get_project(project_id, session, user)
-    panels = sum(len(page.panels) for page in p.pages)
-    clips = sum(len(s.clips) for s in p.scenes)
+    proj = own_project(session, user, project_id)
+    pages = session.execute(
+        select(func.count()).select_from(PageRow).where(PageRow.project_id == project_id)
+    ).scalar() or 0
+    scenes = session.execute(
+        select(func.count()).select_from(SceneRow).where(SceneRow.project_id == project_id)
+    ).scalar() or 0
+    frames = session.execute(
+        select(func.count()).select_from(FrameRow).where(FrameRow.project_id == project_id)
+    ).scalar() or 0
     return (
-        f"'{p.name}': {len(p.pages)} pages, {panels} panels, "
-        f"{clips} clips in {len(p.scenes)} scenes, {len(p.frames)} frames."
+        f"'{proj.name}': {pages} pages, {_panel_count(session, project_id)} panels, "
+        f"{_clip_count(session, project_id)} clips in {scenes} scenes, {frames} frames."
     )
 
 
@@ -676,6 +711,88 @@ def tool_list_skills():
         return "No craft skills installed."
     lines = ["- " + s["name"] + ": " + s["description"] for s in found]
     return "Studio craft skills: " + "; ".join(lines)
+
+
+def _parse_model_kind(text: str) -> str | None:
+    """Kind filter for list_models from plain words (None = everything)."""
+    t = (text or "").lower()
+    if "video" in t:
+        return "video"
+    if "image" in t or "picture" in t or "flux" in t or "qwen" in t:
+        return "image"
+    if "voice" in t or "speech" in t or "tts" in t or "transcri" in t:
+        return "voice"
+    if "vision" in t or "see" in t or "look" in t:
+        return "vision"
+    if "chat" in t or "brain" in t or "llm" in t:
+        return "chat"
+    if "detect" in t or "panel" in t or "sam" in t or "yolo" in t:
+        return "detect"
+    return None
+
+
+def tool_list_models(kind: str | None = None) -> str:
+    """Curated model catalog: what each kind runs on, defaults, and params.
+
+    Static text from the provider catalogs (no network, no key needed) so
+    the model answers "which model" questions without a billed round-trip.
+    Unlisted ids fail loudly at the provider — never guess new ones.
+    """
+    blocks = {
+        "chat": (
+            "Chat brain — default meta muse-spark-1.3 (contributor variant for "
+            "vision+tools). OpenRouter: openai/gpt-4o-mini (cheap default), "
+            "google/gemini-2.5-flash (popular), gemini-2.5-flash-lite (cheap), "
+            "anthropic/claude-haiku-4.5 (popular), meta-llama/llama-4-maverick "
+            "(cheap), deepseek/deepseek-chat-v3.1 (cheap). Baseten open-weights: "
+            "meta-models/muse-spark-open-1026. Tool-calling brain: cloud loop, "
+            "demo brain when no key."
+        ),
+        "vision": (
+            "Vision (read page, look_at) — meta falls back to the chat model "
+            "(spark pair covers it). OpenRouter vision: gemini-2.5-flash "
+            "(default), flash-lite, claude-haiku-4.5. Multimodal when keyed, "
+            "else the chat fallback."
+        ),
+        "image": (
+            "Image — default is the provider cheapest (today "
+            "black-forest-labs/flux-3-image-klein). Catalog: qwen/"
+            "qwen-image-2.1-turbo (cheap), meta muse-image-1.0. Params: "
+            "width/height, seed (None = random, stored on the job), "
+            "negative_prompt, style/genre presets, enhance (LLM rewrite, "
+            "fail-soft)."
+        ),
+        "video": (
+            "Video — default bytedance/seedance-2.0 (cheap, silent). Catalog: "
+            "seedance-2.0-mini/fast (fast), alibaba/wan-2.6 (cheap), wan-3.0-"
+            "prime, google/veo-3.1, minimax/hailuo-3-max, heygen/heygen-video-1 "
+            "(new). Silent by design, ~4s default; sound = voiceover/timeline "
+            "lanes. Params: seconds (int; live caps validated, errors name the "
+            "supported values), size WxH or provider default, first/last frame "
+            "roles. hailuo-3-max takes frames, not style refs."
+        ),
+        "voice": (
+            "Voice — ElevenLabs instant voices (key), local XTTS clone, Meta "
+            "voice transcribe; free local Kokoro catalog. Takes become cues on "
+            "the timeline; subtitles are a separate track (libass burn-in)."
+        ),
+        "detect": (
+            "Detectors — heuristic (free, always available), yolo-leoxs22 local "
+            "weights (auto-download once, best panels), sam (SAM 3.1 vision), "
+            "meta/openrouter/cloud vision detectors (keyed). Failures fall back "
+            "to heuristic."
+        ),
+    }
+    try:
+        now = (
+            f"Now: chat={provider_for('chat')}, vision={provider_for('vision')}, "
+            f"image={provider_for('image')}, video={provider_for('video')}."
+        )
+    except Exception:
+        now = "Now: providers unset (demo brain)."
+    if kind in blocks:
+        return blocks[kind] + " " + now
+    return "Models — " + " ".join(f"[{k}] {v}" for k, v in blocks.items()) + " " + now
 
 
 _skills_index_cache: dict = {}
@@ -1361,15 +1478,24 @@ def tool_detect_all(
         detector = "yolo-leoxs22"
     if direction not in ("rtl", "ltr"):
         direction = "rtl"
-    p = get_project(project_id, session, user)
-    if not p.pages:
+    own_project(session, user, project_id)  # 404 unless owned; pages below are scoped.
+    page_ids = (
+        session.execute(
+            select(PageRow.id)
+            .where(PageRow.project_id == project_id)
+            .order_by(PageRow.index)
+        )
+        .scalars()
+        .all()
+    )
+    if not page_ids:
         return "No pages to detect — upload a scan first."
     total = 0
     used = detector
-    for page in p.pages:
+    for pid in page_ids:
         # Explicit user ask → replace existing panels without the 409 guard.
         res = detect_panels(
-            page.id,
+            pid,
             DetectRequest(detector=detector, direction=direction, confirm=True),
             session,
             user,
@@ -1377,19 +1503,40 @@ def tool_detect_all(
         used = res.detector_used
         total += len(res.panels)
     head = (
-        f"Detected {total} panels across {len(p.pages)} pages "
+        f"Detected {total} panels across {len(page_ids)} pages "
         f"({used}, {direction}, free)."
         if used == detector
-        else f"Detected {total} panels across {len(p.pages)} pages "
+        else f"Detected {total} panels across {len(page_ids)} pages "
         f"({detector} unavailable, fell back to {used}, {direction}, free)."
     )
     # The panel roster rides the reply: later turns reference detected
     # panels by @panel: id from context alone — counts never suffice.
     session.expire_all()
-    p = get_project(project_id, session, user)
+    own_project(session, user, project_id)  # 404 unless owned; rows below are scoped.
+    pages = (
+        session.execute(
+            select(PageRow).where(PageRow.project_id == project_id).order_by(PageRow.index)
+        )
+        .scalars()
+        .all()
+    )
+    panels = (
+        session.execute(
+            select(PanelRow)
+            .where(PanelRow.page_id.in_([pg.id for pg in pages]))
+            .order_by(PanelRow.reading_order)
+        )
+        .scalars()
+        .all()
+        if pages
+        else []
+    )
+    by_page: dict[str, list] = {pg.id: [] for pg in pages}
+    for pn in panels:
+        by_page.setdefault(pn.page_id, []).append(pn)
     lines = [head]
-    for page in sorted(p.pages, key=lambda pg: pg.index):
-        ordered = sorted(page.panels, key=lambda pn: pn.reading_order)
+    for page in pages:
+        ordered = by_page.get(page.id, [])
         bits = [
             f'@panel:{pn.id} "{(pn.name or f"Panel {pn.reading_order + 1}")[:24]}"'
             for pn in ordered[:8]
@@ -1425,18 +1572,38 @@ def auto_direct_core(
     for motion in motions:
         if motion not in MOTIONS:
             raise HTTPException(400, f"unknown motion: {motion}")
-    p = get_project(project_id, session, user)
+    own_project(session, user, project_id)  # 404 unless owned; rows below are scoped.
     if page_id is not None:
-        scoped = next((pg for pg in p.pages if pg.id == page_id), None)
+        scoped = session.execute(
+            select(PageRow).where(PageRow.id == page_id, PageRow.project_id == project_id)
+        ).scalar_one_or_none()
         if scoped is None:
             raise HTTPException(404, "page not found")
-        pages = [scoped]
+        page_rows = [scoped]
     else:
-        pages = sorted(p.pages, key=lambda pg: pg.index)
-    panels: list[tuple[int, int, object]] = []
-    for page in pages:
-        for panel in sorted(page.panels, key=lambda pn: pn.reading_order):
-            panels.append((page.index, panel.reading_order, panel))
+        page_rows = (
+            session.execute(
+                select(PageRow).where(PageRow.project_id == project_id).order_by(PageRow.index)
+            )
+            .scalars()
+            .all()
+        )
+    index_of = {pg.id: pg.index for pg in page_rows}
+    panel_rows = (
+        session.execute(
+            select(PanelRow)
+            .where(PanelRow.page_id.in_([pg.id for pg in page_rows]))
+            .order_by(PanelRow.reading_order)
+        )
+        .scalars()
+        .all()
+        if page_rows
+        else []
+    )
+    panels: list[tuple[int, int, object]] = [
+        (index_of[pn.page_id], pn.reading_order, pn) for pn in panel_rows
+    ]
+    panels.sort(key=lambda t: (t[0], t[1]))
     if not panels:
         raise HTTPException(400, "no panels to direct — detect or upload first")
     scenes = list_scenes(project_id, session, user)
@@ -1499,7 +1666,7 @@ def tool_export(
             "export rate limited (5/min) — try again in a few seconds",
             headers={"Retry-After": str(int(retry) + 1)},
         )
-    p = get_project(project_id, session, user)
+    proj = own_project(session, user, project_id)  # 404 unless owned; rows below are scoped.
     if scene is not None:
         try:
             target = _resolve_scene(session, user, project_id, scene)
@@ -1510,15 +1677,14 @@ def tool_export(
             return detail
         scenes = [target]
     else:
-        scenes = [s for s in p.scenes if s.clips]
+        scenes = [s for s in list_scenes(project_id, session, user) if s.clips]
         if len(scenes) > 1:
             names = "; ".join(f"'{s.name}' [scene {s.id}]" for s in scenes)
             return f"Which timeline? {names} — say 'export the NAME timeline'."
     clips = sum(len(s.clips) for s in scenes)
     chained = ""
     if clips == 0:
-        panels = sum(len(page.panels) for page in p.pages)
-        if panels == 0:
+        if _panel_count(session, project_id) == 0:
             return "Nothing to export — upload and detect panels first."
         if scene is not None:
             return f"Timeline '{target.name}' has no clips yet — add clips first."
@@ -1530,16 +1696,16 @@ def tool_export(
         kind="export",
         prompt=json.dumps(
             {
-                "fps": p.fps,
-                "width": p.canvas_width,
-                "height": p.canvas_height,
+                "fps": proj.fps,
+                "width": proj.canvas_width,
+                "height": proj.canvas_height,
                 "include_audio": True,
                 "scene_id": scenes[0].id if len(scenes) == 1 else None,
             }
         ),
         provider="local",
-        width=p.canvas_width,
-        height=p.canvas_height,
+        width=proj.canvas_width,
+        height=proj.canvas_height,
     )
     session.add(job)
     session.commit()
@@ -2326,12 +2492,18 @@ def resolve_clip_source(text, session, user, project_id):
         return ("frame", fid)
     m = re.search(r"\b(?:page|pg)\s*(\d+)\b", text)
     if m:
-        p = get_project(project_id, session, user)
-        pages = sorted(p.pages, key=lambda pg: pg.index)
+        own_project(session, user, project_id)  # 404 unless owned; ids below are scoped.
+        pages = (
+            session.execute(
+                select(PageRow.id).where(PageRow.project_id == project_id).order_by(PageRow.index)
+            )
+            .scalars()
+            .all()
+        )
         i = int(m.group(1)) - 1
         if not 0 <= i < len(pages):
             return f"Page {m.group(1)} does not exist - this project has {len(pages)}."
-        return ("media", pages[i].id)
+        return ("media", pages[i])
     return "Say what to add - @frame:/@panel:/@gen:/@media:, 'page N', or 'create a frame and add it'."
 
 
@@ -2959,7 +3131,7 @@ def tool_frame_from_media(session, user, project_id, source, name=None, sequence
 
 def _project_frames(session, user, project_id):
     """Owned frames in flipbook order (ownership or 404)."""
-    get_project(project_id, session, user)
+    own_project(session, user, project_id)
     return (
         session.execute(
             select(FrameRow)
@@ -4379,8 +4551,10 @@ def demo_turn(
     elif "timeline" in text and any(k in text for k in ("new", "create", "duplicate", "copy", "delete", "remove", "rename", "list", "show", "switch", "open")) and not any(k in text for k in ("video", "take", "clip", "frame", "panel", "caption", "subtitle", "export")):
         reply = run("manage_timelines", _demo_timeline_turn, session, user, project_id, message)
     elif any(k in text for k in ("animate", "timeline", "direct", "clips", "cut")):
-        p = get_project(project_id, session, user)
-        if sum(len(page.panels) for page in p.pages) == 0 and p.pages:
+        has_pages = session.execute(
+            select(func.count()).select_from(PageRow).where(PageRow.project_id == project_id)
+        ).scalar() or 0
+        if _panel_count(session, project_id) == 0 and has_pages:
             run("detect_all", tool_detect_all, session, user, project_id)
             chained = "I detected panels first. "
         else:
@@ -4477,6 +4651,10 @@ def demo_turn(
             reply = run("read_skill", tool_read_skill, skill_name)
         else:
             reply = run("list_skills", tool_list_skills)
+    elif "model" in text and any(
+        k in text for k in ("list", "show", "what", "which", "available", "use", "using")
+    ):
+        reply = run("list_models", tool_list_models, _parse_model_kind(message))
     elif any(
         k in text for k in ("status", "summary", "what", "show", "list", "how many")
     ):
@@ -4554,7 +4732,8 @@ _SYSTEM = (
     "turns already read or saw — never re-read a skill or re-look at "
     "a ref already in context. "
     "Research online with web_search, then read hits with web_fetch; "
-    "list_tools shows every tool, list_skills shows every skill."
+    "list_tools shows every tool, list_skills shows every skill, "
+    "list_models names the model behind each capability."
 )
 
 _TOOLS_SCHEMA = [
@@ -4611,6 +4790,27 @@ _TOOLS_SCHEMA = [
                 "read_skill before anime-styled generation or direction."
             ),
             "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_models",
+            "description": (
+                "Name the AI models behind each studio capability (chat, "
+                "vision, image, video, voice, detectors) with defaults and "
+                "key params. Call when the user asks which model does what "
+                "or what settings a generation takes."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "kind": {
+                        "type": "string",
+                        "description": "One of chat, vision, image, video, voice, detect. Omit for all.",
+                    },
+                },
+            },
         },
     },
     {
@@ -5322,12 +5522,12 @@ def _cloud_brain() -> str:
 def _finish_turn(target, session, user, reply, actions, brain, cloud_error=None):
     """Adopt created projects and shape the turn dict (sync and stream share)."""
     target = _adopt_created_project(actions, session, user, target)
-    schema = get_project(target, session, user)
+    project_name = own_project(session, user, target).name
     if brain == "demo":
         return {
-            "reply": f"[{schema.name}] {reply}",
+            "reply": f"[{project_name}] {reply}",
             "project_id": target,
-            "project_name": schema.name,
+            "project_name": project_name,
             "actions": actions,
             "brain": brain,
             "cloud_error": cloud_error,
@@ -5335,7 +5535,7 @@ def _finish_turn(target, session, user, reply, actions, brain, cloud_error=None)
     return {
         "reply": reply,
         "project_id": target,
-        "project_name": schema.name,
+        "project_name": project_name,
         "actions": actions,
         "brain": brain,
     }
@@ -5645,6 +5845,8 @@ def _exec_cloud_tool(
             result = tool_cancel_job(session, user, str(args.get("job") or ""))
         elif name == "list_skills":
             result = tool_list_skills()
+        elif name == "list_models":
+            result = tool_list_models(str(args.get("kind") or "") or None)
         elif name == "read_skill":
             skill_key = (str(args.get("name") or ""), str(args.get("section") or ""))
             if skills_read is not None and skill_key in skills_read:
@@ -5817,7 +6019,7 @@ def _resolve_turn(message, project_id, session, user, current_frame_id, refs, hi
     """
     if project_id is not None:
         # Explicit target: ownership check first (404 unless owned).
-        schema = get_project(project_id, session, user)
+        project_name = own_project(session, user, project_id).name
         target = project_id
     else:
         projects = list_projects(session, user)
@@ -5831,7 +6033,7 @@ def _resolve_turn(message, project_id, session, user, current_frame_id, refs, hi
                 cname = parse_project_name(message)
                 if created:
                     try:
-                        cname = get_project(created, session, user).name
+                        cname = own_project(session, user, created).name
                     except HTTPException:
                         created = None
                 record_usage(session, user.id, "chat", "demo", (len(message) + len(summary)) // 4, project_id=created or "")
@@ -5872,7 +6074,7 @@ def _resolve_turn(message, project_id, session, user, current_frame_id, refs, hi
                 "actions": [],
                 "brain": "demo",
             }}
-        schema = get_project(target, session, user)
+        project_name = own_project(session, user, target).name
     open_frame: str | None = None
     current = None
     frame_named_id: str | None = None
@@ -5980,7 +6182,7 @@ def _resolve_turn(message, project_id, session, user, current_frame_id, refs, hi
                 "references), or name the frame, and I'll generate from that."
             ),
             "project_id": target,
-            "project_name": schema.name,
+            "project_name": project_name,
             "actions": [],
             "brain": "demo",
         }}
@@ -6080,7 +6282,7 @@ def _resolve_turn(message, project_id, session, user, current_frame_id, refs, hi
                 return {"early": {
                     "reply": f"{lead}{' and which '.join(missing)}? {tail}",
                     "project_id": target,
-                    "project_name": schema.name,
+                    "project_name": project_name,
                     "actions": [],
                     "brain": "demo",
                 }}
@@ -6228,7 +6430,7 @@ def _adopt_created_project(
         m = re.search(r"\[project ([A-Za-z0-9_-]+)\]", actions[0].get("summary", ""))
         if m:
             try:
-                get_project(m.group(1), session, user)
+                own_project(session, user, m.group(1))
                 return m.group(1)
             except HTTPException:
                 pass

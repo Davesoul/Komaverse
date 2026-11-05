@@ -1,0 +1,25 @@
+{
+  "date": "2026-11-05",
+  "machine": "local Windows dev box (same box that runs the 529-test suite)",
+  "note": "First recorded baseline. Floors, not records: detect F1 >= 0.5, export finishes <= 300 s.",
+  "detect_f1": {
+    "detector": "heuristic",
+    "iou_threshold": 0.5,
+    "precision": 0.875,
+    "recall": 1.0,
+    "f1": 0.933,
+    "seconds_total": 0.177,
+    "cases": [
+      { "case": "single", "want": 1, "got": 1, "matched": 1, "seconds": 0.047 },
+      { "case": "three", "want": 3, "got": 3, "matched": 3, "seconds": 0.037 },
+      { "case": "tall", "want": 3, "got": 3, "matched": 3, "seconds": 0.029 },
+      { "case": "blank", "want": 0, "got": 1, "matched": 0, "seconds": 0.033 }
+    ]
+  },
+  "export_latency": {
+    "status": "done",
+    "seconds": 0.18,
+    "bytes": 2290,
+    "timeline": "1 scene, 1 text clip (2.0 s), 160x128 @ 5 fps"
+  }
+}

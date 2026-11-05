@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { api, mediaUrl, type DrawFrame, type Page, type Project, type Scene, type Sequence } from "../api";
+import { api, mediaUrl, type DrawFrame, type Page, type ProjectSummary, type Scene, type Sequence, type SequenceFrame } from "../api";
 import {
   Btn,
   BusyDots,
@@ -259,7 +259,7 @@ function BrushSwatch({
 }
 
 export default function DrawPage() {
-  const [projects, setProjects] = useState<Project[]>([]);
+  const [projects, setProjects] = useState<ProjectSummary[]>([]);
   const [projectId, setProjectId] = useState("");
   const [frames, setFrames] = useState<DrawFrame[]>([]);
   const [sequences, setSequences] = useState<Sequence[]>([]);
@@ -267,6 +267,10 @@ export default function DrawPage() {
   const sequenceIdRef = useRef("");
   const [frameId, setFrameId] = useState("");
   const [framesReady, setFramesReady] = useState(false);
+  // Engine readiness: strokes before the async load() resolves are
+  // swallowed by the onPointerDown early-return, so the canvas shows a
+  // veil until the engine can actually paint.
+  const [engineReady, setEngineReady] = useState(false);
   const [layers, setLayers] = useState<EngineLayerInfo[]>([]);
   const [live, setLive] = useState<LiveSettings>(DEFAULT_LIVE);
   const [notice, setNotice] = useState("");
@@ -365,6 +369,55 @@ export default function DrawPage() {
   // resize refits only an untouched fit, never a deliberate zoom.
   const manualZoomRef = useRef(false);
   const stashRef = useRef(new Map<string, SerializedLayer[]>());
+  // Invariant: an id is in loadedFullRef ⟺ its entry in `frames` carries
+  // full layer pixels. The bootstrap stores pixel-free headers
+  // (SequenceFrame metadata); full pixels arrive on demand per opened
+  // frame, so painted projects no longer download every layer upfront.
+  const loadedFullRef = useRef<Set<string>>(new Set());
+  const headerOf = (f: DrawFrame): DrawFrame => ({ ...f, layers: [] });
+  const metaToHeader = (m: SequenceFrame, sequenceId: string): DrawFrame => ({
+    id: m.id,
+    name: m.name,
+    index: m.index,
+    width: m.width,
+    height: m.height,
+    layers: [],
+    sequence_id: sequenceId,
+  });
+  // Fetch full pixels for one frame unless this session already holds
+  // them (or an unsaved stash does). Merges into `frames` so the engine
+  // init below always finds real layers. Concurrent calls for the same id
+  // share one request — the onion effect and the switch prefetch ride the
+  // same promise instead of firing duplicate GETs.
+  const pendingFullRef = useRef(new Map<string, Promise<DrawFrame | null>>());
+  const fetchFullShared = (id: string): Promise<DrawFrame | null> => {
+    if (loadedFullRef.current.has(id) || stashRef.current.has(id)) {
+      return Promise.resolve(null);
+    }
+    const pending = pendingFullRef.current.get(id);
+    if (pending) return pending;
+    const run = (async (): Promise<DrawFrame | null> => {
+      try {
+        const full = await api.getFrame(id);
+        loadedFullRef.current.add(id);
+        setFrames((prev) => prev.map((f) => (f.id === id ? full : f)));
+        return full;
+      } finally {
+        pendingFullRef.current.delete(id);
+      }
+    })();
+    pendingFullRef.current.set(id, run);
+    return run;
+  };
+  const ensureFull = async (id: string, quiet = false): Promise<boolean> => {
+    if (loadedFullRef.current.has(id) || stashRef.current.has(id)) return true;
+    try {
+      return (await fetchFullShared(id)) !== null;
+    } catch (e) {
+      if (!quiet) setNotice(`Couldn't load frame: ${(e as Error).message}`);
+      return false;
+    }
+  };
   const saveTimerRef = useRef(0);
   const saveStateRef = useRef({ dirty: false, saving: false, queued: false });
   const panRef = useRef<{ x: number; y: number; px: number; py: number } | null>(null);
@@ -433,6 +486,7 @@ export default function DrawPage() {
     try {
       const res = await api.putFrame(id, { layers: engine.serialize() });
       stashRef.current.delete(id);
+      loadedFullRef.current.add(res.id);
       setFrames((prev) => prev.map((f) => (f.id === res.id ? res : f)));
       saveStateRef.current.dirty = false;
       setDirty(false);
@@ -479,8 +533,16 @@ export default function DrawPage() {
     if (!engine || !prev) return;
     if (saveTimerRef.current) window.clearTimeout(saveTimerRef.current);
     if (saveStateRef.current.saving) {
-      saveStateRef.current.queued = true;
-      return;
+      // Wait out the in-flight save instead of queuing: switching frames
+      // first would let the queued re-arm fire under the NEW frame id and
+      // persist the wrong frame. Cap the wait so a hung save can't wedge
+      // navigation; the in-flight save already carries the old pixels.
+      const t0 = Date.now();
+      while (saveStateRef.current.saving && Date.now() - t0 < 10000) {
+        await new Promise((r) => window.setTimeout(r, 50));
+      }
+      // Fall through: a successful in-flight save cleared dirty (nothing
+      // to do); a failed one left it set, so retry below before switching.
     }
     if (!saveStateRef.current.dirty) return;
     engine.commitFloat();
@@ -599,10 +661,9 @@ export default function DrawPage() {
   const loadDrawing = async () => {
     if (!projectId) return;
     try {
-      const [seqs, fs] = await Promise.all([
-        api.listSequences(projectId),
-        api.listFrames(projectId),
-      ]);
+      // Headers first: sequence metadata carries id/name/dims per frame
+      // without layer pixels, so the strip renders before any heavy fetch.
+      const seqs = await api.listSequences(projectId);
       setSequences(seqs);
       // Restore the last-open sequence when it still exists.
       const storedSeq = getCurrentSequence(projectId);
@@ -611,13 +672,22 @@ export default function DrawPage() {
       sequenceIdRef.current = sid;
       setSequenceIdState(sid);
       if (sid) setCurrentSequence(projectId, sid);
-      setFrames(fs);
+      const headers: DrawFrame[] = [];
+      for (const s of seqs) for (const m of s.frames) headers.push(metaToHeader(m, s.id));
+      // Preserve full pixels for frames this session already loaded
+      // (e.g. agent-triggered reloads must not blank the open canvas).
+      setFrames((prev) => {
+        const keep = new Map(
+          prev.filter((f) => loadedFullRef.current.has(f.id)).map((f) => [f.id, f]),
+        );
+        return headers.map((h) => keep.get(h.id) ?? h);
+      });
       setFramesReady(true);
       // Open the tab with a frame ready: restore the last-open frame when
       // it still exists in this sequence, otherwise open the first frame.
       if (!frameIdRef.current) {
         const first = seqs[0]?.id;
-        const inSeq = fs.filter(
+        const inSeq = headers.filter(
           (f) => f.sequence_id === sid || (f.sequence_id == null && sid === first),
         );
         const stored = getDrawFrame(projectId);
@@ -625,7 +695,7 @@ export default function DrawPage() {
           stored && inSeq.some((f) => f.id === stored) ? stored : inSeq[0]?.id;
         if (pick) {
           setDrawFrame(projectId, pick);
-          setFrameId(pick);
+          await openFrame(pick);
         }
       }
     } catch (e) {
@@ -670,6 +740,11 @@ export default function DrawPage() {
     // zoom instead of resizing the canvas under them.
     const firstOpen = !openedRef.current;
     openedRef.current = frameId;
+    // Drop the previous engine's pixels/undo stacks before allocating new
+    // ones; dispose also neutralizes a pending live-paint rAF.
+    engineRef.current?.dispose();
+    engineRef.current = null;
+    setEngineReady(false);
     const engine = new DrawEngine(
       canvas,
       target.width,
@@ -689,10 +764,32 @@ export default function DrawPage() {
         setLayers(engine.getLayers());
         setUndoDepth(0);
         setRedoDepth(0);
+        setEngineReady(true);
         if (firstOpen) window.setTimeout(() => fitZoom(), 60);
       });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [frameId, frames]);
+
+  // Prefetch strip neighbors while idle: the next/previous frame click
+  // then opens from cache instead of a network round trip. Failures stay
+  // silent — opening the frame retries loudly.
+  useEffect(() => {
+    if (!engineReady || !frameId) return;
+    const list = seqFrames;
+    const idx = list.findIndex((f) => f.id === frameId);
+    if (idx < 0) return;
+    const ids = [list[idx - 1]?.id, list[idx + 1]?.id].filter((x) => !!x) as string[];
+    let cancelled = false;
+    const t = window.setTimeout(() => {
+      for (const id of ids) {
+        if (!cancelled) void ensureFull(id, true);
+      }
+    }, 300);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(t);
+    };
+  }, [engineReady, frameId, seqFrames]);
 
   // Warn on close only when an autosave hasn't landed yet.
   useEffect(() => {
@@ -701,6 +798,26 @@ export default function DrawPage() {
     };
     window.addEventListener("beforeunload", onUnload);
     return () => window.removeEventListener("beforeunload", onUnload);
+  }, []);
+
+  // Best-effort persist on unmount (tab switch): switching tabs unmounts
+  // this page, which used to discard the in-memory stash silently. The
+  // cleanup can't await, so serialize synchronously and fire one
+  // fire-and-forget save; beforeunload still guards full page closes.
+  useEffect(() => () => {
+    const engine = engineRef.current;
+    const id = frameIdRef.current;
+    if (engine && id && saveStateRef.current.dirty) {
+      try {
+        engine.commitFloat();
+        const payload = engine.serialize();
+        api.putFrame(id, { layers: payload }).catch(() => {});
+      } catch {
+        // Serialization itself failed; nothing more to do on unmount.
+      }
+    }
+    engineRef.current?.dispose();
+    engineRef.current = null;
   }, []);
 
   // Ctrl+wheel zoom to cursor (native listener: React's wheel is passive).
@@ -997,14 +1114,22 @@ export default function DrawPage() {
     }
   };
 
+  // Generation guard: rapid strip/sequence clicks interleave
+  // flushCurrent + setFrameId, so an earlier click can land last.
+  const switchGenRef = useRef(0);
   const openFrame = async (id: string) => {
     stopPlayback();
     if (id === frameIdRef.current) return;
-    // Persist before the engine loads the new frame — the server copy
-    // must not lose strokes the autosave timer hadn't flushed yet.
-    await flushCurrent();
+    const gen = ++switchGenRef.current;
+    // Persist the old frame and fetch the new one concurrently: they touch
+    // different frames, so the round trips overlap instead of adding up.
+    // (The engine init below still waits for both before opening.)
+    const [, ok] = await Promise.all([flushCurrent(), ensureFull(id)]);
+    if (gen !== switchGenRef.current) return;
+    if (!ok) return;
     // Frames opened from another sequence (agent, Media) switch the
     // sequence instead of stranding the strip.
+    const prevId = frameIdRef.current;
     const target = frames.find((f) => f.id === id);
     if (target?.sequence_id && target.sequence_id !== sequenceIdRef.current) {
       sequenceIdRef.current = target.sequence_id;
@@ -1014,18 +1139,44 @@ export default function DrawPage() {
     setNotice("");
     setDrawFrame(projectId, id);
     setFrameId(id);
+    // Warm the onion window now, not 300ms later: these fetches race the
+    // engine init and share one request with the onion effect, so skins
+    // paint from cache instead of a post-switch round trip. Silent —
+    // the onion pass tolerates missing neighbors.
+    if (onion) {
+      const seqId = target?.sequence_id ?? sequenceIdRef.current;
+      const firstSeq = sequences[0]?.id;
+      const list = frames
+        .filter((f) => f.sequence_id === seqId || (f.sequence_id == null && seqId === firstSeq))
+        .sort((a, b) => a.index - b.index);
+      const at = list.findIndex((f) => f.id === id);
+      if (at >= 0) {
+        const ids: string[] = [];
+        for (let i = Math.max(0, at - onionPrevN); i < at; i++) ids.push(list[i].id);
+        for (let i = at + 1; i <= Math.min(list.length - 1, at + onionNextN); i++) ids.push(list[i].id);
+        for (const nid of ids) void fetchFullShared(nid).catch(() => {});
+      }
+    }
+    // Keep memory flat: the frame we leave behind drops back to a header.
+    if (prevId && prevId !== id) {
+      loadedFullRef.current.delete(prevId);
+      setFrames((p) => p.map((f) => (f.id === prevId ? headerOf(f) : f)));
+    }
   };
 
   const pickSequence = async (sid: string, openId?: string) => {
     stopPlayback();
+    const gen = ++switchGenRef.current;
     if (sid !== sequenceIdRef.current) await flushCurrent();
+    if (gen !== switchGenRef.current) return;
     sequenceIdRef.current = sid;
     setSequenceIdState(sid);
     if (projectId) setCurrentSequence(projectId, sid);
     setNotice("");
     if (openId !== undefined) {
-      setDrawFrame(projectId, openId);
-      setFrameId(openId);
+      // Funnel through openFrame so pixel fetching, generation guards,
+      // and memory-flat switching apply to programmatic opens too.
+      await openFrame(openId);
       return;
     }
     const first = sequences[0]?.id;
@@ -1035,15 +1186,23 @@ export default function DrawPage() {
     const stored = getDrawFrame(projectId);
     const pick =
       stored && list.some((f) => f.id === stored) ? stored : list[0]?.id ?? "";
-    setDrawFrame(projectId, pick || null);
-    setFrameId(pick);
+    // Same funnel as explicit opens: fetch pixels before the engine init
+    // reads the target's layers.
+    if (pick) {
+      await openFrame(pick);
+    } else {
+      setDrawFrame(projectId, null);
+      setFrameId("");
+    }
   };
 
   const newSequence = async () => {
     stopPlayback();
-    if (!projectId) return;
-    await flushCurrent();
+    if (!projectId || busy) return;
+    setBusy(true);
+    setNotice("Creating sequence…");
     try {
+      await flushCurrent();
       const seq = await api.createSequence(projectId, `Sequence ${sequences.length + 1}`);
       setSequences((prevSeqs) => [...prevSeqs, seq]);
       // Open the new sequence with a fresh first frame, like a new shot.
@@ -1053,30 +1212,44 @@ export default function DrawPage() {
         height: 540,
         sequence_id: seq.id,
       });
+      loadedFullRef.current.add(frame.id);
       setFrames((prev) => [...prev, frame]);
       await pickSequence(seq.id, frame.id);
       setNotice(`Switched to "${seq.name}".`);
     } catch (e) {
       setNotice(`New sequence failed: ${(e as Error).message}`);
+    } finally {
+      setBusy(false);
     }
   };
 
   const newFrame = async () => {
     stopPlayback();
-    if (!projectId) return;
-    await flushCurrent();
-    const sid = sequenceIdRef.current;
-    const frame = await api.createFrame(projectId, {
-      name: `Frame ${seqFrames.length + 1}`,
-      width: 960,
-      height: 540,
-      sequence_id: sid || undefined,
-    });
-    setFrames((prev) => [...prev, frame]);
-    setDrawFrame(projectId, frame.id);
-    setFrameId(frame.id);
-    // New frames land after the cursor, not the strip end.
-    await placeAfter(frame.id, frameIdRef.current, frame);
+    if (!projectId || busy) return;
+    setBusy(true);
+    setNotice("Creating frame…");
+    try {
+      await flushCurrent();
+      const sid = sequenceIdRef.current;
+      const frame = await api.createFrame(projectId, {
+        name: `Frame ${seqFrames.length + 1}`,
+        width: 960,
+        height: 540,
+        sequence_id: sid || undefined,
+      });
+      // Fresh frames have no pixels yet, so the empty layers ARE the
+      // full truth — no fetch needed when the engine opens them.
+      loadedFullRef.current.add(frame.id);
+      setFrames((prev) => [...prev, frame]);
+      setDrawFrame(projectId, frame.id);
+      setFrameId(frame.id);
+      // New frames land after the cursor, not the strip end.
+      await placeAfter(frame.id, frameIdRef.current, frame);
+    } catch (e) {
+      setNotice(`New frame failed: ${(e as Error).message}`);
+    } finally {
+      setBusy(false);
+    }
   };
 
   const [renamingFrame, setRenamingFrame] = useState<string | null>(null);
@@ -1103,17 +1276,21 @@ export default function DrawPage() {
     try {
       await api.deleteFrame(f.id);
       stashRef.current.delete(f.id);
-      const remaining = seqFrames.filter((x) => x.id !== f.id);
-      setFrames((prev) => prev.filter((x) => x.id !== f.id));
-      // Keep a frame open: fall back to the first remaining frame.
-      const next = remaining[0]?.id ?? "";
-      setDrawFrame(projectId, next || null);
-      setFrameId(next);
+      loadedFullRef.current.delete(f.id);
+      engineRef.current?.dispose();
       engineRef.current = null;
       openedRef.current = "";
       setLayers([]);
       setDirty(false);
       saveStateRef.current.dirty = false;
+      const remaining = seqFrames.filter((x) => x.id !== f.id);
+      setFrames((prev) => prev.filter((x) => x.id !== f.id));
+      // Keep a frame open: fall back to the first remaining frame,
+      // fetched on demand like any other switch.
+      const next = remaining[0]?.id ?? "";
+      setDrawFrame(projectId, next || null);
+      if (next) await openFrame(next);
+      else setFrameId("");
       setNotice("Frame deleted.");
     } catch (e) {
       const msg = (e as Error).message;
@@ -1177,11 +1354,17 @@ export default function DrawPage() {
 
   const duplicateFrame = async () => {
     stopPlayback();
-    const f = frames.find((x) => x.id === frameId);
-    if (!f) return;
-    await flushCurrent();
+    if (busy) return;
+    setBusy(true);
+    setNotice("Duplicating…");
     try {
+      const f = frames.find((x) => x.id === frameId);
+      if (!f) return;
+      await flushCurrent();
       const copy = await api.duplicateFrame(f.id);
+      // The duplicate arrives with full pixels — keep them and mark it
+      // so reopening it skips the refetch.
+      loadedFullRef.current.add(copy.id);
       setFrames((prev) => [...prev, copy]);
       setFrameId(copy.id);
       setNotice(`Duplicated as "${copy.name}".`);
@@ -1189,6 +1372,8 @@ export default function DrawPage() {
       await placeAfter(copy.id, f.id, copy);
     } catch (e) {
       setNotice(`Duplicate failed: ${(e as Error).message}`);
+    } finally {
+      setBusy(false);
     }
   };
 
@@ -1329,14 +1514,51 @@ export default function DrawPage() {
     }, 1000 / fpsRef.current);
   }, [stopPlayback]);
 
+  const startingRef = useRef(false);
   const startPlayback = async () => {
     const engine = engineRef.current;
-    if (!engine || playingRef.current || seqFrames.length === 0) return;
+    if (!engine || playingRef.current || startingRef.current || seqFrames.length === 0) return;
+    // Single-flight: a second click while rendering would double decode.
+    startingRef.current = true;
+    setNotice("Rendering preview…");
     // Land the current strokes first so this frame plays fresh too.
     const saved = await save(true);
     const list = saved ? seqFrames.map((f) => (f.id === saved.id ? saved : f)) : seqFrames;
-    if (list.length === 0) return;
+    if (list.length === 0) {
+      startingRef.current = false;
+      return;
+    }
     setFrames(list);
+    // Playback needs pixels for every frame, not just headers: fetch the
+    // missing ones up front instead of stalling mid-render. Unsaved
+    // stashes win over server pixels, mirroring send-to-Render.
+    try {
+      const fulls = await Promise.all(
+        list.map(async (f) => {
+          if (loadedFullRef.current.has(f.id)) return f;
+          const stashed = stashRef.current.get(f.id);
+          if (stashed) return { ...f, layers: stashed };
+          const full = await api.getFrame(f.id);
+          return full;
+        }),
+      );
+      for (const full of fulls) {
+        loadedFullRef.current.add(full.id);
+        stashRef.current.delete(full.id);
+      }
+      setFrames((prev) => {
+        const byId = new Map(fulls.map((f) => [f.id, f]));
+        return prev.map((f) => byId.get(f.id) ?? f);
+      });
+      for (let i = 0; i < list.length; i++) {
+        const full = fulls.find((x) => x.id === list[i].id);
+        if (full) list[i] = full;
+      }
+    } catch {
+      setNotice("Playback failed: couldn't load frame pixels.");
+      startingRef.current = false;
+      return;
+    }
     let rendered: HTMLCanvasElement[];
     try {
       rendered = await Promise.all(
@@ -1344,8 +1566,10 @@ export default function DrawPage() {
       );
     } catch {
       setNotice("Playback failed to render the frames.");
+      startingRef.current = false;
       return;
     }
+    startingRef.current = false;
     playBitmapsRef.current = rendered;
     playLabelsRef.current = list.map(
       (f, i) => `FR ${String(i + 1).padStart(2, "0")} ${f.name || "Untitled"}`,
@@ -1387,23 +1611,45 @@ export default function DrawPage() {
     const idx = seqFrames.findIndex((f) => f.id === frameIdRef.current);
     if (idx < 0) return;
     const gen = ++onionGenRef.current;
-    const renderable = (f: DrawFrame) =>
-      // Transparent skins: only strokes get tinted, no paper wash.
-      engine.renderStack(
-        stashRef.current.get(f.id) ?? f.layers ?? [],
-        f.width,
-        f.height,
-        false,
-      );
     void (async () => {
       try {
-        const [prev, next] = await Promise.all([
-          Promise.all(seqFrames.slice(Math.max(0, idx - onionPrevN), idx).map(renderable)),
-          Promise.all(seqFrames.slice(idx + 1, idx + 1 + onionNextN).map(renderable)),
-        ]);
+        const prevFrames = seqFrames.slice(Math.max(0, idx - onionPrevN), idx);
+        const nextFrames = seqFrames.slice(idx + 1, idx + 1 + onionNextN);
+        // Headers carry no pixels: fetch neighbors first, otherwise every
+        // skin renders blank. Unsaved stashes win over server pixels.
+        const missing = [...prevFrames, ...nextFrames].filter(
+          (f) => !loadedFullRef.current.has(f.id) && !stashRef.current.has(f.id),
+        );
+        const paint = async (get: (f: DrawFrame) => DrawFrame | undefined) => {
+          const layersOf = (f: DrawFrame) =>
+            get(f)?.layers ?? stashRef.current.get(f.id) ?? f.layers ?? [];
+          // Transparent skins: only strokes get tinted, no paper wash.
+          const [prev, next] = await Promise.all([
+            Promise.all(prevFrames.map((f) => engine.renderStack(layersOf(f), f.width, f.height, false))),
+            Promise.all(nextFrames.map((f) => engine.renderStack(layersOf(f), f.width, f.height, false))),
+          ]);
+          if (onionGenRef.current !== gen || playingRef.current) return false;
+          onionCacheRef.current = { prev, next };
+          engine.setOnionSkins(prev, next, onionOpacityRef.current / 100, true);
+          return true;
+        };
+        // Pass 1: paint whatever this session already holds, so a switch
+        // with warm neighbors shows skins with zero network wait.
+        if (!(await paint(() => undefined))) return;
+        if (missing.length === 0) return;
+        // Pass 2: fetch the rest through the shared request the switch
+        // prefetch already started — no duplicate GETs — then repaint.
+        // Per-neighbor settlement: one unreachable frame must not blank
+        // the rest of the skins.
+        const fetched = new Map<string, DrawFrame>();
+        const results = await Promise.allSettled(missing.map((f) => fetchFullShared(f.id)));
+        for (let i = 0; i < results.length; i++) {
+          const r = results[i];
+          if (r.status !== "fulfilled" || !r.value) continue;
+          fetched.set(missing[i].id, r.value);
+        }
         if (onionGenRef.current !== gen || playingRef.current) return;
-        onionCacheRef.current = { prev, next };
-        engine.setOnionSkins(prev, next, onionOpacityRef.current / 100, true);
+        await paint((f) => fetched.get(f.id));
       } catch {
         // A corrupt neighbor layer simply yields no skin for it.
       }
@@ -1493,12 +1739,12 @@ export default function DrawPage() {
       return;
     }
     api
-      .getProject(projectId)
-      .then((p) => {
-        setPlacePages(p.pages);
-        setPlacePageId(p.pages[0]?.id ?? "");
+      .getProjectPages(projectId)
+      .then((pages) => {
+        setPlacePages(pages);
+        setPlacePageId(pages[0]?.id ?? "");
       })
-      .catch(() => {});
+      .catch((e) => setNotice(`Couldn't load pages: ${(e as Error).message}`));
   }, [projectId]);
 
   const placeBlob = async (blob: Blob, label: string) => {
@@ -1549,6 +1795,8 @@ export default function DrawPage() {
               setProjectId(e.target.value);
               setCurrentProject(e.target.value || null);
               setFrameId("");
+              loadedFullRef.current.clear();
+              engineRef.current?.dispose();
               engineRef.current = null;
               openedRef.current = "";
             }}
@@ -2170,6 +2418,23 @@ export default function DrawPage() {
                     zIndex: 5,
                   }}
                 />
+                {!engineReady && frame && (
+                  <div
+                    role="status"
+                    style={{
+                      position: "absolute",
+                      inset: 0,
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "center",
+                      background: "rgba(0,0,0,0.45)",
+                      zIndex: 6,
+                      pointerEvents: "all",
+                    }}
+                  >
+                    <span style={{ fontSize: 13, color: "var(--kv-muted)" }}>Loading frame…</span>
+                  </div>
+                )}
                 <div
                   className="kv-paper"
                   style={{
@@ -2186,6 +2451,9 @@ export default function DrawPage() {
                 >
                 <canvas
                   ref={canvasRef}
+                  role="application"
+                  aria-label={`Drawing canvas, ${frame.name || "untitled frame"}. Use the toolbar to pick tools; keyboard shortcuts listed in the toolbar titles.`}
+                  tabIndex={0}
                   style={{
                     width: frame.width * zoom,
                     height: frame.height * zoom,
@@ -2260,7 +2528,8 @@ export default function DrawPage() {
                           void copyRef(`@frame:${f.id}`);
                         }}
                         onKeyDown={(e) => {
-                          if (e.key === "Enter") {
+                          if (e.key === "Enter" || e.key === " ") {
+                            e.preventDefault();
                             e.stopPropagation();
                             void copyRef(`@frame:${f.id}`);
                           }
@@ -2434,7 +2703,7 @@ export default function DrawPage() {
                 <IconBtn
                   onClick={() => {
                     if (playing) stopPlayback();
-                    else void startPlayback();
+                    else startPlayback().catch((e) => setNotice(`Playback failed: ${(e as Error).message}`));
                   }}
                   label={playing ? "Stop and return to the open frame" : "Play the animation on the canvas"}
                 >
@@ -2593,15 +2862,11 @@ export default function DrawPage() {
                         borderRadius: 10,
                         cursor: "grab",
                         background: selected ? "var(--kv-card)" : "transparent",
-                        border: selected
-                          ? "2px solid var(--kv-accent)"
-                          : "1px solid var(--kv-border)",
-                        borderLeft: hinted && !dropHint.after
-                          ? "3px solid var(--kv-accent)"
-                          : undefined,
-                        borderRight: hinted && dropHint.after
-                          ? "3px solid var(--kv-accent)"
-                          : undefined,
+                        borderStyle: "solid",
+                        borderColor: selected ? "var(--kv-accent)" : "var(--kv-border)",
+                        borderWidth: selected ? 2 : 1,
+                        borderLeftWidth: hinted && !dropHint.after ? 3 : undefined,
+                        borderRightWidth: hinted && dropHint.after ? 3 : undefined,
                         color: "inherit",
                         opacity: dragId === f.id ? 0.5 : 1,
                       }}
@@ -2638,7 +2903,8 @@ export default function DrawPage() {
                             void openDrawSend({ kind: "frame", id: f.id });
                           }}
                           onKeyDown={(e) => {
-                            if (e.key === "Enter") {
+                            if (e.key === "Enter" || e.key === " ") {
+                              e.preventDefault();
                               e.stopPropagation();
                               void openDrawSend({ kind: "frame", id: f.id });
                             }
@@ -2657,7 +2923,8 @@ export default function DrawPage() {
                             void copyRef(`@frame:${f.id}`);
                           }}
                           onKeyDown={(e) => {
-                            if (e.key === "Enter") {
+                            if (e.key === "Enter" || e.key === " ") {
+                              e.preventDefault();
                               e.stopPropagation();
                               void copyRef(`@frame:${f.id}`);
                             }

@@ -18,8 +18,17 @@ jobs:
         run: pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu torch
       - name: Install backend with test deps
         run: pip install --no-cache-dir "./backend[dev]"
+      - name: Lint (ruff, risk-fix scope)
+        run: ruff check src/komaverse/main.py src/komaverse/db.py src/komaverse/observability.py src/komaverse/security.py src/komaverse/api/scans.py src/komaverse/models.py src/komaverse/db_models.py tests/test_risk_fixes.py tests/test_error_handlers.py tests/test_security.py tests/test_observability.py tests/test_scans.py
+        working-directory: backend
+      - name: Typecheck (mypy, risk-fix scope)
+        run: mypy --follow-imports=silent src/komaverse/main.py src/komaverse/db.py src/komaverse/observability.py src/komaverse/security.py src/komaverse/models.py src/komaverse/db_models.py
+        working-directory: backend
       - name: Run backend tests
         run: PYTHONPATH=src python -m pytest tests -q -p no:cacheprovider
+        working-directory: backend
+      - name: Eval gates (detection F1 + export latency)
+        run: PYTHONPATH=src python ../eval/detect_f1.py && PYTHONPATH=src python ../eval/export_latency.py
         working-directory: backend
 
   frontend:
@@ -34,5 +43,7 @@ jobs:
         with:
           node-version: 22
       - run: npm install --no-audit --no-fund
-      - run: npx tsc --noEmit
+      - run: npm run typecheck
+      - run: npm run lint
+      - run: npm run test
       - run: npm run build
