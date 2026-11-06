@@ -178,3 +178,15 @@ Ceiling after 2–4: **9.2**. After 5: **9.5**.
   same marks; tool docs teach multi-stroke cel construction; demo
   shapes draw hand-inked (`brush.py`, `agent.py`, `tests/test_brushes.py`
   7 green; strengthened meta-fallback test to the real call path).
+- Draw/generate split + pro linework: draw/paint/sketch verbs never
+  generate — tool descriptions, system prompt, skill tagline, and demo
+  routing all send them to brush painting (unknown demo subjects get an
+  honest generate offer, never faked pixels); bare "draw me X" paints
+  the open frame; generations landing on frames are contain-fit
+  (letterboxed, new frames match art dims — never stretched); strokes
+  flow through pinned Chaikin smoothing; demo brain composes six
+  stroke subjects (cat/tree/house/flower/bird/fish: pencil
+  construction → g-pen linework → marker fills → hatch shade);
+  geometric outlines render as hand-inked perimeter strokes
+  (`draw_subjects.py`, `api/ai.py`, `tests/test_draw_split.py` 9 green;
+  full suite 581 green; live: "draw a cat" painted 2 layers, no job).

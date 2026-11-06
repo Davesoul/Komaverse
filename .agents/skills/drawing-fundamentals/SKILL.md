@@ -1,6 +1,6 @@
 ---
 name: drawing-fundamentals
-description: Draw with construction, clean line, and correct perspective. Use when giving drawing advice, fixing broken anatomy or wobbly perspective, choosing brushes and layer setups, or directing draw-frame work. Covers shape construction, line quality, 1/2/3-point perspective and foreshortening, anime proportions, screentone shading, and disciplined layer management.
+description: Draw with construction, clean line, and correct perspective. Use when giving drawing advice, fixing broken anatomy or wobbly perspective, choosing brushes and layer setups, or directing draw-frame brush work with manage_layers (draw verbs are brush strokes, never generation). Covers shape construction, line quality, 1/2/3-point perspective and foreshortening, anime proportions, screentone shading, and disciplined layer management.
 ---
 
 # Drawing Fundamentals for the Studio

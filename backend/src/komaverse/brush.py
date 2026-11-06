@@ -68,6 +68,28 @@ def _smoothstep(edge: float, x: float) -> float:
     return t * t * (3.0 - 2.0 * t)
 
 
+def _smooth_stroke(xy: list, ps: list) -> tuple[list, list]:
+    """Two pinned Chaikin passes: coarse agent waypoints become flowing
+    curves (the pen-plotter trick — smooth toolpaths from waypoints).
+
+    Endpoints stay exact; interior corners round. Two-point strokes are
+    untouched, so deliberate straight lines stay straight.
+    """
+    pts = [(float(x), float(y), float(p)) for (x, y), p in zip(xy, ps, strict=True)]
+    if len(pts) < 3:
+        return xy, ps
+    for _ in range(2):
+        out = [pts[0]]
+        for i in range(len(pts) - 1):
+            ax, ay, ap = pts[i]
+            bx, by, bp = pts[i + 1]
+            out.append((ax * 0.75 + bx * 0.25, ay * 0.75 + by * 0.25, ap * 0.75 + bp * 0.25))
+            out.append((ax * 0.25 + bx * 0.75, ay * 0.25 + by * 0.75, ap * 0.25 + bp * 0.75))
+        out.append(pts[-1])
+        pts = out
+    return [(x, y) for x, y, _ in pts], [p for _, _, p in pts]
+
+
 def _resample(points: list[tuple[float, float]], pressures: list[float], step: float,
               ) -> list[tuple[float, float, float, float]]:
     """Dense (x, y, pressure, arc-pos) walk so sparse agent polylines
@@ -347,6 +369,7 @@ def render_stroke_mask(
     opacity: float | None = None,
     pressures: list | None = None,
     seed: int = DAB_SEED,
+    smooth: bool = True,
 ) -> Image.Image:
     """White-on-black coverage for one brush stroke (L mode).
 
@@ -367,6 +390,8 @@ def render_stroke_mask(
         ps = [_clamp01(float(v)) for v in pressures]
     else:
         ps = [0.5] * len(xy)
+    if smooth and len(xy) >= 3:
+        xy, ps = _smooth_stroke(xy, ps)
     cover = Image.new("L", (width, height), 0)
     if alpha <= 0:
         return cover

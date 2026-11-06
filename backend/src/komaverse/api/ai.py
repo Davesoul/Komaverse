@@ -4,15 +4,17 @@ frames are scoped to the current user."""
 from __future__ import annotations
 
 import base64
-import httpx
 import io
 import json
 import logging
+import math
 import random
 import re
 import tempfile
+from datetime import UTC, datetime
 from pathlib import Path
 
+import httpx
 from fastapi import (
     APIRouter,
     BackgroundTasks,
@@ -25,8 +27,10 @@ from fastapi import (
 from PIL import Image
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
+from komaverse import storage
 from komaverse.ai.direction import (
     ENTITY_KINDS,
     build_final_prompt,
@@ -43,8 +47,6 @@ from komaverse.ai.providers import (
     list_openrouter_models,
 )
 from komaverse.ai.voice_local import list_freetts_voices
-
-from komaverse import storage
 from komaverse.api.usage import record_usage
 from komaverse.auth import ensure_owner, get_current_user
 from komaverse.config import settings
@@ -73,8 +75,79 @@ router = APIRouter(prefix="/api/v1")
 billing_router = APIRouter(prefix="/api/v1")
 logger = logging.getLogger("komaverse.ai")
 
-COSTS = {"image": 5, "video": 25}
+#: Grounded 2026-11-05 (docs/BILLING.md): $5 = 500 credits ($0.01 each),
+#: ~2.5-3x provider cost so fees, fraud, and hosting don't eat the margin.
+#: Video bills per whole second, rounded up (a 4s Seedance clip ~$0.40).
+COSTS = {"image": 3, "video": 25, "chat": 1, "voice": 2, "vision": 1}
+CREDIT_PACKS: tuple[dict[str, str | int], ...] = (
+    {"id": "topup-5", "usd_cents": 500, "credits": 500},
+    {"id": "topup-10", "usd_cents": 1000, "credits": 1100},
+    {"id": "topup-25", "usd_cents": 2500, "credits": 3000},
+)
 PROVIDERS = ("cloud", "comfyui", "fake", "local", "meta", "openrouter")
+#: Providers that cost the studio nothing: never debited, always allowed.
+LOCAL_FREE_PROVIDERS = frozenset({"local", "fake", "comfyui"})
+
+
+def quote_cost(kind: str, seconds: float = 0.0) -> int:
+    """Credits for one action. Video scales per whole second, rounded up."""
+    if kind == "video":
+        return COSTS['video'] * max(1, math.ceil(seconds or 0))
+    return COSTS.get(kind, 0)
+
+
+def is_free_provider(provider: str | None) -> bool:
+    """True when the provider costs the studio nothing (local/self-hosted)."""
+    return (provider or '') in LOCAL_FREE_PROVIDERS
+
+
+def _free_grant_reason() -> str:
+    now = datetime.now(UTC)
+    return f"free monthly {now.year}-{now.month:02d}"
+
+
+def ensure_monthly_grant(session: Session, user_id: str) -> int:
+    """Freemium allowance: FREE_MONTHLY_CREDITS once per calendar month.
+
+    Runs on first spend, not on login, so dormant accounts accrue nothing.
+    """
+    if settings.free_monthly_credits <= 0:
+        return 0
+    reason = _free_grant_reason()
+    exists = session.execute(
+        select(LedgerRow.id).where(
+            LedgerRow.user_id == user_id, LedgerRow.reason == reason
+        ).limit(1)
+    ).first()
+    if exists:
+        return 0
+    add_entry(session, user_id, settings.free_monthly_credits, reason)
+    return settings.free_monthly_credits
+
+
+def spend_credits(
+    session: Session, user_id: str, amount: int, reason: str, job_id: str | None = None
+) -> bool:
+    """Debit when the paywall is on. True = ok (or free/off), False = broke.
+
+    Always ensures the monthly freemium grant first, so the first paid
+    action each month tops the balance up before the check.
+    """
+    if not settings.paywall_enabled or amount <= 0:
+        return True
+    ensure_monthly_grant(session, user_id)
+    if get_balance(session, user_id) < amount:
+        return False
+    add_entry(session, user_id, -amount, reason, job_id)
+    return True
+
+
+def refund_job(session: Session, job: JobRow) -> int:
+    """Credit back exactly what the job was debited (0 when free/legacy)."""
+    amount = job.cost_credits or 0
+    if settings.paywall_enabled and amount > 0:
+        add_entry(session, job.user_id, amount, f"refund {job.id}", job.id)
+    return amount
 
 
 class GenerateRequest(BaseModel):
@@ -97,6 +170,7 @@ class GenerateRequest(BaseModel):
     camera_move: str = "none"  # CAMERA_MOVES key (video only)
     entity_ids: list[str] = Field(default_factory=list)
     reference_frame_id: str | None = None  # start frame (video) / redraw (image)
+    paint_on_frame: str | None = None  # draw flow: finished image lands as a layer on this frame, not a new frame
 
 
 class EntityCreate(BaseModel):
@@ -210,6 +284,26 @@ def _crop_bytes(img, x: int, y: int, w: int, h: int) -> bytes:
     return buf.getvalue()
 
 
+def _fit_png_into(data: bytes, W: int, H: int) -> bytes:
+    """Contain-fit PNG bytes inside WxH, aspect preserved, never stretched.
+
+    The image scales down to fit (never up, so small renders stay crisp)
+    and centers on a transparent canvas of the frame's exact size — the
+    same contain rule layer_from_media uses. Raises on undecodable bytes
+    so callers can fall back to the raw artifact.
+    """
+    img = Image.open(io.BytesIO(data)).convert("RGBA")
+    W, H = max(8, int(W)), max(8, int(H))
+    scale = min(W / max(1, img.width), H / max(1, img.height), 1.0)
+    nw, nh = max(1, round(img.width * scale)), max(1, round(img.height * scale))
+    fitted = img.resize((nw, nh), Image.Resampling.BILINEAR) if scale < 1.0 else img
+    canvas = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    canvas.alpha_composite(fitted, ((W - nw) // 2, (H - nh) // 2))
+    buf = io.BytesIO()
+    canvas.save(buf, format="PNG")
+    return buf.getvalue()
+
+
 def _page_png(session: Session, project_id: str, page_id: str) -> bytes | None:
     """A whole scan page, shrunk, for provider references."""
     page = session.get(PageRow, page_id)
@@ -300,7 +394,12 @@ def run_ai_job(job_id: str, factory=None) -> None:
     """Execute one job synchronously (called in a background task)."""
     factory = factory or session_factory()
     with factory() as session:
-        job = session.get(JobRow, job_id)
+        try:
+            job = session.get(JobRow, job_id)
+        except OperationalError:
+            # Foreign database (a tool called without its session factory,
+            # e.g. in tests): the job isn't here, so there is nothing to run.
+            return
         if job is None:
             return
         # Expire only the cancel flag: a full refresh would discard the
@@ -398,16 +497,9 @@ def run_ai_job(job_id: str, factory=None) -> None:
                 return
             job.status = "failed"
             job.error = str(exc)
-            # Refund only what generate() debited: with the paywall off no
-            # debit happened, so an unconditional refund would mint credits.
-            if settings.paywall_enabled:
-                add_entry(
-                    session,
-                    job.user_id,
-                    COSTS.get(job.kind, 0),
-                    f"refund {job.id}",
-                    job.id,
-                )
+            # Refund exactly the creation debit (0 when free): recomputing
+            # from COSTS would mint credits on per-second video jobs.
+            refund_job(session, job)
             session.commit()
             metrics.record_job("failed")
             record_usage(
@@ -421,14 +513,9 @@ def run_ai_job(job_id: str, factory=None) -> None:
                 return
             job.status = "failed"
             job.error = f"unexpected: {exc}"
-            if settings.paywall_enabled:
-                add_entry(
-                    session,
-                    job.user_id,
-                    COSTS.get(job.kind, 0),
-                    f"refund {job.id}",
-                    job.id,
-                )
+            # Refund exactly the creation debit (0 when free): recomputing
+            # from COSTS would mint credits on per-second video jobs.
+            refund_job(session, job)
             session.commit()
             metrics.record_job("failed")
             record_usage(
@@ -451,6 +538,10 @@ def run_ai_job(job_id: str, factory=None) -> None:
         dest.write_bytes(data)
         job.result_url = f"/media/{rel.as_posix()}"
         if job.attach_frame and job.project_id and suffix == "png":
+            try:
+                art_w, art_h = Image.open(io.BytesIO(data)).size
+            except Exception:
+                art_w, art_h = 1920, 1080
             seq = _ai_sequence(session, job.project_id)
             top = session.execute(
                 select(FrameRow.index)
@@ -463,6 +554,9 @@ def run_ai_job(job_id: str, factory=None) -> None:
                 sequence_id=seq.id,
                 index=(top + 1) if top is not None else 0,
                 name=f"AI: {job.prompt[:40]}",
+                # The frame matches the art: no stretch, ever.
+                width=min(max(int(art_w), 8), 2048),
+                height=min(max(int(art_h), 8), 2048),
             )
             session.add(frame)
             session.flush()
@@ -475,6 +569,30 @@ def run_ai_job(job_id: str, factory=None) -> None:
                     data_url=f"data:image/png;base64,{b64}",
                 )
             )
+        if job.layer_frame_id and job.project_id and suffix == "png":
+            # Draw flow: the finished image is painted onto the existing
+            # frame as a layer — never a new frame, never gallery-only.
+            target = session.get(FrameRow, job.layer_frame_id)
+            if target is not None and target.project_id == job.project_id:
+                top_layer = session.execute(
+                    select(LayerRow.layer_order)
+                    .where(LayerRow.frame_id == target.id)
+                    .order_by(LayerRow.layer_order.desc())
+                    .limit(1)
+                ).scalars().first()
+                try:
+                    fitted = _fit_png_into(data, target.width, target.height)
+                except Exception:
+                    fitted = data  # keep the artifact over a failed fit
+                b64 = base64.b64encode(fitted).decode()
+                session.add(
+                    LayerRow(
+                        frame_id=target.id,
+                        name=f"paint: {job.prompt[:40]}",
+                        layer_order=(top_layer + 1) if top_layer is not None else 0,
+                        data_url=f"data:image/png;base64,{b64}",
+                    )
+                )
         job.status = "done"
         job.progress = 1.0
         session.commit()
@@ -486,7 +604,7 @@ def run_ai_job(job_id: str, factory=None) -> None:
             job.kind,
             f"{job.provider}:{job.model or 'default'}",
             last_usage.get("total", 0),
-            COSTS.get(job.kind, 0) if settings.paywall_enabled else 0.0,
+            (job.cost_credits or 0) if settings.paywall_enabled else 0.0,
             project_id=job.project_id or "",
         )
 
@@ -565,11 +683,15 @@ def generate(
                 raise HTTPException(
                     400, f"unknown frame: {body.reference_frame_id}"
                 )
-    cost = COSTS[body.kind]
-    if settings.paywall_enabled and get_balance(session, user.id) < cost:
+        if body.paint_on_frame:
+            if not body.project_id:
+                raise HTTPException(400, "paint target needs a project")
+            target = session.get(FrameRow, body.paint_on_frame)
+            if target is None or target.project_id != body.project_id:
+                raise HTTPException(400, f"unknown frame: {body.paint_on_frame}")
+    cost = 0 if is_free_provider(body.provider) else quote_cost(body.kind, body.seconds)
+    if not spend_credits(session, user.id, cost, f"{body.kind} generation"):
         raise HTTPException(402, f"insufficient credits (need {cost})")
-    if settings.paywall_enabled:
-        add_entry(session, user.id, -cost, f"{body.kind} generation")
     video_dims = _parse_video_size_str(body.size) if body.kind == "video" else None
     job = JobRow(
         user_id=user.id,
@@ -583,6 +705,7 @@ def generate(
         width=video_dims[0] if video_dims else (0 if body.kind == "video" else min(max(body.width, 64), 2048)),
         height=video_dims[1] if video_dims else (0 if body.kind == "video" else min(max(body.height, 64), 2048)),
         seconds=min(max(body.seconds, 0.5), 10.0),
+        cost_credits=cost,
         attach_frame=body.attach_frame,
         seed=body.seed,
         negative_prompt=body.negative_prompt,
@@ -591,6 +714,7 @@ def generate(
         camera_move=body.camera_move,
         enhance=body.enhance,
         reference_frame_id=body.reference_frame_id,
+        layer_frame_id=body.paint_on_frame,
         entities_json=json.dumps(snapshots),
     )
     session.add(job)

@@ -103,6 +103,7 @@ from komaverse.api.subtitles import save_subtitles_track
 from komaverse.api.usage import record_usage
 from komaverse.auth import own_project
 from komaverse.brush import render_stroke_mask, stroke_spec
+from komaverse.draw_subjects import SUBJECT_NAMES, compose_subject
 from komaverse.config import settings
 from komaverse.db_models import (
     AudioTakeRow,
@@ -842,7 +843,7 @@ _STUDIO_SKILL_TAGS = {
     "manga-production": "character-consistent pages",
     "masters-craft": "illustrator/animator knowledge",
     "story-pacing": "story/pacing structure",
-    "drawing-fundamentals": "line/art fundamentals",
+    "drawing-fundamentals": "brush linework for manage_layers (never generation)",
     "color-theory": "palette/light",
     "visual-composition": "staging/focus",
     "motion-design": "UI/animation motion",
@@ -3414,6 +3415,30 @@ def _parse_draw_color(value):
     return (int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)), None
 
 
+def _perimeter_points(kind: str, box: tuple, n: int = 56) -> list:
+    """Outline waypoints for hand-inked shapes: an ellipse loop or a
+    rectangle walk, closed (first point repeats at the end)."""
+    x0, y0, x1, y1 = box
+    pts: list = []
+    if kind == "ellipse":
+        cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
+        rx, ry = (x0 - x1) / 2, (y0 - y1) / 2
+        rx, ry = abs(rx), abs(ry)
+        for i in range(n + 1):
+            a = 2 * math.pi * i / n
+            pts.append((cx + rx * math.cos(a), cy + ry * math.sin(a)))
+    else:
+        corners = [(x0, y0), (x1, y0), (x1, y1), (x0, y1)]
+        for i in range(n + 1):
+            t = 4.0 * i / n
+            seg = min(int(t), 3)
+            f = t - seg
+            ax, ay = corners[seg]
+            bx, by = corners[(seg + 1) % 4]
+            pts.append((ax + (bx - ax) * f, ay + (by - ay) * f))
+    return pts
+
+
 def tool_manage_layers(
     session, user, project_id, frame, op="list", layer=None, name=None,
     opacity=None, visible=None, locked=None, blend=None, position=None,
@@ -3617,7 +3642,17 @@ def tool_manage_layers(
                 except (TypeError, ValueError):
                     return f"Shape {i}: width must be 1..64."
                 erase = bool(shape.get("erase", False))
-                jobs.append((kind, rgba, width, fill, (x, y, x + w, y + h), erase))
+                if not fill and "brush" in shape:
+                    # Hand-inked outline: the perimeter becomes a brush
+                    # stroke (tapered, smoothed) instead of a flat ring.
+                    try:
+                        per = _perimeter_points(kind, (x, y, x + w, y + h))
+                        pspec = stroke_spec(shape, len(per))
+                    except ValueError as exc:
+                        return f"Shape {i}: {exc}."
+                    jobs.append(("stroke", rgba, pspec, per, erase))
+                else:
+                    jobs.append((kind, rgba, width, fill, (x, y, x + w, y + h), erase))
             elif kind == "fill":
                 jobs.append(("fill", rgba, bool(shape.get("erase", False))))
             elif kind == "text":
@@ -4702,6 +4737,32 @@ def _demo_draw_turn(session, user, project_id, message, current_frame_id=None):
     )
 
 
+def _demo_paint_subject(session, user, project_id, message, frame_id=None,
+                        current_frame_id=None):
+    """Paint a brush-stroke subject on a draw frame (demo brain).
+
+    Draw verbs never generate: a known subject composes into a
+    construction → linework → fill → shade stroke program; anything
+    else gets an honest offer of generation instead of faked pixels.
+    """
+    message = _with_open_frame(session, user, project_id, message, current_frame_id)
+    f = _resolve_frame(session, user, project_id, frame_id or message)
+    if isinstance(f, str):
+        return f
+    matched = compose_subject(message, int(f.width), int(f.height))
+    if matched is None:
+        return (
+            "I paint with brushes, not generations — I can sketch "
+            f"{', '.join(SUBJECT_NAMES)} on '{f.name or 'Untitled'}'. "
+            "For anything else, say 'generate it' and I'll place the render."
+        )
+    name, shapes = matched
+    drawn = tool_manage_layers(
+        session, user, project_id, frame=f.id, op="draw", shapes=shapes
+    )
+    return f"Sketched a {name} with brushes ({drawn})"
+
+
 def _demo_canvas_turn(session, user, project_id, message, current_frame_id=None):
     """Pixel/layer ops the demo brain parses directly (no geometry Q&A)."""
     message = _with_open_frame(session, user, project_id, message, current_frame_id)
@@ -4838,10 +4899,9 @@ def demo_turn(
             reply = target
         else:
             reply = run(
-                "create_image", tool_generate, session, user, project_id,
-                message.strip(), job_factory, paint_on_frame=target.id,
-                fallback_references=fallback_references,
-                delegated=_delegates_decisions(message), history=history,
+                "manage_layers", _demo_paint_subject, session, user,
+                project_id, message, target.id,
+                current_frame_id=current_frame_id,
             )
     elif _wants_video(text):
         prompt = message.strip()
@@ -4983,9 +5043,9 @@ def demo_turn(
             seconds,
             motions,
         )
-    elif any(k in text for k in ("generate", "create image", "draw me", "make me", "redraw")):
+    elif any(k in text for k in ("generate", "create image", "make me", "redraw")):
         prompt = message.strip()
-        for prefix in ("generate", "create image", "draw me", "make me", "redraw"):
+        for prefix in ("generate", "create image", "make me", "redraw"):
             if text.startswith(prefix):
                 prompt = message[len(prefix):].strip(" :")
                 break
@@ -5016,6 +5076,19 @@ def demo_turn(
     elif _wants_canvas_op(text):
         reply = run("manage_layers", _demo_canvas_turn, session, user, project_id,
                     message, current_frame_id=current_frame_id)
+    elif (
+        current_frame_id
+        and "video" not in text
+        and "generat" not in text
+        and _PAINT_VERB_RE.search(text or "")
+    ):
+        # Bare draw verb, no frame words ("draw me a dragon", "sketch a
+        # cat"): the open frame is the target — paint, never generate.
+        reply = run(
+            "manage_layers", _demo_paint_subject, session, user,
+            project_id, message, current_frame_id,
+            current_frame_id=current_frame_id,
+        )
     elif (
         any(k in text for k in ("list frames", "show frames", "show me frames", "what frames", "how many frames", "my frames"))
         or (
@@ -5109,10 +5182,12 @@ _SYSTEM = (
     "them when asked what happened when. "
     "Greetings, thanks, and other smalltalk get a words-only reply — "
     "call no tools unless the user asks for an action, a change, or "
-    "information not already in context. Draw/paint/sketch a subject on a "
-    "frame paints it there (create_image with paint_on_frame); generate/ "
-    "create verbs make gallery media; never narrate a gallery generation "
-    "as drawing on a frame. Async jobs (create_video, "
+    "information not already in context. The verb decides the tool, always: "
+    "draw/paint/sketch/ink (even with a named subject and a frame) is brush "
+    "painting via manage_layers — never create_image; generate/create/make "
+    "verbs make gallery media via create_image (paint_on_frame only for "
+    "generate + a named frame); never narrate a gallery generation as "
+    "drawing on a frame. Async jobs (create_video, "
     "background create_image, export_video) answer immediately with the "
     "[job id] — the UI follows the job live and shows it when done. "
     "Never call check_job to wait; call it only when the user explicitly "
@@ -5451,18 +5526,17 @@ _TOOLS_SCHEMA = [
         "function": {
             "name": "create_image",
             "description": (
-                "Generate an image from the named subject ON THIS TURN - "
-                "call now, do not interview. The verb decides the landing: "
-                "draw/paint/sketch + a frame ('on the frame', 'on the "
-                "current frame', 'draw this') paints the subject ONTO that "
-                "frame via paint_on_frame — the pixels land on the canvas "
-                "as a layer, never as a separate gallery image. generate/"
-                "create verbs (or no frame) make standalone gallery media. "
-                "Canvas ops are your own hands, never generation: strokes, "
-                "shapes, erase, fill, text, copy, resize, and frame-to-frame "
-                "extension go to manage_layers / extend_sequence. Only a "
-                "named subject with an explicit generate/create verb (or no "
-                "frame at all) becomes a gallery image. Never say you are "
+                "GENERATION ONLY, from the named subject ON THIS TURN - "
+                "call now, do not interview. NEVER call for draw/paint/sketch/ink "
+                "verbs: those are brush strokes via manage_layers, even with a "
+                "named subject and a named frame. Call only for explicit "
+                "generate/create/make verbs. The verb decides the landing: "
+                "generate/create verbs make gallery media; generate + a named "
+                "frame ('generate X on frame 2') paints the render onto that "
+                "frame via paint_on_frame (aspect-fit, never stretched). Canvas "
+                "ops are your own hands, never generation: strokes, shapes, "
+                "erase, fill, text, copy, resize, and frame-to-frame extension "
+                "go to manage_layers / extend_sequence. Never say you are "
                 "'drawing on a frame' for a gallery generation. "
                 "Pass what the conversation "
                 "states; omit the rest. Blanks take defaults (square, "
@@ -5492,8 +5566,8 @@ _TOOLS_SCHEMA = [
                     "entity_ids": {"type": "array", "description": "Named entity ids to keep on-model. Omit otherwise."},
                     "width": {"type": "number", "description": "Pixels (16:9→1280x720, 9:16→720x1280, 1:1→1024x1024). Pass the conversation's format when stated; otherwise omit."},
                     "height": {"type": "number", "description": "Pixels (draft→512, standard→768, high→1024 longest side). Pass the conversation's quality when stated; otherwise omit."},
-                    "attach_frame": {"type": "boolean", "description": "True only when the user explicitly asks for a draw frame. Omit otherwise."},
-                "paint_on_frame": {"type": "string", "description": "Frame-directed draw ONLY: the @frame: id or frame name the user named ('on the current frame' = the open frame). The image paints onto that frame as a layer. Omit for gallery generations and shape ops."},
+                    "attach_frame": {"type": "boolean", "description": "True only when the user explicitly asks to turn the generation into a draw frame on the timeline. Omit otherwise (gallery-first)."},
+                "paint_on_frame": {"type": "string", "description": "Generate-verb placement ONLY ('generate X on frame 2'): the @frame: id or frame name. The render paints onto that frame as a layer, aspect-fit. NEVER for draw/paint/sketch verbs — those are manage_layers brush strokes. Omit otherwise."},
                 },
                 "required": ["prompt"],
             },
@@ -5505,7 +5579,9 @@ _TOOLS_SCHEMA = [
             "name": "create_video",
             "description": (
                 "Render a video from the named subject ON THIS TURN - call "
-                "now, do not interview. Pass what the conversation states "
+                "now, do not interview. Draw/paint/sketch verbs for a still "
+                "subject are manage_layers brush strokes, never this tool. "
+                "Pass what the conversation states "
                 "(subject words, seconds, size, references); omit the "
                 "rest. Blanks take defaults (4s, provider-default size, "
                 "silent); ask only for cost-affecting blanks per the system "
@@ -5700,7 +5776,9 @@ _TOOLS_SCHEMA = [
         "function": {
             "name": "manage_layers",
             "description": (
-                "Draw-canvas ops: your hands for frame-by-frame animation. "
+                "Draw-canvas ops: your hands for frame-by-frame animation — THE tool "
+                "for every draw/paint/sketch/ink request, never create_image/create_video "
+                "for those verbs. "
                 "Ops: list, add, rename, set (opacity/visible/locked/blend), "
                 "move (position 0 is bottom), remove, duplicate, clear, merge down, "
                 "draw (stroke/rect/ellipse/fill/text in frame pixels; any shape takes "
@@ -5718,8 +5796,11 @@ _TOOLS_SCHEMA = [
                 "marker flats, hatch shade — many strokes per drawing, never "
                 "one flat line. Cel craft: hard-edge flat color on characters, "
                 "airbrush/watercolor for backgrounds only. "
-                'Draw paints marks, not subjects: a named subject with an explicit '
-                'generate verb is create_image, never this tool. For stroke craft '
+                "Draw with brushes, not generations: a named subject with a draw/paint/sketch "
+                "verb is painted here in strokes (compose construction, then linework, then "
+                "flat fills, then shade — many strokes, never one flat line); a named subject "
+                "with a generate/create verb is create_image, never this tool. For stroke craft "
+                
                 '(line weight, construction, limited-animation holds) read '
                 'drawing-fundamentals first; for sequence grammar read '
                 "anime-animation-production."
