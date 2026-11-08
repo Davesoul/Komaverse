@@ -10,7 +10,8 @@ import {
   type ExportReport,
   type Job,
   type Page,
-  type Project,
+  type ProjectSummary,
+  type ProjectView,
   type Scene,
   type Sequence,
   type SubtitleTrack,
@@ -91,7 +92,7 @@ const ENTITY_GLYPH: Record<string, string> = {
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-function labelFor(clip: Clip, project: Project | null, frames: DrawFrame[]): string {
+function labelFor(clip: Clip, project: ProjectView | null, frames: DrawFrame[]): string {
   if (clip.kind === "panel" && project) {
     for (const [pi, page] of project.pages.entries()) {
       const panel = page.panels.find((p) => p.id === clip.source_id);
@@ -118,7 +119,7 @@ function labelFor(clip: Clip, project: Project | null, frames: DrawFrame[]): str
  * side (preview player); thumbs use the small 320 defaults so rows stay
  * light. Page stills are full files either way.
  */
-function clipImageFor(clip: Clip, project: Project | null, hiRes = false, art: string | number = ""): string {
+function clipImageFor(clip: Clip, project: ProjectView | null, hiRes = false, art: string | number = ""): string {
   if (clip.kind === "panel")
     return api.panelPreviewUrl(clip.source_id, hiRes ? 960 : undefined);
   if (clip.kind === "frame")
@@ -211,7 +212,7 @@ function VolumeField({ value, onCommit }: { value: number; onCommit: (v: number)
         step={0.05}
         value={local}
         aria-label="Cue volume slider"
-        title="Drag to a level, release to apply (0–2; preview caps at 1)"
+        title="Drag to a level, release to apply (0–2; preview caps at 1, so above 1 exports louder than you hear)"
         onChange={(e) => setLocal(Number(e.target.value))}
         onPointerUp={(e) => commit(Number((e.target as HTMLInputElement).value))}
         onKeyUp={(e) => {
@@ -222,7 +223,7 @@ function VolumeField({ value, onCommit }: { value: number; onCommit: (v: number)
       <SecInput
         value={value}
         label="Cue volume"
-        title="Cue gain 0–2 (preview caps at 1; the export honors the full range)"
+        title="Cue gain 0–2 (preview caps at 1; the export honors the full range, so above 1 exports louder than you hear)"
         onCommit={onCommit}
       />
     </>
@@ -277,8 +278,8 @@ function SecInput({
 }
 
 export default function RenderPage() {
-  const [projects, setProjects] = useState<Project[]>([]);
-  const [project, setProject] = useState<Project | null>(null);
+  const [projects, setProjects] = useState<ProjectSummary[]>([]);
+  const [project, setProject] = useState<ProjectView | null>(null);
   const [scenes, setScenes] = useState<Scene[]>([]);
   const [sceneId, setSceneId] = useState("");
   const [frames, setFrames] = useState<DrawFrame[]>([]);
@@ -300,6 +301,9 @@ export default function RenderPage() {
   const [expH, setExpH] = useState("720");
   const [includeAudio, setIncludeAudio] = useState(true);
   const [result, setResult] = useState<(ExportReport & { jobId: string }) | null>(null);
+  // Completion popup: the bottom-of-page result is easy to miss, so a
+  // finished export announces itself with a player + download + Media jump.
+  const [exportPopup, setExportPopup] = useState<(ExportReport & { jobId: string }) | null>(null);
   const [exporting, setExporting] = useState<{ jobId: string; progress: number } | null>(null);
   const [flash, setFlash] = useState(0);
   const [busy, setBusy] = useState("");
@@ -389,19 +393,25 @@ export default function RenderPage() {
       .then((ps) => {
         setProjects(ps);
         const stored = getCurrentProject();
-        if (stored && ps.some((p) => p.id === stored)) void refresh(stored);
+        if (stored && ps.some((p) => p.id === stored))
+          refresh(stored).catch((e) => setNotice(`Load failed: ${(e as Error).message}`));
       })
       .catch((e) => setNotice(`API offline: ${(e as Error).message}`));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // Agent mutations (dock tools, job completions) refresh this tab live
-  // when it shows the affected project.
+  // when it shows the affected project. Scoped to the open project id so
+  // the listeners subscribe once instead of on every render.
+  const renderProjectId = project?.id ?? null;
+  const renderSceneId = sceneId || undefined;
   useEffect(() => {
     const onAgent = (e: Event) => {
       const pid = (e as CustomEvent).detail?.projectId as string | null | undefined;
-      if (!project || (pid && pid !== project.id)) return;
-      void refresh(project.id, sceneId || undefined).catch(() => {});
+      if (!renderProjectId || (pid && pid !== renderProjectId)) return;
+      refresh(renderProjectId, renderSceneId).catch((err) =>
+        setNotice(`Refresh failed: ${(err as Error).message}`),
+      );
     };
     window.addEventListener("komaverse:agent-job-done", onAgent);
     window.addEventListener("komaverse:agent-timeline-changed", onAgent);
@@ -409,10 +419,20 @@ export default function RenderPage() {
       window.removeEventListener("komaverse:agent-job-done", onAgent);
       window.removeEventListener("komaverse:agent-timeline-changed", onAgent);
     };
-  });
+    // refresh is intentionally unlisted: it changes identity every render,
+    // and listing it would resubscribe on every render (the bug being fixed).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [renderProjectId, renderSceneId]);
 
   // Draw parity: Ctrl+Z undo, Ctrl+Shift+Z / Ctrl+Y redo for timeline edits.
-  // Skipped inside text fields so typing is never hijacked.
+  // Skipped inside text fields so typing is never hijacked. The listener
+  // subscribes once; the ref below (assigned after the handlers are
+  // defined) always forwards to the latest closures, so undo never
+  // replays stale timeline state after re-renders.
+  const undoRedoRef = useRef<{
+    undo: (() => Promise<void>) | null;
+    redo: (() => Promise<void>) | null;
+  }>({ undo: null, redo: null });
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (!(e.ctrlKey || e.metaKey) || e.altKey) return;
@@ -422,22 +442,20 @@ export default function RenderPage() {
       const key = e.key.toLowerCase();
       if (key === "z" && !e.shiftKey) {
         e.preventDefault();
-        void undoClips();
+        undoRedoRef.current.undo?.().catch((err) => setNotice(`Undo failed: ${(err as Error).message}`));
       } else if ((key === "z" && e.shiftKey) || key === "y") {
         e.preventDefault();
-        void redoClips();
+        undoRedoRef.current.redo?.().catch((err) => setNotice(`Redo failed: ${(err as Error).message}`));
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  });
+  }, []);
 
   const refresh = async (projectId: string, keepScene?: string) => {
-    const [full, sceneList, frameList, takeList, jobList, seqList, bal] = await Promise.all([
-      api.getProject(projectId),
+    const [full, sceneList, takeList, jobList, seqList, bal] = await Promise.all([
+      api.getProjectView(projectId),
       api.listScenes(projectId),
-      api.listFrames(projectId),
       api.listTakes(projectId),
       api.listJobs().catch(() => [] as Job[]),
       api.listSequences(projectId).catch(() => [] as Sequence[]),
@@ -446,7 +464,21 @@ export default function RenderPage() {
     setProject(full);
     setCurrentProject(full.id);
     setScenes(sceneList);
-    setFrames(frameList);
+    // Frame names/ids come from sequence metadata (no pixels): this tab
+    // never paints, so the full-pixel listFrames fetch is pure weight.
+    setFrames(
+      seqList.flatMap((s) =>
+        s.frames.map((m) => ({
+          id: m.id,
+          name: m.name,
+          index: m.index,
+          width: m.width,
+          height: m.height,
+          layers: [],
+          sequence_id: s.id,
+        })),
+      ),
+    );
     setSequences(seqList);
     setTakes(takeList);
     setDoneVideos(
@@ -851,14 +883,29 @@ export default function RenderPage() {
   const exportRef = useRef(false);
   const doExport = async () => {
     if (!project || !scene || clips.length === 0 || exporting || exportRef.current) return;
+        const w = Math.floor(Number(expW));
+    const h = Math.floor(Number(expH));
+    const f = Math.floor(Number(fps));
+    if (!Number.isFinite(w) || w < 64 || w > 4096 || w % 2 !== 0) {
+      setNotice("Export width must be an even number 64–4096 (H.264 needs even dimensions).");
+      return;
+    }
+    if (!Number.isFinite(h) || h < 64 || h > 4096 || h % 2 !== 0) {
+      setNotice("Export height must be an even number 64–4096 (H.264 needs even dimensions).");
+      return;
+    }
+    if (!Number.isFinite(f) || f < 1 || f > 60) {
+      setNotice("Export FPS must be a whole number 1–60.");
+      return;
+    }
     exportRef.current = true;
     setBusy("export");
     setNotice("");
     try {
       const job = await api.exportJob(project.id, {
-        fps: Number(fps) || 12,
-        width: Number(expW) || 1280,
-        height: Number(expH) || 720,
+        fps: f,
+        width: w,
+        height: h,
         include_audio: includeAudio,
         scene_id: scene.id,
       });
@@ -872,6 +919,7 @@ export default function RenderPage() {
           finished = true;
           const report = await api.getExportReport(job.id);
           setResult({ ...report, jobId: job.id });
+          setExportPopup({ ...report, jobId: job.id });
           setFlash((n) => n + 1);
           setNotice(
             report.warnings.length > 0
@@ -1039,24 +1087,53 @@ export default function RenderPage() {
     }
   };
 
+  // Latest closures for the once-subscribed keyboard handler above.
+  undoRedoRef.current = { undo: undoClips, redo: redoClips };
+
   const moveScene = async (delta: -1 | 1) => {
-    if (!project) return;
+    if (!project || busy) return;
     const ordered = [...scenes].sort((a, b) => a.order - b.order);
     const i = ordered.findIndex((s) => s.id === sceneId);
     const j = i + delta;
     if (i < 0 || j < 0 || j >= ordered.length) return;
-    await api.patchScene(ordered[i].id, { order: ordered[j].order });
-    await api.patchScene(ordered[j].id, { order: ordered[i].order });
-    await refresh(project.id, sceneId);
+    // Optimistic swap: the strip moves instantly; the server PATCHes only
+    // confirm the new order in the background.
+    const a = ordered[i];
+    const b = ordered[j];
+    setScenes((prev) =>
+      prev.map((s) => (s.id === a.id ? { ...s, order: b.order } : s.id === b.id ? { ...s, order: a.order } : s)),
+    );
+    setBusy("Reordering…");
+    try {
+      await api.patchScene(a.id, { order: b.order });
+      await api.patchScene(b.id, { order: a.order });
+    } catch (e) {
+      setNotice(`Reorder failed: ${(e as Error).message} — reloading.`);
+      try {
+        await refresh(project.id, sceneId);
+      } catch (err) {
+        setNotice(`Reload failed: ${(err as Error).message}`);
+      }
+    } finally {
+      setBusy("");
+    }
   };
 
   const removeScene = async () => {
-    if (!project || !scene) return;
+    if (!project || !scene || busy) return;
     if (!window.confirm(`Delete scene "${scene.name}" with its clips and cues? This can't be undone.`)) return;
-    await api.deleteScene(scene.id);
-    setSceneId("");
-    clearClipHistory();
-    await refresh(project.id);
+    setBusy("Deleting scene…");
+    try {
+      await api.deleteScene(scene.id);
+      setSceneId("");
+      clearClipHistory();
+      await refresh(project.id);
+      setNotice(`Deleted scene "${scene.name}".`);
+    } catch (e) {
+      setNotice(`Delete failed: ${(e as Error).message}`);
+    } finally {
+      setBusy("");
+    }
   };
 
   const toggleEntity = (id: string) =>
@@ -2534,7 +2611,7 @@ export default function RenderPage() {
                       void commitClipPatch(selectedClip.id, { transition: e.target.value })
                     }
                     aria-label="Clip transition"
-                    title="How this clip blends in from the previous one (preview + export; none = hard cut)"
+                    title="How this clip blends in from the previous one (export renders all; preview plays fades, others hard-cut; none = hard cut)"
                   >
                     {TRANSITIONS.map((t) => (
                       <option key={t} value={t}>{t}</option>
@@ -2552,17 +2629,17 @@ export default function RenderPage() {
                   <SecInput
                     value={selectedClip.fade_in}
                     label="Fade in seconds"
-                    title="Fade in from black, in seconds (0 = off)"
+                    title="Fade in from black, in seconds (0 = off; export only, preview skips it)"
                     onCommit={(v) => void commitClipPatch(selectedClip.id, { fade_in: v })}
                   />
                   <SecInput
                     value={selectedClip.fade_out}
                     label="Fade out seconds"
-                    title="Fade out to black, in seconds (0 = off)"
+                    title="Fade out to black, in seconds (0 = off; export only, preview skips it)"
                     onCommit={(v) => void commitClipPatch(selectedClip.id, { fade_out: v })}
                   />
                   <span style={{ fontSize: 11, color: "var(--kv-faint)" }}>
-                    Blends and fades play in the preview and render in the MP4 export.
+                    Crossfades play in the preview; wipes, push and impact plus clip fades render in the MP4 export only.
                   </span>
                   <span style={{ marginLeft: "auto", display: "flex", gap: 6 }}>
                     {selectedClip.kind !== "text" && (
@@ -2769,8 +2846,8 @@ export default function RenderPage() {
                   scene={scene ?? null}
                   takes={takes}
                   playhead={playhead}
-                  onTakes={() => void refresh(project.id, scene?.id)}
-                  onScene={() => void refresh(project.id, scene?.id)}
+                  onTakes={() => refresh(project.id, scene?.id).catch((e) => setNotice(`Refresh failed: ${(e as Error).message}`))}
+                  onScene={() => refresh(project.id, scene?.id).catch((e) => setNotice(`Refresh failed: ${(e as Error).message}`))}
                   onVoiceoverStart={startVoiceover}
                   notify={setNotice}
                 />
@@ -2901,8 +2978,97 @@ export default function RenderPage() {
             />
           </>
         )}
+        {exportPopup && (
+          <ExportDoneDialog
+            result={exportPopup}
+            onClose={() => setExportPopup(null)}
+          />
+        )}
       </div>
     </div>
     </>
+  );
+}
+
+/** Completion popup: finished exports announce themselves instead of
+ * hiding at the bottom of the page. Player, download, Media jump;
+ * Esc/backdrop closes. */
+function ExportDoneDialog({
+  result,
+  onClose,
+}: {
+  result: ExportReport & { jobId: string };
+  onClose: () => void;
+}) {
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+  const openInMedia = () => {
+    onClose();
+    window.dispatchEvent(new CustomEvent("komaverse:goto-tab", { detail: "media" }));
+  };
+  return (
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-label="Export ready"
+      onClick={onClose}
+      style={{
+        position: "fixed",
+        inset: 0,
+        zIndex: 80,
+        background: "rgba(0,0,0,0.6)",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        padding: 16,
+      }}
+    >
+      <div
+        onClick={(e) => e.stopPropagation()}
+        style={{
+          width: "min(560px, 100%)",
+          background: "var(--kv-surface)",
+          border: "1px solid var(--kv-border-strong)",
+          borderRadius: "var(--kv-radius)",
+          boxShadow: "var(--kv-shadow-hard)",
+          padding: 16,
+        }}
+      >
+        <div style={{ fontWeight: 900, fontSize: 16, marginBottom: 4 }}>
+          Export ready
+        </div>
+        <div className="kv-nums" style={{ fontSize: 13, marginBottom: 8 }}>
+          {result.width}x{result.height} @ {result.fps}fps - {result.rendered_sec.toFixed(1)}s -{" "}
+          {result.clips_rendered} clips
+        </div>
+        <video
+          crossOrigin="use-credentials"
+          src={api.exportDownloadUrl(result.jobId)}
+          controls
+          autoPlay
+          muted
+          style={{ width: "100%", borderRadius: 6, border: "1px solid var(--kv-border)", marginBottom: 12 }}
+        />
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          <a
+            href={api.exportDownloadUrl(result.jobId)}
+            download
+            className="kv-btn"
+            style={{ textDecoration: "none", padding: "6px 12px" }}
+          >
+            Download MP4
+          </a>
+          <Btn onClick={openInMedia}>Open in Media</Btn>
+          <Btn autoFocus onClick={onClose}>
+            Close
+          </Btn>
+        </div>
+      </div>
+    </div>
   );
 }

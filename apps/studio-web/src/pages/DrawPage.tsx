@@ -94,6 +94,7 @@ interface LiveSettings {
   grain: number;
   toneDensity: number; // 0..100 UI; screentone dot coverage
   selectMode: "all" | "ink";
+  selectShape: "rect" | "lasso";
 }
 
 const PEN = BRUSH_PRESETS[0];
@@ -121,11 +122,13 @@ const DEFAULT_LIVE: LiveSettings = {
   grain: 0,
   toneDensity: 20,
   selectMode: "ink",
+  selectShape: "rect",
 };
 
 function applyLive(engine: DrawEngine, s: LiveSettings) {
   engine.setTool(s.tool);
   engine.selectMode = s.selectMode;
+  engine.selectShape = s.selectShape;
   engine.color = s.color;
   engine.brush = {
     size: s.size,
@@ -2420,6 +2423,8 @@ export default function DrawPage() {
                   ))}
                   {live.tool === "select" && (
                     <>
+                      <Btn small active={live.selectShape === "rect"} onClick={() => updateLive({ selectShape: "rect" })} title="Rectangle marquee selection" style={{ minWidth: 54 }}>Rect</Btn>
+                      <Btn small active={live.selectShape === "lasso"} onClick={() => updateLive({ selectShape: "lasso" })} title="Freehand lasso: draw a loop around what you want" style={{ minWidth: 54 }}>Lasso</Btn>
                       <Btn small active={live.selectMode === "all"} onClick={() => updateLive({ selectMode: "all" })} title="Move the whole marquee rectangle, background included" style={{ minWidth: 54 }}>All</Btn>
                       <Btn small active={live.selectMode === "ink"} onClick={() => updateLive({ selectMode: "ink" })} title="Move only dark ink strokes; the background stays intact" style={{ minWidth: 54 }}>Ink</Btn>
                     </>
@@ -2433,6 +2438,22 @@ export default function DrawPage() {
                   aria-label="Selection content"
                   style={{ marginTop: 6 }}
                 >
+                  <Btn
+                    small
+                    active={live.selectShape === "rect"}
+                    onClick={() => updateLive({ selectShape: "rect" })}
+                    title="Rectangle marquee selection"
+                  >
+                    Rect
+                  </Btn>
+                  <Btn
+                    small
+                    active={live.selectShape === "lasso"}
+                    onClick={() => updateLive({ selectShape: "lasso" })}
+                    title="Freehand lasso: draw a loop around what you want"
+                  >
+                    Lasso
+                  </Btn>
                   <Btn
                     small
                     active={live.selectMode === "all"}

@@ -238,6 +238,28 @@ export function PreviewPlayer({
     }
     return cur;
   })();
+  // Preload the next two clips' artwork (and poster) while the current
+  // one plays, so joints cut from a decoded frame instead of a fetch.
+  useEffect(() => {
+    if (!current) return;
+    const i = clips.findIndex((c) => c.id === current.id);
+    for (const next of clips.slice(i + 1, i + 3)) {
+      if (next.image && !brokenArt.has(next.id)) {
+        const img = new Image();
+        img.decoding = "async";
+        img.src = next.image;
+      }
+      if (next.video) {
+        const link = document.createElement("link");
+        link.rel = "prefetch";
+        link.as = "video";
+        link.href = next.video;
+        document.head.appendChild(link);
+        window.setTimeout(() => link.remove(), 30000);
+      }
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [current?.id]);
 
   const [reduceMotion, setReduceMotion] = useState(
     () =>

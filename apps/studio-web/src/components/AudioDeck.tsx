@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { api, mediaUrl, type AudioTake, type ClonedVoice, type Scene } from "../api";
 import { probeDuration } from "../lib/audio/peaks";
+import { VOICEOVER_COUNTDOWN_SECS, tickCountdown } from "../lib/audio/voiceover";
 import { Btn, BusyDots, IconBtn, SectionTitle, SelectInput, TextInput } from "./ui";
 import { Waveform } from "./Waveform";
 
@@ -54,6 +55,7 @@ export function AudioDeck({
   notify: (msg: string) => void;
 }) {
   const [recording, setRecording] = useState(false);
+  const [countdown, setCountdown] = useState<number | null>(null);
   const [voiceoverAt, setVoiceoverAt] = useState<number | null>(null);
   const [busy, setBusy] = useState(false);
   const [level, setLevel] = useState(0);
@@ -130,12 +132,18 @@ export function AudioDeck({
   const voiceoverRef = useRef<number | null>(null);
   const playersRef = useRef(new Map<string, HTMLAudioElement>());
   const fileRef = useRef<HTMLInputElement>(null);
+  // Voiceover countdown: mic stream waits here while the count runs.
+  const pendingStreamRef = useRef<MediaStream | null>(null);
+  const countdownTimerRef = useRef<number | null>(null);
+  const countdownRef = useRef(0);
 
   useEffect(
     () => () => {
       // Stop any capture/playback when the deck unmounts.
       recRef.current?.stream.getTracks().forEach((t) => t.stop());
       recRef.current?.ctx.close().catch(() => undefined);
+      if (countdownTimerRef.current !== null) window.clearInterval(countdownTimerRef.current);
+      pendingStreamRef.current?.getTracks().forEach((t) => t.stop());
       playersRef.current.forEach((a) => a.pause());
     },
     [],
@@ -181,21 +189,21 @@ export function AudioDeck({
     }
   };
 
-  const startRecording = async (voiceover: boolean) => {
+  const openMic = async (): Promise<{ stream: MediaStream; mime: string } | null> => {
     if (!navigator.mediaDevices?.getUserMedia) {
       notify("Recording needs a secure context (localhost or HTTPS).");
-      return;
+      return null;
     }
     const mime = pickMime();
     if (typeof MediaRecorder === "undefined") {
       notify("This browser can't record audio.");
-      return;
+      return null;
     }
-    let stream: MediaStream;
     try {
-      stream = await navigator.mediaDevices.getUserMedia({
+      const stream = await navigator.mediaDevices.getUserMedia({
         audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
       });
+      return { stream, mime };
     } catch (e) {
       const name = (e as Error).name;
       notify(
@@ -205,8 +213,11 @@ export function AudioDeck({
             ? "No microphone found on this machine."
             : `Couldn't open the microphone: ${(e as Error).message}`,
       );
-      return;
+      return null;
     }
+  };
+
+  const launchRecorder = (stream: MediaStream, mime: string, voiceover: boolean) => {
     const chunks: Blob[] = [];
     const recorder = new MediaRecorder(stream, mime ? { mimeType: mime } : undefined);
     recorder.ondataavailable = (e) => {
@@ -238,10 +249,67 @@ export function AudioDeck({
     setElapsed(0);
     setRecording(true);
     if (voiceover) {
-      voiceoverRef.current = playhead;
-      setVoiceoverAt(playhead);
-      onVoiceoverStart(playhead);
+      const at = voiceoverRef.current ?? playhead;
+      voiceoverRef.current = at;
+      setVoiceoverAt(at);
+      onVoiceoverStart(at);
     }
+  };
+
+  const stopCountdownTimer = () => {
+    if (countdownTimerRef.current !== null) {
+      window.clearInterval(countdownTimerRef.current);
+      countdownTimerRef.current = null;
+    }
+  };
+
+  const fireVoiceover = (mic: { stream: MediaStream; mime: string }) => {
+    stopCountdownTimer();
+    pendingStreamRef.current = null;
+    setCountdown(null);
+    launchRecorder(mic.stream, mic.mime, true);
+  };
+
+  const cancelVoiceover = () => {
+    stopCountdownTimer();
+    pendingStreamRef.current?.getTracks().forEach((t) => t.stop());
+    pendingStreamRef.current = null;
+    voiceoverRef.current = null;
+    setVoiceoverAt(null);
+    setCountdown(null);
+    notify("Voiceover cancelled — nothing recorded.");
+  };
+
+  const beginVoiceover = async () => {
+    if (!scene || busy || recording || countdown !== null) return;
+    const mic = await openMic();
+    if (!mic) return;
+    // Mic is hot before the count: capture and preview playback start
+    // together at zero, so the take lands in sync with the timeline.
+    pendingStreamRef.current = mic.stream;
+    voiceoverRef.current = playhead;
+    setVoiceoverAt(playhead);
+    countdownRef.current = VOICEOVER_COUNTDOWN_SECS;
+    setCountdown(VOICEOVER_COUNTDOWN_SECS);
+    countdownTimerRef.current = window.setInterval(() => {
+      const next = tickCountdown(countdownRef.current);
+      countdownRef.current = next ?? 0;
+      if (next === null) {
+        fireVoiceover(mic);
+      } else {
+        setCountdown(next);
+      }
+    }, 1000);
+  };
+
+  const startRecording = async (voiceover: boolean) => {
+    if (voiceover) {
+      await beginVoiceover();
+      return;
+    }
+    const mic = await openMic();
+    if (!mic) return;
+    launchRecorder(mic.stream, mic.mime, false);
   };
 
   const stopRecording = () => {
@@ -370,6 +438,24 @@ export function AudioDeck({
     <div>
       <SectionTitle>Voice &amp; audio</SectionTitle>
       {!recording ? (
+        countdown !== null ? (
+          <div
+            role="status"
+            aria-live="polite"
+            style={{ display: "flex", gap: 10, alignItems: "center", marginBottom: 8 }}
+          >
+            <span className="kv-nums" style={{ fontSize: 34, fontWeight: 700, minWidth: 40, textAlign: "center" }}>
+              {countdown}
+            </span>
+            <span style={{ flex: 1, fontSize: 13, color: "var(--kv-muted)" }}>
+              Get ready — the preview plays and recording starts at 0. The take
+              lands on the A1 lane at {voiceoverAt !== null ? `${voiceoverAt.toFixed(1)}s` : "the playhead"}.
+            </span>
+            <Btn small danger onClick={cancelVoiceover}>
+              Cancel
+            </Btn>
+          </div>
+        ) : (
         <div style={{ display: "flex", gap: 6, marginBottom: 8, flexWrap: "wrap" }}>
           <IconBtn onClick={() => void startRecording(false)} disabled={busy} label="Record a take into the library">
             ●
@@ -377,7 +463,7 @@ export function AudioDeck({
           <IconBtn
             onClick={() => void startRecording(true)}
             disabled={busy || !scene}
-            label={scene ? "Voiceover — play the preview and record over it; the take lands on the A1 lane where you started" : "Pick a scene first"}
+            label={scene ? "Voiceover — 3-2-1 countdown, then the preview plays while you record; the take lands on the A1 lane where you started" : "Pick a scene first"}
           >
             ◉
           </IconBtn>
@@ -393,6 +479,7 @@ export function AudioDeck({
             onChange={(e) => void onFile(e.target.files?.[0])}
           />
         </div>
+        )
       ) : (
         <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 8 }}>
           <IconBtn danger onClick={stopRecording} label="Stop recording">

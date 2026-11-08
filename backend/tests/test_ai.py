@@ -133,11 +133,12 @@ def test_grant_and_balance(factory, user):
         assert get_balance(s, user.id) == 50
 
 
-def test_generate_rejects_without_credits(factory, user):
+def test_generate_rejects_without_credits(factory, user, monkeypatch):
+    monkeypatch.setattr(settings, "free_monthly_credits", 0)
     with factory() as s:
         with pytest.raises(HTTPException) as exc:
             generate(
-                GenerateRequest(kind="image", prompt="a robot", provider="fake"),
+                GenerateRequest(kind="image", prompt="a robot", provider="cloud"),
                 BackgroundTasks(),
                 s,
                 user,
@@ -172,7 +173,7 @@ def test_fake_image_job_with_frame_attach(factory, user):
     assert done.result_url and done.result_url.endswith(".png")
     assert (settings.media_dir / done.result_url.removeprefix("/media/")).exists()
     with factory() as s:
-        assert get_balance(s, user.id) == 95  # 100 - 5 image cost, no refund
+        assert get_balance(s, user.id) == 100  # fake provider is local-free
     from komaverse.api.animate import list_frames
 
     with factory() as s:
@@ -249,6 +250,48 @@ def test_generated_frame_lands_outside_hand_sequences(factory, user):
     assert len(hand_ids) == 1  # Sequence 1 keeps only the hand-drawn frame
 
 
+def test_paint_on_frame_lands_as_layer(factory, user):
+    """'Draw X on the frame' paints onto that frame: the finished image
+    becomes a layer on the existing frame, not a new frame or gallery card."""
+    from komaverse.api.animate import (
+        FrameCreate,
+        SequenceCreate,
+        create_frame,
+        create_sequence,
+        list_frames,
+        list_sequences,
+    )
+
+    with factory() as s:
+        grant(GrantRequest(amount=100), s, user)
+        project = create_project(ProjectCreate(name="AI"), s, user)
+        seq = create_sequence(project.id, SequenceCreate(name="Sequence 1"), s, user)
+        frame = create_frame(
+            project.id, FrameCreate(name="hand", sequence_id=seq.id), s, user
+        )
+        job = generate(
+            GenerateRequest(
+                kind="image",
+                prompt="a samurai",
+                project_id=project.id,
+                provider="fake",
+                background=False,
+                paint_on_frame=frame.id,
+            ),
+            BackgroundTasks(),
+            s,
+            user,
+        )
+    run_ai_job(job.id, factory)
+    with factory() as s:
+        assert get_job(job.id, s, user).status == "done"
+    with factory() as s:
+        frames = list_frames(project.id, s, user)
+        assert [f.id for f in frames] == [frame.id]  # no new frame
+        assert len(frames[0].layers) == 1  # painted onto it
+        assert [q.name for q in list_sequences(project.id, s, user)] == ["Sequence 1"]
+
+
 def test_video_rejected_upfront_without_debit(factory, user):
     with factory() as s:
         grant(GrantRequest(amount=100), s, user)
@@ -312,7 +355,7 @@ def test_failed_job_with_paywall_on_still_refunds(factory, user, monkeypatch):
     with factory() as s:
         assert get_job(job.id, s, user).status == "failed"
     with factory() as s:
-        assert get_balance(s, user.id) == 100  # 5 deducted, 5 refunded
+        assert get_balance(s, user.id) == 200  # 100 grant + 100 free, 3 out and back
 
 
 def test_generate_defaults_to_configured_provider(factory, user, monkeypatch):

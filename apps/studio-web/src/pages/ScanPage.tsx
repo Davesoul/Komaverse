@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { api, mediaUrl, type Page, type Panel, type Project, type Scene } from "../api";
+import { api, mediaUrl, type Page, type Panel, type ProjectSummary, type ProjectView, type Scene } from "../api";
 import { getCurrentProject, getCurrentScene, gotoTab, setCurrentProject, setCurrentScene } from "../lib/studio";
 import {
   Btn,
@@ -20,8 +20,8 @@ import {
 type Mode = "select" | "reshape" | "draw";
 
 export default function ScanPage() {
-  const [projects, setProjects] = useState<Project[]>([]);
-  const [project, setProject] = useState<Project | null>(null);
+  const [projects, setProjects] = useState<ProjectSummary[]>([]);
+  const [project, setProject] = useState<ProjectView | null>(null);
   const [page, setPage] = useState<Page | null>(null);
   const [panels, setPanels] = useState<Panel[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -78,17 +78,21 @@ export default function ScanPage() {
     setProjects(await api.listProjects());
   }, []);
 
+  // Mirror of the open page id for async flows: state updaters must stay
+  // pure (StrictMode double-invokes them), so selection is computed here.
+  const openPageIdRef = useRef<string | null>(null);
   const refreshProject = useCallback(async (id: string) => {
-    const full = await api.getProject(id);
+    const full = await api.getProjectView(id);
     setProject(full);
     setCurrentProject(full.id);
-    setPage((prev) => {
-      const next = full.pages.find((p) => p.id === (prev?.id ?? full.pages[0]?.id));
-      const chosen = next ?? full.pages[0] ?? null;
-      setPanels(chosen?.panels ?? []);
-      setSelectedId(null);
-      return chosen;
-    });
+    const chosen =
+      full.pages.find((p) => p.id === (openPageIdRef.current ?? full.pages[0]?.id)) ??
+      full.pages[0] ??
+      null;
+    openPageIdRef.current = chosen?.id ?? null;
+    setPage(chosen);
+    setPanels(chosen?.panels ?? []);
+    setSelectedId(null);
   }, []);
 
   // Reload restores the persisted project (validated against the server
@@ -99,21 +103,25 @@ export default function ScanPage() {
       .then((ps) => {
         setProjects(ps);
         const stored = getCurrentProject();
-        if (stored && ps.some((p) => p.id === stored)) void refreshProject(stored);
+        if (stored && ps.some((p) => p.id === stored))
+          refreshProject(stored).catch((e) => setNotice(`Load failed: ${(e as Error).message}`));
       })
       .catch((e) => setNotice(`API offline: ${(e as Error).message}`));
   }, [refreshProject]);
 
   // Agent detection refreshes this tab live when it shows that project.
+  // Subscribed once per open project (not every render): the handler reads
+  // the published project id instead of a stale closure.
+  const projectId = project?.id ?? null;
   useEffect(() => {
     const onAgent = (e: Event) => {
       const pid = (e as CustomEvent).detail?.projectId as string | null | undefined;
-      if (!project || (pid && pid !== project.id)) return;
-      void refreshProject(project.id).catch(() => {});
+      if (!projectId || (pid && pid !== projectId)) return;
+      refreshProject(projectId).catch((e) => setNotice(`Refresh failed: ${(e as Error).message}`));
     };
     window.addEventListener("komaverse:agent-timeline-changed", onAgent);
     return () => window.removeEventListener("komaverse:agent-timeline-changed", onAgent);
-  });
+  }, [projectId, refreshProject]);
 
   // Page pixels via credentialed fetch → blob URL, so authed /media also
   // loads when the API lives on another origin (remote-URL desktop).
@@ -153,22 +161,26 @@ export default function ScanPage() {
   }, [pageId, pageImageUrl]);
 
   /** Keep the editor list, the open page, and the sidebar counts in sync. */
-  const syncPanels = (next: Panel[]) => {
-    setPanels(next);
-    setPage((prev) => (prev ? { ...prev, panels: next } : prev));
-    setProject((prev) =>
-      prev
-        ? {
-            ...prev,
-            pages: prev.pages.map((pg) =>
-              pg.id === pageId ? { ...pg, panels: next } : pg,
-            ),
-          }
-        : prev,
-    );
-  };
+  const syncPanels = useCallback(
+    (next: Panel[]) => {
+      setPanels(next);
+      setPage((prev) => (prev ? { ...prev, panels: next } : prev));
+      setProject((prev) =>
+        prev
+          ? {
+              ...prev,
+              pages: prev.pages.map((pg) =>
+                pg.id === pageId ? { ...pg, panels: next } : pg,
+              ),
+            }
+          : prev,
+      );
+    },
+    [pageId],
+  );
 
   const selectPage = (p: Page) => {
+    openPageIdRef.current = p.id;
     setPage(p);
     setPanels(p.panels);
     setSelectedId(null);
@@ -179,15 +191,18 @@ export default function ScanPage() {
   };
 
   const doDelete = useCallback(async () => {
-    if (!selectedId) return;
+    if (!selectedId || busy) return;
     const order = panels.find((p) => p.id === selectedId)?.reading_order;
     const label = order === undefined ? "this panel" : `panel ${order + 1}`;
     if (!window.confirm(`Delete ${label}? This can't be undone.`)) return;
+    setBusy("Deleting panel…");
     try {
       await api.deletePanel(selectedId);
     } catch (e) {
       setNotice(`Delete failed: ${(e as Error).message}`);
       return;
+    } finally {
+      setBusy("");
     }
     // Mirror the server renumber so the order stays dense locally.
     syncPanels(
@@ -197,7 +212,7 @@ export default function ScanPage() {
         .map((p, i) => ({ ...p, reading_order: i })),
     );
     setSelectedId(null);
-  }, [selectedId, panels]);
+  }, [selectedId, panels, busy, syncPanels]);
 
   // Width of the preview as a fraction of the box width that contains
   // the whole page: min(1, height-limited width). Never upscales past
@@ -422,7 +437,7 @@ export default function ScanPage() {
   };
 
   const doDetect = async () => {
-    if (!page) return;
+    if (!page || busy || reading) return;
     if (
       panels.length > 0 &&
       !window.confirm(
@@ -450,7 +465,7 @@ export default function ScanPage() {
 
   const [reading, setReading] = useState(false);
   const doReadPage = async () => {
-    if (!page || panels.length === 0) return;
+    if (!page || panels.length === 0 || busy || reading) return;
     setReading(true);
     setNotice("");
     try {
@@ -470,7 +485,7 @@ export default function ScanPage() {
   };
 
   const doAdd = async () => {
-    if (!page) return;
+    if (!page || busy) return;
     const w = Math.min(200, Math.max(20, page.width - 20));
     const h = Math.min(200, Math.max(20, page.height - 20));
     const box = {
@@ -479,12 +494,15 @@ export default function ScanPage() {
       w: Math.round(w),
       h: Math.round(h),
     };
+    setBusy("Adding panel…");
     try {
       const created = await api.addPanel(page.id, box);
       syncPanels([...panels, created]);
       setSelectedId(created.id);
     } catch (e) {
       setNotice(`Add failed: ${(e as Error).message}`);
+    } finally {
+      setBusy("");
     }
   };
 
@@ -504,27 +522,35 @@ export default function ScanPage() {
   };
 
   const moveSelected = async (delta: -1 | 1) => {
-    if (!page || !selectedId) return;
+    if (!page || !selectedId || busy) return;
     const ordered = [...panels].sort((a, b) => a.reading_order - b.reading_order);
     const i = ordered.findIndex((p) => p.id === selectedId);
     const j = i + delta;
     if (i < 0 || j < 0 || j >= ordered.length) return;
     const ids = ordered.map((p) => p.id);
     [ids[i], ids[j]] = [ids[j], ids[i]];
+    setBusy("Reordering…");
     try {
       syncPanels(await api.orderPanels(page.id, ids));
     } catch (e) {
       setNotice(`Reorder failed: ${(e as Error).message}`);
+    } finally {
+      setBusy("");
     }
   };
 
+  // Ref guard: two drops in the same tick would both read busy="" before
+  // either setBusy lands, so interleaved upload loops can't be prevented
+  // by state alone.
+  const uploadingRef = useRef(false);
   const doUploadMany = async (files: File[]) => {
-    if (!project || files.length === 0) return;
+    if (!project || files.length === 0 || uploadingRef.current) return;
     const imgs = files.filter((f) => f.type.startsWith("image/"));
     if (imgs.length === 0) {
       setNotice("Upload failed: no image files.");
       return;
     }
+    uploadingRef.current = true;
     const failed: string[] = [];
     let lastId = "";
     for (let i = 0; i < imgs.length; i++) {
@@ -534,22 +560,27 @@ export default function ScanPage() {
         if (autoDetect) {
           try {
             await api.detect(created.id, detector, direction, false);
-          } catch {
-            failed.push(`${imgs[i].name} (detect)`);
+          } catch (e) {
+            failed.push(`${imgs[i].name} (detect: ${(e as Error).message})`);
           }
         }
         lastId = created.id;
-      } catch {
-        failed.push(imgs[i].name);
+      } catch (e) {
+        failed.push(`${imgs[i].name} (${(e as Error).message})`);
       }
     }
+    uploadingRef.current = false;
     setBusy("");
-    await refreshProjects();
-    const full = await api.getProject(project.id);
-    setProject(full);
-    setCurrentProject(full.id);
-    const last = full.pages.find((p) => p.id === lastId) ?? full.pages[full.pages.length - 1] ?? null;
-    if (last) selectPage(last);
+    try {
+      await refreshProjects();
+      const full = await api.getProjectView(project.id);
+      setProject(full);
+      setCurrentProject(full.id);
+      const last = full.pages.find((p) => p.id === lastId) ?? full.pages[full.pages.length - 1] ?? null;
+      if (last) selectPage(last);
+    } catch (e) {
+      failed.push(`refresh (${(e as Error).message})`);
+    }
     const ok = imgs.length - failed.length;
     setNotice(
       `Uploaded ${ok}/${imgs.length}${autoDetect ? " (auto-detected)" : ""}` +
@@ -574,8 +605,17 @@ export default function ScanPage() {
     setBusy("Deleting page…");
     try {
       await api.deletePage(page.id);
+      // Splice locally: the page is gone, so pick a neighbor without
+      // refetching the whole project (counts refresh below).
+      const goneId = page.id;
+      const rest = project.pages.filter((p) => p.id !== goneId);
+      const next = rest[Math.min(idx, rest.length - 1)] ?? null;
+      openPageIdRef.current = next?.id ?? null;
+      setProject({ ...project, pages: rest });
+      setPage(next);
+      setPanels(next?.panels ?? []);
+      setSelectedId(null);
       await refreshProjects();
-      await refreshProject(project.id);
       setNotice(`Deleted page ${idx + 1}.`);
     } catch (e) {
       setNotice(`Delete failed: ${(e as Error).message}`);
@@ -596,6 +636,7 @@ export default function ScanPage() {
     try {
       await api.deleteProject(project.id);
       setProject(null);
+      openPageIdRef.current = null;
       setPage(null);
       setPanels([]);
       setSelectedId(null);
@@ -652,6 +693,10 @@ export default function ScanPage() {
   };
 
   const tone = /fail|offline|unavailable/i.test(notice) ? "warn" : "info";
+  // Reorder bounds for the ←/→ buttons: disabled at the ends instead of
+  // silently doing nothing.
+  const orderedNav = [...panels].sort((a, b) => a.reading_order - b.reading_order);
+  const selectedNavIdx = orderedNav.findIndex((p) => p.id === selectedId);
 
   return (
     <>
@@ -674,7 +719,7 @@ export default function ScanPage() {
           />
           <SelectInput
             value={project?.id ?? ""}
-            onChange={(e) => { if (e.target.value) void refreshProject(e.target.value); }}
+            onChange={(e) => { if (e.target.value) refreshProject(e.target.value).catch((err) => setNotice(`Load failed: ${(err as Error).message}`)); }}
             aria-label="Project"
             title="Pick the project to scan"
             style={{ width: "100%", marginBottom: 8 }}
@@ -683,11 +728,10 @@ export default function ScanPage() {
             {projects.filter((p) => {
               const q = sideQuery.trim().toLowerCase();
               if (!q) return true;
-              if (p.name.toLowerCase().includes(q)) return true;
-              return p.pages.some((pg) => (pg.name || "").toLowerCase().includes(q));
+              return p.name.toLowerCase().includes(q);
             }).map((p) => (
               <option key={p.id} value={p.id}>
-                {p.name} ({p.pages.length} pg)
+                {p.name} ({p.page_count} pg)
               </option>
             ))}
           </SelectInput>
@@ -789,6 +833,7 @@ export default function ScanPage() {
                         height={28}
                         style={{ objectFit: "cover", borderRadius: 3, display: "block" }}
                         loading="lazy"
+                        decoding="async"
                       />
                     )}
                     {p.name || p.reading_order + 1}
@@ -797,10 +842,10 @@ export default function ScanPage() {
             </div>
             {selectedId && (
               <div style={{ display: "flex", gap: 4, marginTop: 6, alignItems: "center", flexWrap: "wrap" }}>
-                <IconBtn label="Move panel earlier in reading order" onClick={() => moveSelected(-1)}>
+                <IconBtn label="Move panel earlier in reading order" disabled={!!busy || selectedNavIdx <= 0} onClick={() => moveSelected(-1)}>
                   ←
                 </IconBtn>
-                <IconBtn label="Move panel later in reading order" onClick={() => moveSelected(1)}>
+                <IconBtn label="Move panel later in reading order" disabled={!!busy || selectedNavIdx < 0 || selectedNavIdx >= orderedNav.length - 1} onClick={() => moveSelected(1)}>
                   →
                 </IconBtn>
                 {renamingPanel === selectedId ? (
@@ -867,7 +912,7 @@ export default function ScanPage() {
                 <option value="local">Local vision model (fallback heuristic)</option>
                 <option value="openrouter">OpenRouter vision (fallback local)</option>
               </SelectInput>
-              <PrimaryBtn onClick={doDetect} disabled={!!busy}>
+              <PrimaryBtn onClick={doDetect} disabled={!!busy || reading}>
                 Detect panels
               </PrimaryBtn>
               <Btn
@@ -904,8 +949,8 @@ export default function ScanPage() {
               <Btn active={mode === "draw"} onClick={() => setMode("draw")} title="Draw a new panel box (D)">
                 Draw box
               </Btn>
-              <IconBtn onClick={doAdd} label="Add a panel box">＋</IconBtn>
-              <IconBtn danger disabled={!selectedId} onClick={doDelete} label="Delete the selected panel">
+              <IconBtn onClick={doAdd} disabled={!!busy} label="Add a panel box">＋</IconBtn>
+              <IconBtn danger disabled={!selectedId || !!busy} onClick={doDelete} label="Delete the selected panel">
                 ×
               </IconBtn>
               <IconBtn danger disabled={!!busy} onClick={doDeletePage} label="Delete this page and its scan file">

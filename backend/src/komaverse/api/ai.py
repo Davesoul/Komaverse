@@ -61,6 +61,7 @@ from komaverse.db_models import (
     PageRow,
     PanelRow,
     SequenceRow,
+    SubscriptionRow,
     UserRow,
 )
 from komaverse.models import ClonedVoice, CreditEntry, Entity, Job
@@ -69,6 +70,12 @@ from komaverse.renderer import (
     audio_has_stream,
     composite_frame_image,
     transcode_to_wav,
+)
+from komaverse.user_keys import (
+    BYOK_PROVIDERS,
+    UnreadableKey,
+    VaultUnavailable,
+    get_user_key,
 )
 
 router = APIRouter(prefix="/api/v1")
@@ -148,6 +155,36 @@ def refund_job(session: Session, job: JobRow) -> int:
     if settings.paywall_enabled and amount > 0:
         add_entry(session, job.user_id, amount, f"refund {job.id}", job.id)
     return amount
+
+
+def _has_active_subscription(session: Session, user_id: str) -> bool:
+    """Paid tier? Reads only (billing.py owns subscription writes)."""
+    return session.execute(
+        select(SubscriptionRow.id).where(
+            SubscriptionRow.user_id == user_id,
+            SubscriptionRow.status == "active",
+        ).limit(1)
+    ).first() is not None
+
+
+def _check_own_key_daily_limit(session: Session, user_id: str) -> None:
+    """Freemium own-key guardrail: N own-key generations per UTC day."""
+    limit = settings.own_key_freemium_daily_limit
+    if limit <= 0:
+        return
+    day_start = datetime.now(UTC).replace(hour=0, minute=0, second=0, microsecond=0)
+    used = session.execute(
+        select(func.count()).select_from(JobRow).where(
+            JobRow.user_id == user_id,
+            JobRow.used_own_key.is_(True),
+            JobRow.created_at >= day_start,
+        )
+    ).scalar() or 0
+    if used >= limit:
+        raise HTTPException(
+            429,
+            f"own-key freemium limit reached ({limit}/day) — subscribe for unlimited",
+        )
 
 
 class GenerateRequest(BaseModel):
@@ -411,7 +448,14 @@ def run_ai_job(job_id: str, factory=None) -> None:
         job.progress = 0.1
         session.commit()
         try:
-            provider = get_provider(job.provider)
+            own_key: str | None = None
+            if job.used_own_key:
+                try:
+                    own_key = get_user_key(session, job.user_id, job.provider)
+                except (UnreadableKey, VaultUnavailable) as exc:
+                    raise ProviderError(f"own key unreadable: {exc}") from None
+            provider_kwargs = {"api_key": own_key} if own_key is not None else {}
+            provider = get_provider(job.provider, **provider_kwargs)
             try:
                 entities = json.loads(job.entities_json or "[]")
             except ValueError:
@@ -689,7 +733,20 @@ def generate(
             target = session.get(FrameRow, body.paint_on_frame)
             if target is None or target.project_id != body.project_id:
                 raise HTTPException(400, f"unknown frame: {body.paint_on_frame}")
-    cost = 0 if is_free_provider(body.provider) else quote_cost(body.kind, body.seconds)
+    own_key: str | None = None
+    if body.provider in BYOK_PROVIDERS:
+        try:
+            own_key = get_user_key(session, user.id, body.provider)
+        except VaultUnavailable as exc:
+            raise HTTPException(503, str(exc)) from None
+        except UnreadableKey as exc:
+            raise HTTPException(400, str(exc)) from None
+    if own_key is not None and settings.paywall_enabled:
+        # Own-key generations bill the user's provider account, not studio
+        # credits — but freemium stays rate-limited; paid tiers are unlimited.
+        if not _has_active_subscription(session, user.id):
+            _check_own_key_daily_limit(session, user.id)
+    cost = 0 if (own_key is not None or is_free_provider(body.provider)) else quote_cost(body.kind, body.seconds)
     if not spend_credits(session, user.id, cost, f"{body.kind} generation"):
         raise HTTPException(402, f"insufficient credits (need {cost})")
     video_dims = _parse_video_size_str(body.size) if body.kind == "video" else None
@@ -706,6 +763,7 @@ def generate(
         height=video_dims[1] if video_dims else (0 if body.kind == "video" else min(max(body.height, 64), 2048)),
         seconds=min(max(body.seconds, 0.5), 10.0),
         cost_credits=cost,
+        used_own_key=own_key is not None,
         attach_frame=body.attach_frame,
         seed=body.seed,
         negative_prompt=body.negative_prompt,

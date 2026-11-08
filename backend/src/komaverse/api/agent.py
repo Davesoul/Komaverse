@@ -11,10 +11,16 @@ from sqlalchemy import delete, desc, select
 from sqlalchemy.orm import Session
 
 from komaverse.agent import (
+    TRACE_DETAILS,
+    TRACE_MODES,
     AgentRef,
     auto_direct_core,
     run_agent_turn,
     run_agent_turn_stream,
+    trace_default_detail,
+    trace_default_mode,
+    trace_default_raw,
+    trace_default_thin,
 )
 from komaverse.ai.providers import (
     ProviderError,
@@ -86,6 +92,11 @@ class AgentStatusOut(BaseModel):
     voice_model: str | None
     # Effective provider per kind (chat/vision/image/voice routable, video fixed).
     providers: dict[str, str] = {}
+    # Effective drawing defaults (Brain panel linework frontend).
+    trace_mode: str = "ink"
+    trace_detail: str = "auto"
+    trace_thin: bool = True
+    trace_raw: bool = False
     # Studio override keys currently active (env wins when absent).
     overrides: list[str] = []
     # Secret keys with a non-empty effective value (env or studio row).
@@ -117,6 +128,12 @@ class AgentConfigBody(BaseModel):
     baseten_api_key: str | None = None
     elevenlabs_api_key: str | None = None
     ai_api_key: str | None = None
+    # Drawing defaults: linework frontend, detail, thin lines. Null leaves
+    # the key alone; blank mode/detail clears back to the built-in default.
+    trace_mode: str | None = None
+    trace_detail: str | None = None
+    trace_thin: bool | None = None
+    trace_raw: bool | None = None
 
 
 class ChatTurnOut(BaseModel):
@@ -484,6 +501,10 @@ def agent_status(
         providers=providers,
         overrides=sorted(get_ai_overrides(session).keys()),
         keys_set=sorted(k for k in AI_SECRET_KEYS if getattr(settings, k, None)),
+        trace_mode=trace_default_mode(),
+        trace_detail=trace_default_detail(),
+        trace_thin=trace_default_thin(),
+        trace_raw=trace_default_raw(),
     )
 
 
@@ -501,7 +522,20 @@ def agent_config(
     OpenRouter-only end to end, so it takes a model but no provider;
     transcription is Meta-only the same way. Voice (TTS) routes between
     ElevenLabs cloud and the local free-tts server like chat/vision/image.
+    Studio-wide keys affect everyone, so only the first (admin) account
+    may write them.
     """
+    oldest = (
+        session.execute(
+            select(UserRow.id).order_by(UserRow.created_at, UserRow.id)
+        )
+        .scalars()
+        .first()
+    )
+    if oldest != user.id:
+        raise HTTPException(
+            403, "Studio config needs the first (admin) account."
+        )
     if body.provider is not None:
         text = body.provider.strip().lower()
         if text:
@@ -538,6 +572,29 @@ def agent_config(
         if wanted is None:
             continue
         set_ai_override(session, key, wanted.strip() or None)
+    # Phase 1.6: drawing defaults (Brain panel linework frontend).
+    if body.trace_mode is not None:
+        text = body.trace_mode.strip().lower()
+        if text and text not in TRACE_MODES:
+            raise HTTPException(
+                400,
+                f'unknown trace mode "{body.trace_mode}" '
+                f"(want: {'|'.join(TRACE_MODES)})",
+            )
+        set_ai_override(session, "trace_mode", text or None)
+    if body.trace_detail is not None:
+        text = body.trace_detail.strip().lower()
+        if text and text not in TRACE_DETAILS:
+            raise HTTPException(
+                400,
+                f'unknown trace detail "{body.trace_detail}" '
+                "(want fast|fine|auto)",
+            )
+        set_ai_override(session, "trace_detail", text or None)
+    if body.trace_thin is not None:
+        set_ai_override(session, "trace_thin", "true" if body.trace_thin else "false")
+    if body.trace_raw is not None:
+        set_ai_override(session, "trace_raw", "true" if body.trace_raw else "false")
     apply_ai_overrides(session)
     # Phase 2: models against the now-effective providers.
     for kind in ("chat", "vision", "image", "video", "transcribe", "voice"):

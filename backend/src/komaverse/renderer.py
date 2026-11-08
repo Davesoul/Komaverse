@@ -457,6 +457,49 @@ def audio_has_stream(path: Path) -> bool:
         return False
     return "Audio:" in (proc.stderr or "")
 
+def ffmpeg_info() -> dict:
+    """Probe the bundled ffmpeg binary: presence, libx264, libass.
+
+    Returns {"exe", "ok", "libx264", "libass", "version"}. Render needs
+    libx264 (H.264 MP4); subtitle burn-in degrades to the VTT sidecar
+    without the libass `subtitles`/`ass` filter, so callers can warn
+    instead of failing the export.
+    """
+    try:
+        import imageio_ffmpeg  # noqa: PLC0415 — heavy optional at call time
+
+        exe = imageio_ffmpeg.get_ffmpeg_exe()
+    except Exception:
+        return {"exe": "", "ok": False, "libx264": False, "libass": False,
+                "version": ""}
+    try:
+        proc = subprocess.run(
+            [exe, "-hide_banner", "-encoders"],
+            capture_output=True, text=True, timeout=30,
+        )
+        out = proc.stdout or ""
+        filters = subprocess.run(
+            [exe, "-hide_banner", "-filters"],
+            capture_output=True, text=True, timeout=30,
+        ).stdout or ""
+    except (OSError, subprocess.SubprocessError):
+        return {"exe": exe, "ok": False, "libx264": False, "libass": False,
+                "version": ""}
+    if proc.returncode != 0:
+        return {"exe": exe, "ok": False, "libx264": False, "libass": False,
+                "version": ""}
+    version = (out.splitlines() or [""])[0][:120]
+    has_x264 = "libx264" in out
+    has_ass = (" subtitles " in filters) or (" ass " in filters)
+    return {
+        "exe": exe,
+        "ok": has_x264,
+        "libx264": has_x264,
+        "libass": has_ass,
+        "version": version,
+    }
+
+
 def transcode_to_wav(data: bytes, suffix: str) -> bytes:
     """Normalize arbitrary audio bytes to 16 kHz mono 16-bit WAV.
 

@@ -248,6 +248,7 @@ class Job(BaseModel):
     seed: int | None = None  # seed sent to the provider (random when unset)
     negative_prompt: str = ""
     cost_credits: int = 0  # debited at creation (0 when free)
+    used_own_key: bool = False  # ran on the user's own provider key: studio paid nothing
     style: str = "none"
     genre: str = "none"  # GENRE_TAGS key (anime direction grammar)
     camera_move: str = "none"

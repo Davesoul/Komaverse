@@ -94,6 +94,25 @@ export default function UsageCard() {
             ? ` — ${projects.find((p) => p.id === projectId)?.name ?? "project"}`
             : ""}
         </h2>
+        <button
+          type="button"
+          title="Open the Koma Portal (credits & top-ups)"
+          onClick={() =>
+            window.dispatchEvent(new CustomEvent("komaverse:goto-tab", { detail: "portal" }))
+          }
+          style={{
+            border: "1px solid var(--kv-border)",
+            borderRadius: 999,
+            padding: "2px 10px",
+            fontSize: 12,
+            cursor: "pointer",
+            background: "transparent",
+            color: "var(--kv-accent)",
+            fontWeight: 700,
+          }}
+        >
+          Koma Portal →
+        </button>
         <div style={{ display: "flex", gap: 4 }} role="group" aria-label="Usage period">
           {PERIODS.map((p) => (
             <button

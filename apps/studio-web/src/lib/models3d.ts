@@ -4,7 +4,6 @@
  * size, ~10MB saved): the loader is pointed at a pixel instead, and the
  * resulting map is dropped during conversion — no 404s, no bad shading.
  * Any failure is the caller's to handle quietly. */
-/* eslint-disable @typescript-eslint/no-explicit-any */
 
 export const PIXEL = "data:image/gif;base64,R0lGODlhAQABAAAAACw=";
 

@@ -39,6 +39,8 @@ from komaverse.api.scans import (
     router,
     upload_page,
 )
+from komaverse.config import settings
+from komaverse.db_models import Base, ClipRow, PanelRow, UserRow
 
 
 def test_rename_page_and_panel(factory, user):
@@ -78,8 +80,6 @@ def test_get_page(factory, user):
     with factory() as s, pytest.raises(HTTPException) as exc:
         get_page("missing", s, user)
     assert exc.value.status_code == 404
-from komaverse.config import settings
-from komaverse.db_models import Base, ClipRow, PanelRow, UserRow
 
 
 @pytest.fixture
@@ -323,6 +323,9 @@ def test_scan_routes_registered():
         "/api/v1/projects/{project_id}",
         "/api/v1/projects/{project_id}/pages",
         "/api/v1/projects/{project_id}/storage",
+        "/api/v1/projects/{project_id}/summary",
+        "/api/v1/projects/{project_id}/timeline",
+        "/api/v1/projects/{project_id}/view",
         "/api/v1/pages/{page_id}",
         "/api/v1/pages/{page_id}/detect",
         "/api/v1/pages/{page_id}/read",
@@ -573,14 +576,13 @@ def test_delete_page_blocked_when_clipped(factory, user):
 
 
 def test_delete_project_removes_everything(factory, user):
-    from komaverse.api.animate import create_frame
-    from komaverse.api.animate import FrameCreate
+    from komaverse.api.animate import FrameCreate, create_frame
 
     with factory() as s:
         project = create_project(ProjectCreate(name="DX"), s, user)
     with factory() as s:
         page = upload(s, user, project.id, fake_page())
-        frame = create_frame(
+        create_frame(
             project.id, FrameCreate(name="F", width=64, height=64), s, user
         )
     with factory() as s:

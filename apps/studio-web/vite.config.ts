@@ -3,6 +3,21 @@ import { defineConfig } from "vite";
 
 export default defineConfig({
   plugins: [react()],
+  build: {
+    chunkSizeWarningLimit: 600,
+    rollupOptions: {
+      output: {
+        // Stable vendor chunks: tab switches and deploys re-download only
+        // the chunks that changed; three.js (~700KB) stays in its own
+        // lazy chunk and never blocks first paint.
+        manualChunks: {
+          "react-vendor": ["react", "react-dom"],
+          "three-vendor": ["three"],
+          "anim-vendor": ["animejs", "lenis", "perfect-freehand"],
+        },
+      },
+    },
+  },
   server: {
     port: 5173,
     strictPort: true,

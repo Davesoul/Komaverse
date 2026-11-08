@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Btn, IconBtn, SelectInput } from "./ui";
+import { IconBtn, SelectInput } from "./ui";
 
 export interface TimelineClipInfo {
   id: string;

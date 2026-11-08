@@ -195,7 +195,7 @@ def uptime_seconds() -> float:
 
 
 def check_readiness(database_url: str, media_dir: Path) -> tuple[bool, dict[str, str]]:
-    """DB connect + media writability. Pure-ish: takes args, no globals."""
+    """DB + media + export toolchain. Pure-ish: takes args, no globals."""
     checks: dict[str, str] = {}
     try:
         from sqlalchemy import create_engine, text
@@ -215,4 +215,14 @@ def check_readiness(database_url: str, media_dir: Path) -> tuple[bool, dict[str,
         checks["media"] = "ok"
     except Exception as exc:
         checks["media"] = f"fail: {exc}"
-    return all(v == "ok" for v in checks.values()), checks
+    try:
+        from komaverse.renderer import ffmpeg_info  # noqa: PLC0415 — heavy
+
+        info = ffmpeg_info()
+        if info.get("ok"):
+            checks["ffmpeg"] = "ok" if info.get("libass") else "ok (no libass: VTT only)"
+        else:
+            checks["ffmpeg"] = f"fail: {info.get('version') or 'missing libx264'}"
+    except Exception as exc:
+        checks["ffmpeg"] = f"fail: {exc}"
+    return all(v == "ok" or v.startswith("ok ") for v in checks.values()), checks

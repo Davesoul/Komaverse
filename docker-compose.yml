@@ -11,6 +11,10 @@ services:
         required: false
     environment:
       SERVE_WEB: "true"
+      # Keep the DB + uploads on the persistent volume (must match the
+      # VOLUME /data + ENV defaults in the Dockerfile).
+      DATABASE_URL: "sqlite:////data/komaverse.db"
+      MEDIA_DIR: "/data/media"
     volumes:
       - komaverse-data:/data
       - hf-cache:/root/.cache

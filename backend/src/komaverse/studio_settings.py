@@ -50,6 +50,10 @@ AI_OVERRIDE_KEYS = (
     "local_chat_model",
     "local_vision_model",
     "local_image_model",
+    "trace_mode",
+    "trace_detail",
+    "trace_thin",
+    "trace_raw",
 )
 
 # Provider -> settings-field prefix for its selectable models.

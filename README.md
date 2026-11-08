@@ -14,11 +14,10 @@ Built for the Cerebral Valley × Meta hackathon on Meta Model API models
 ([Muse Spark](https://developers.meta.ai/docs/models) chat/vision, Muse Image,
 Muse Voice, SAM 3.1) plus open-weight Muse models.
 
-![Komaverse demo reel](docs/assets/readme/demo.gif)
+<video src="https://github.com/Davesoul/Komaverse/raw/main/docs/assets/demo/00-intro.mp4" width="100%" controls></video>
 
-*Above: the real app — landing, home, scan, draw, render, media, and the AI
-dock. Full clip: [demo.mp4](docs/assets/readme/demo.mp4) (13s, 720p).
-Hackathon walkthrough (3 min): [youtube.com/watch?v=npx_7S3tkvU](https://youtu.be/npx_7S3tkvU).*
+*Above: the Komaverse ident intro. Full app tour: [demo.mp4](docs/assets/readme/demo.mp4) (13s, 720p).*
+*Hackathon walkthrough (3 min): [youtube.com/watch?v=npx_7S3tkvU](https://youtu.be/npx_7S3tkvU).*
 
 ## See it
 
@@ -40,6 +39,21 @@ Older captures: [01-landing](docs/assets/readme/01-landing.png) ·
 
 ## Made with Komaverse
 
+Kyo — an original character designed, posed, and animated in-app, from
+model sheet to finished cuts:
+
+<video src="https://github.com/Davesoul/Komaverse/raw/main/docs/assets/demo/gen-kyo-straight-punch.mp4" width="100%" controls></video>
+
+*Straight punch, 4s — cel lineart, hard shadows, stepped cadence.*
+
+<video src="https://github.com/Davesoul/Komaverse/raw/main/docs/assets/demo/gen-kyo-sakuga-fight.mp4" width="100%" controls></video>
+
+*Sakuga fight cut.*
+
+![Kyo model sheet](docs/assets/demo/gen-kyo-model-sheet.png)
+
+*Model sheet: the on-model anchor every shot conditions toward.*
+
 Brand marks generated in-app through the AI widget (`create_image`,
 provider-default image model, no prompt engineering beyond the subject):
 
@@ -53,6 +67,12 @@ provider-default image model, no prompt engineering beyond the subject):
    panels, SFX, cues, and page text (vision model reads what detectors can't).
 2. **Draw** — layered canvas with onion-free pan/zoom, floatbar tools, and a
    per-frame ⧉ that copies the frame's `@frame:` reference for the chat.
+   The agent redraws art as plotter strokes (ink/edges/bezier plus neural
+   frontends a2s, mangaline, anilines, anilines-detail, linedistiller), paints
+   whole animation passes with the `frames` op (per-shape frame scopes, `at:`
+   slides), and places tech lineart directly with `raw` (no brush replay).
+   The Brain panel's **Drawing** section picks the linework frontend, detail,
+   thin lines, and Direct output studio-wide — no phrases needed.
 3. **Render** — multi-lane timeline (video/audio/subs/overlay), head-trim from
    either end, per-clip speed/volume/fades, Ken Burns motion, native-audio MP4
    export that matches the preview frame-for-frame.

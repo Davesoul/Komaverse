@@ -45,6 +45,16 @@ scrape_configs:
 Useful alerts: `rate(requests_total{status=~"5.."}[5m]) > 0`,
 `rate(ai_jobs_total{status="failed"}[15m]) > 0.1`, `/ready != 200`.
 
+## Rate limits
+
+Per-IP sliding windows enforced in `SecurityMiddleware` (`/api/`, `/media/`).
+Single-process dev uses in-memory buckets; with N uvicorn workers each
+worker enforces its own bucket, so the effective global limit is
+`limit × N`. Set `REDIS_URL` to share one bucket across workers/hosts
+(fixed-window INCR+EXPIRE; a missing/unreachable Redis silently falls
+back to in-memory so limits never take the API down). 429 responses
+carry `Retry-After`.
+
 ## Client funnel
 
 The web app POSTs window errors, unhandled rejections, and API 5xx responses

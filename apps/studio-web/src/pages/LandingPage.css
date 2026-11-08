@@ -899,3 +899,39 @@
   outline: 2px solid var(--kv-accent-border);
   outline-offset: 2px;
 }
+
+.lv-dl-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 12px;
+  margin-top: 20px;
+}
+.lv-dl-card {
+  background: var(--kv-surface);
+  border: 1px solid var(--kv-border);
+  border-radius: var(--kv-radius);
+  padding: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  text-decoration: none;
+  color: inherit;
+}
+.lv-dl-card:hover {
+  border-color: var(--kv-accent-text);
+}
+.lv-dl-os {
+  font-size: 18px;
+  font-weight: 800;
+}
+.lv-dl-file {
+  font-size: 13px;
+  color: var(--kv-muted);
+}
+.lv-dl-cta {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--kv-accent-text);
+  margin-top: 8px;
+}
+

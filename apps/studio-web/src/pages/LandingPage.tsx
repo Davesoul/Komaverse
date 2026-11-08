@@ -1,7 +1,7 @@
 import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import { Btn, Chip, ImpactBurst, ImpactFlash, Kanji, PrimaryBtn, SfxBtn } from "../components/ui";
 import { Magnet } from "../components/Magnet";
-import { prefersReducedMotion, useRevealScope } from "../components/Reveal";
+import { useRevealScope } from "../components/Reveal";
 import { useKineticScope } from "../components/Kinetic";
 import Backdrop from "../components/Backdrop";
 import ShowcaseReels from "../components/ShowcaseReels";
@@ -104,9 +104,14 @@ const PRICING = [
 export default function LandingPage({
   onSignIn,
   onRegister,
+  hideNav,
 }: {
   onSignIn: () => void;
   onRegister: () => void;
+  /** Embedded in the logged-in studio shell (preview): the shell header
+   * is already the nav, so the landing's own <nav> stays hidden and the
+   * page never shows two stacked navigation bars. */
+  hideNav?: boolean;
 }) {
   // Reduced motion stills the UI chrome (splash, smooth scroll, hero
   // stagger, sheen, magnet, 3D turntable) — but the reels are content, not
@@ -270,7 +275,7 @@ export default function LandingPage({
         <Suspense fallback={null}>
           <ScrollCompanion dockRef={restRef} onDock={setDocked} />
         </Suspense>
-        <nav className={`lv-nav${scrolled ? " scrolled" : ""}`}>
+        {!hideNav && (<nav className={`lv-nav${scrolled ? " scrolled" : ""}`}>
           <span className="lv-brand">
             <img src={LOGO} alt="" />
             <span>Komaverse</span>
@@ -280,10 +285,11 @@ export default function LandingPage({
             <a href="#features" className="lv-link">Features</a>
             <a href="#how" className="lv-link">How it works</a>
             <a href="#pricing" className="lv-link">Pricing</a>
+            <a href="#download" className="lv-link">Download</a>
             <Btn small onClick={onSignIn}>Sign in</Btn>
             <PrimaryBtn small onClick={onRegister}>Create</PrimaryBtn>
           </div>
-        </nav>
+        </nav>)}
 
         <section className="lv-hero">
           <Kanji char="漫画" />
@@ -505,6 +511,39 @@ export default function LandingPage({
           <p className="lv-price-note">
             Demo preview — checkout activates at launch. Detection, drawing,
             and export are free and unlimited.
+          </p>
+        </section>
+
+        <section id="download" className="lv-section" data-reveal>
+          <p className="lv-label">Download</p>
+          <h2 className="lv-h2">Take the studio to your desktop</h2>
+          <p>
+            Native installers for Windows, macOS, and Linux. The desktop app
+            needs a backend — run it locally, or point the Home tab at your
+            hosted server.
+          </p>
+          <div className="lv-dl-grid">
+            {[
+              { os: "Windows", file: ".msi installer" },
+              { os: "macOS", file: ".dmg disk image" },
+              { os: "Linux", file: ".AppImage" },
+            ].map((d) => (
+              <a
+                key={d.os}
+                className="lv-dl-card"
+                href="https://github.com/Davesoul/Komaverse/releases/latest"
+                target="_blank"
+                rel="noreferrer"
+              >
+                <span className="lv-dl-os">{d.os}</span>
+                <span className="lv-dl-file">{d.file}</span>
+                <span className="lv-dl-cta">Download →</span>
+              </a>
+            ))}
+          </div>
+          <p className="lv-price-note">
+            Prefer the browser? The web studio runs the same build — pick
+            Open App above. Releases are published from the main branch.
           </p>
         </section>
 

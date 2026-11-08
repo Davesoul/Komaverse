@@ -27,6 +27,11 @@ def test_paint_routing_draw_subject_on_frame():
     assert not _wants_paint_on_frame("draw a red circle on the frame")
     assert not _wants_paint_on_frame("generate a samurai on the frame")
     assert not _wants_paint_on_frame("draw a samurai")
+    assert _wants_paint_on_frame("draw a samurai", has_frame=True)
+    assert _wants_paint_on_frame("draw naruto on the frames", has_frame=True)
+    assert not _wants_paint_on_frame("generate a samurai", has_frame=True)
+    assert not _wants_paint_on_frame("draw a red circle", has_frame=True)
+    assert not _wants_paint_on_frame("redraw @media:abc123 as night", has_frame=True)
     assert not _wants_paint_on_frame("generate a video of a duel")
     assert _wants_paint_on_frame("draw a samurai on frame")
     assert not _wants_paint_on_frame("redraw @media:abc123 as night")
@@ -698,6 +703,20 @@ def test_agent_demo_draws_a_shape(factory, user):
     out = turn(factory, user, "draw a red circle", pid)
     assert any(a["tool"] == "manage_layers" for a in out["actions"])
     assert "Drew 1 shape" in out["actions"][0]["summary"]
+
+
+def test_agent_deictic_frame_words_keep_open_frame(factory, user):
+    """'on the current frame' / 'on the frames' still targets the open
+    frame instead of erroring or generating."""
+    pid = seed_draw(factory, user)
+    a = draw_frame_id(factory, user, pid, "Alpha")
+    draw_frame_id(factory, user, pid, "Beta")
+    out = turn(factory, user, "draw naruto on the current frame", pid,
+               current_frame_id=a)
+    assert "Unknown frame" not in out["reply"]
+    out = turn(factory, user, "draw naruto on the frames", pid,
+               current_frame_id=a)
+    assert "Unknown frame" not in out["reply"]
 
 
 def test_agent_turn_scopes_to_current_frame(factory, user):

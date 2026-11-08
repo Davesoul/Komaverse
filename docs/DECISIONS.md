@@ -1543,3 +1543,83 @@ color-theory (cel shadow colors, light logic), manga-literacy
 - Reported: "Use" on a clone visibly changed the Brain row, but Generate still spoke with the default female Kokoro voice. Root cause: the Generate box (and the agent's `synthesize_voice` with no voice) sends no voice, and `synthesize_take` treated blank as "default engine voice" — the saved `freetts_voice_model`/`elevenlabs_voice_model` was never consulted. With the row set to `xtts:<id>` the blank path didn't even reach the clone branch (it tried Kokoro instead).
 - `synthesize_take` now resolves a blank voice from the Brain row first: ElevenLabs provider → saved ElevenLabs id; otherwise the saved free-tts value (`xtts:<clone>` routes to the local clone flow regardless of provider, since a clone id is unambiguous). Explicit voices behave exactly as before.
 - Pinned by `test_synthesize_blank_voice_uses_brain_clone` (blank voice + Brain row on the clone → fake XTTS called with the clone's ref wav; failed before with a Kokoro attempt).
+## ADR-75: Trace lab is a separate route backed by a debug endpoint (accepted)
+
+Agent trial-and-error could not diagnose trace quality: every attempt hid
+which pipeline stage introduced the damage. The lab (`#/trace-lab`, not a
+tab) uploads a reference and returns every stage as images plus every
+stroke's frame-coordinate waypoints (`POST /api/v1/trace/debug`, pure
+`run_trace_lab`, auth required, nothing stored, no quota). Production modes
+(ink/edges/bezier) call `trace_ink_to_strokes` itself, so the lab shows
+byte-identical output to what the agent draws — no parallel implementation
+to drift. Pinned by `test_trace_lab.py` including a shapes-match-production
+parity test. Full contract in `docs/TRACE_LAB.md`.
+
+## ADR-76: Lab comparison modes use upstream frontends, our ordering (accepted)
+
+Researched [linedraw](https://github.com/LingDong-/linedraw) (plotter
+polylines: Canny edges stitched to contours + separate tone hatching, greedy
+order with reversal) and [Anime2Sketch](https://github.com/Mukosame/Anime2Sketch)
+(U-Net anime lineart, 512 box, CPU-viable, raster output). The architectural
+verdict: linedraw never lets tone touch its contour tracer (shading is a
+separate hatch pass) — our skeletonizer eats tone dots, which is the
+confetti source. Both ship as lab-only modes sharing production's extracted
+`_polys_to_shapes` ordering tail (zero behavior change, full trace suite
+green), so runs compare frontends, never ordering. Deviations from upstream
+are documented in code (no Perlin wobble, no loop self-join). The 207MB
+netG.pth stays out of the repo (`$A2S_WEIGHTS` or the local spike path).
+Live Naruto verdicts: linedraw contours read clearly at 92% coverage but
+hatch chains run panel-wide and heavy; the A2S sketch is clean but our
+threshold drops its faint lines (182 strokes survive). Both fixes are now
+visible, isolated follow-ups instead of guesses.
+## ADR-77: Replay measures cores and values, not binary masks (accepted)
+
+Same-centerline A/B proved the tracer finds the lines but the replay
+ruins them: thin replay of a2s centerlines reads clearly while
+width+pressure replay renders blobby. Two measured causes, both in
+the width path. First, the binary distance transform sees a soft
+pencil line's whole gray halo: widths are now min(binary-dist,
+gray-profile FWHM along the walk normal), never wider than before,
+only narrower where gray evidence shows a thinner core (pinned by
+`test_trace_soft_halo_measures_core_not_halo`). Second, soft
+gradients replayed as opaque black bars: each stroke now carries
+`opacity` from its native-resolution core-seeking ink value
+(max(center, |center-paper|), so dense black stays opaque and light-
+on-dark works), omitted when ~1 so crisp shapes are byte-identical
+(pinned by `test_trace_soft_line_replays_translucent`). Native, not
+working, gray drives value: downscale blur would wash print blacks
+translucent. No brush-engine changes — the agent path already passes
+per-stroke opacity (`stroke_spec` validates it, `render_stroke_mask`
+applies it). Live Naruto verdicts: ink blacks are black again with
+thin gray reserved for genuinely soft strokes; a2s replays pencil-
+true; fine ink reaches 959 strokes with faces, hands, and text
+readable. Full trace + lab + agent/brush suites green.
+## ADR-78: Linework frontend lives in the Brain panel (accepted)
+
+End users cannot be expected to know chat phrases for trace tech
+selection, so the studio Brain panel gains a Drawing section:
+linework frontend (ink/edges/bezier + the five agent neural modes —
+linedraw stays lab-only), detail, and a thin-lines switch. They persist
+as studio settings (`trace_mode/trace_detail/trace_thin`, env-overridable
+via TRACE_*), and any trace spec that omits a key inherits them;
+explicit keys win, bogus stored values fall back (ink/auto). Built-in
+defaults are ink/auto/thin — clean uniform lines out of the box, with
+measured widths one toggle away. Pinned by
+`test_agent_config_trace_defaults_round_trip`,
+`test_agent_config_trace_mode_rejects_lab_only`, and
+`test_trace_bare_spec_uses_brain_drawing_defaults`.
+## ADR-79: Raw tech output + open-frame draw routing (accepted)
+
+Two corrections from live use. First, bare draw verbs with an open
+frame generated gallery art instead of painting: `_with_open_frame`
+vetoed injection on ANY frame word, so "on the current frame" broke
+targeting, and the demo paint branch never rewrote the message at all.
+Deictic frame words now keep the open frame (only frame numbers/names
+win), and bare draw + open frame paints. Second, brush replay of
+pixel-walk centerlines stays visibly shaky, so `trace_raw_lineart`
+places the frontend map itself (a2s/anilines/mangaline/linedistiller,
+full-res ink/edges; bezier rejected) as lineart pixels, via
+`{type:trace, raw:true}` or the Brain Direct switch (`trace_raw`,
+built-in off). Pinned by `test_agent_deictic_frame_words_keep_open_frame`,
+`test_trace_raw_lineart_returns_dark_on_light`, and
+`test_trace_raw_op_places_lineart_pixels`.

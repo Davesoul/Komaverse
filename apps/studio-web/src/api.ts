@@ -63,6 +63,50 @@ export interface DetectResult {
   fell_back: boolean;
 }
 
+/** One pipeline stage of the trace test-lab (image is a PNG data URL). */
+export interface TraceLabStage {
+  key: string;
+  label: string;
+  caption: string;
+  image: string;
+}
+
+/** One traced stroke: every plotter waypoint in frame coordinates. */
+export interface TraceLabStroke {
+  index: number;
+  brush: string;
+  color: string;
+  size: number;
+  n_points: number;
+  length_px: number;
+  points: [number, number][];
+  pressures: number[];
+  group?: string | null;
+  opacity?: number | null;
+}
+
+/** Full POST /api/v1/trace/debug payload. */
+export interface TraceLabResult {
+  mode: string;
+  detail_requested: string;
+  detail_used: string;
+  input: { width: number; height: number; lab_cap_applied: boolean };
+  working: { width: number; height: number; work_px: number };
+  stages: TraceLabStage[];
+  strokes: TraceLabStroke[];
+  stats: {
+    ink_px: number;
+    raw_walks: number;
+    walks_kept: number;
+    junctions: number;
+    strokes: number;
+    total_points: number;
+    median_size: number;
+    coverage: number;
+    timings: Record<string, number>;
+  };
+}
+
 export interface Clip {
   id: string;
   scene_id: string;
@@ -359,6 +403,10 @@ export interface AgentStatus {
   providers: Record<string, string>;
   overrides: string[];
   keys_set: string[];
+  trace_mode: string;
+  trace_detail: string;
+  trace_thin: boolean;
+  trace_raw: boolean;
 }
 
 export interface AgentConfigBody {
@@ -377,6 +425,17 @@ export interface AgentConfigBody {
   openrouter_api_key?: string | null;
   elevenlabs_api_key?: string | null;
   ai_api_key?: string | null;
+  trace_mode?: string | null;
+  trace_detail?: string | null;
+  trace_thin?: boolean | null;
+  trace_raw?: boolean | null;
+}
+
+/** A user's own provider key (BYOK): masked tail only, never the value. */
+export interface OwnKey {
+  provider: string;
+  masked: string;
+  updated_at: string | null;
 }
 
 export interface ChatTurn {
@@ -554,7 +613,7 @@ async function req<T>(path: string, init?: RequestInit): Promise<T> {
       /* non-JSON error body */
     }
     const where = `${init?.method ?? "GET"} ${path}: ${res.status}`;
-    throw new Error(detail ? `${where} — ${detail}` : where);
+    throw new Error(detail ? `${where} â€” ${detail}` : where);
   }
   // Any write may have changed project structure: drop cached projects so
   // the next tab switch refetches fresh (the map holds ~1 entry).
@@ -615,6 +674,22 @@ export const api = {
     req<{ weights: Record<string, { state: string; bytes: number; total: number | null }> }>(
       "/api/v1/detect-status",
     ),
+  traceDebugMeta: () =>
+    req<{ modes: string[]; details: string[]; models: string[]; lab_max_dim: number }>(
+      "/api/v1/trace/debug/meta",
+    ),
+  traceDebug: (file: File, mode: string, detail: string, opts?: { claheClip?: number; model?: string }) => {
+    const form = new FormData();
+    form.append("file", file);
+    form.append("mode", mode);
+    form.append("detail", detail);
+    form.append("clahe_clip", String(opts?.claheClip ?? -1));
+    form.append("model", opts?.model ?? "default");
+    return req<TraceLabResult>("/api/v1/trace/debug", {
+      method: "POST",
+      body: form,
+    });
+  },
   addPanel: (pageId: string, box: { x: number; y: number; w: number; h: number }) =>
     req<Panel>(`/api/v1/pages/${pageId}/panels`, {
       method: "POST",
@@ -1018,6 +1093,17 @@ export const api = {
       signal,
     }),
   agentStatus: () => req<AgentStatus>("/api/v1/agent/status"),
+  listOwnKeys: () => req<OwnKey[]>("/api/v1/user/keys"),
+  saveOwnKey: (provider: string, key: string) =>
+    req<OwnKey>("/api/v1/user/keys", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ provider, key }),
+    }),
+  deleteOwnKey: (provider: string) =>
+    req<void>(`/api/v1/user/keys/${encodeURIComponent(provider)}`, {
+      method: "DELETE",
+    }),
   agentConfig: (body: AgentConfigBody) =>
     req<AgentStatus>("/api/v1/agent/config", {
       method: "PUT",

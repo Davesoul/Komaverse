@@ -10,7 +10,29 @@
     "beforeBuildCommand": "npm run build --workspace studio-web"
   },
   "app": {
-    "windows": [{ "label": "main", "title": "Komaverse", "width": 1280, "height": 800 }]
+    "security": {
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:; media-src 'self' data: blob: https:; font-src 'self' data:; connect-src 'self' http://localhost:* http://127.0.0.1:* ws://localhost:* ws://127.0.0.1:* https: wss:; object-src 'none'; base-uri 'self'; frame-ancestors 'none'"
+    },
+    "windows": [
+      {
+        "label": "main",
+        "title": "Komaverse",
+        "width": 1280,
+        "height": 800,
+        "devtools": false,
+        "visible": true
+      }
+    ]
+  },
+  "plugins": {
+    "updater": {
+      "active": true,
+      "endpoints": [
+        "https://github.com/Davesoul/Komaverse/releases/latest/download/latest.json"
+      ],
+      "dialog": true,
+      "pubkey": "REPLACE_WITH_UPDATER_PUBKEY"
+    }
   },
   "bundle": {
     "active": true,

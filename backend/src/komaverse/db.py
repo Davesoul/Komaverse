@@ -139,6 +139,7 @@ def init_db() -> None:
         "ALTER TABLE chat_turns ADD COLUMN thread_id VARCHAR(12)",
         "ALTER TABLE jobs ADD COLUMN cost_credits INTEGER",
         "ALTER TABLE users ADD COLUMN stripe_customer_id VARCHAR(200)",
+        "ALTER TABLE jobs ADD COLUMN used_own_key BOOLEAN",
     ):
         try:
             with engine.begin() as conn:

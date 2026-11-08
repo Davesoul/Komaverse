@@ -17,7 +17,9 @@ import io
 import json
 import logging
 import math
+import os
 import re
+import tempfile
 import threading
 from datetime import UTC, datetime, timedelta
 from html.parser import HTMLParser
@@ -33,6 +35,7 @@ from komaverse.ai.direction import genre_suffix
 from komaverse.ai.providers import (
     MetaProvider,
     ProviderError,
+    ProviderUnavailable,
     _validate_video_model,
     chat_complete_stream,
     chat_complete_with_usage,
@@ -102,7 +105,7 @@ from komaverse.api.scans import (
 from komaverse.api.subtitles import save_subtitles_track
 from komaverse.api.usage import record_usage
 from komaverse.auth import own_project
-from komaverse.brush import render_stroke_mask, stroke_spec
+from komaverse.brush import BRUSHES, render_stroke_mask, stroke_spec
 from komaverse.draw_subjects import SUBJECT_NAMES, compose_subject
 from komaverse.config import settings
 from komaverse.db_models import (
@@ -121,6 +124,15 @@ from komaverse.db_models import (
 )
 from komaverse.studio_settings import provider_for
 from komaverse.subtitles import SubSegment, segments_to_srt
+from komaverse.sketch_frontends import SKETCH_MODES
+from komaverse.trace_strokes import (
+    FINE_MAX_STROKES,
+    RAW_LINEART_MODES,
+    _resolve_detail,
+    MAX_TRACE_STROKES,
+    trace_ink_to_strokes,
+    trace_raw_lineart,
+)
 
 
 def _panel_count(session: Session, project_id: str) -> int:
@@ -3228,20 +3240,21 @@ def _resolve_frame(session, user, project_id, frame, sequence=None):
 
 
 def _with_open_frame(session, user, project_id, message, current_frame_id):
-    """Append the open-frame token when the message names no frame.
+    """Append the open-frame token when the message names no other frame.
 
     The Draw tab keeps working on whatever is open; bare verbs like
-    'make it bigger' then target the open frame instead of asking
-    which frame. Explicit mentions, names, and frame words win."
+    'make it bigger' — and deictic frame words ('this/current/the frame',
+    'on the frames') — then target the open frame instead of asking
+    which frame. Explicit mentions, frame numbers, and frame names win."
     """
     if not current_frame_id or "@frame:" in (message or ""):
-        return message
-    if re.search(r"\bframes?\b", message or "", re.IGNORECASE):
         return message
     frames = _project_frames(session, user, project_id)
     if not any(f.id == current_frame_id for f in frames):
         # Forged or stale id (even from another project): never inject it,
         # so error paths cannot echo it back.
+        return message
+    if re.search(r"\bframes?\s*\d+", message or "", re.IGNORECASE):
         return message
     if any(
         f.name and len(f.name) > 2 and f.name.lower() in (message or "").lower()
@@ -3439,11 +3452,257 @@ def _perimeter_points(kind: str, box: tuple, n: int = 56) -> list:
     return pts
 
 
+#: Cap for plotter-redraw expansion per draw call (computed strokes, not
+#: LLM-dictated — separate from the 100-shape call cap).
+MAX_TRACE_STROKES_PER_CALL = 400
+
+#: Multi-frame draw fan-out per call: one turn paints keyframes fast;
+#: holds come from duplicate + clip durations (limited-animation cadence).
+MAX_FRAMES_PER_CALL = 8
+
+
+_TRACE_REF_RE = re.compile(r"@(frame|panel|media|page|gen):([A-Za-z0-9_-]+)", re.IGNORECASE)
+
+# Demo-fallback routing verbs only: the cloud agent reads the tool
+# schemas (any language); the demo brain has no model, so a small
+# verb set routes it. Restyle phrasing ("as night", "en version")
+# stays generation even there.
+_PLOTTER_VERBS_RE = re.compile(
+    r"\b(draw|paint|sketch|redraw|trace|tracer|"
+    r"dessine\w*|peins|peindre|esquisse\w*|redessine\w*|reprodui\w*)\b",
+    re.IGNORECASE,
+)
+_PLOTTER_RESTYLE_RE = re.compile(
+    r"as\s+(?!strokes\b|ink\b|drawings?\b|linework\b)[a-z]|en\s+version",
+    re.IGNORECASE,
+)
+
+
+def _plotter_source_token(session, user, project_id, message,
+                          turn_references=None, exclude_frame_id=None):
+    """@-token of the artwork to replicate, or None. Reads no language.
+
+    Candidates are @panel:/@media:/@gen: artwork tokens typed in the
+    message or picked as references under the default reference role
+    (video start/end slots never trace), artwork first, then @frame:
+    tokens naming another frame. @gen: tokens must resolve to a
+    finished image generation of this user/project - video jobs and
+    unfinished work never trace. The draw target never traces onto
+    itself. Returns the token string.
+    """
+    tokens: list[str] = []
+    for kind, rid in REF_TOKEN_RE.findall(message or ""):
+        if kind == "sequence":
+            continue
+        tok = f"@{kind}:{rid}"
+        if tok not in tokens:
+            tokens.append(tok)
+    for ref in turn_references or []:
+        if isinstance(ref, dict):
+            kind, rid, role = ref.get("kind"), ref.get("id"), ref.get("role")
+        else:
+            kind, rid = getattr(ref, "kind", ""), getattr(ref, "id", "")
+            role = getattr(ref, "role", "reference")
+        kind, rid = str(kind or "").lower(), str(rid or "")
+        if role is None:
+            role = "reference"
+        if (
+            kind in ("frame", "panel", "media", "gen")
+            and rid and str(role) == "reference"
+        ):
+            tok = f"@{kind}:{rid}"
+            if tok not in tokens:
+                tokens.append(tok)
+    # Artwork first; stable within groups.
+    tokens.sort(key=lambda t: (t.startswith("@frame:"), t))
+    for tok in tokens:
+        kind, _, rid = tok[1:].partition(":")
+        if kind == "frame":
+            if exclude_frame_id and rid == exclude_frame_id:
+                continue
+        elif kind == "gen":
+            job = session.get(JobRow, rid)
+            if (
+                job is None or job.user_id != user.id
+                or job.project_id != project_id or job.kind != "image"
+                or job.status != "done"
+            ):
+                continue
+        return tok
+    return None
+
+
+def _trace_rgb(img):
+    """Reference art on white paper for tracing.
+
+    Transparency (contain-fit padding bars, empty layer space)
+    composites onto paper white instead of converting to black
+    ink — padding must never trace as bars or rectangles, and
+    dark art on transparent layers must stay visible. Opaque
+    inputs pass through pixel-identical.
+    """
+    paper = Image.new("RGBA", img.size, (255, 255, 255, 255))
+    return Image.alpha_composite(
+        paper, img.convert("RGBA")).convert("RGB")
+
+
+def _trace_source_image(session, user, project_id, f, target, ref, W, H):
+    """(RGB PIL image at frame size, display name, error) for one trace.
+
+    `ref` names the art to redraw: a same-frame layer (name/id, empty
+    for the topmost visible layer that isn't the target), or any image
+    in the app via the chat roster's @-tokens — @frame:, @panel:,
+    @media:/@page: (scan), @gen: (finished generation). Token sources
+    are contain-fitted to the target frame (aspect preserved, never
+    stretched or upscaled) so the strokes land undistorted.
+    """
+    if not ref:
+        ordered = sorted(f.layers, key=lambda lay: lay.layer_order, reverse=True)
+        src = next(
+            (lay for lay in ordered if lay.id != target.id and lay.visible), None,
+        )
+        if src is None:
+            return None, "", (
+                "Trace needs reference art (from_layer) — import or draw "
+                "it first, or pass an @frame:/@panel:/@media:/@gen: token."
+            )
+        return _trace_rgb(_layer_rgba(src, W, H)), src.name, ""
+    m = _TRACE_REF_RE.search(ref)
+    if not m:
+        src = _resolve_layer(f, ref)
+        if isinstance(src, str):
+            return None, "", src
+        return _trace_rgb(_layer_rgba(src, W, H)), src.name, ""
+    from komaverse.api.ai import (
+        _fit_png_into,
+        _frame_png,
+        _job_png,
+        _page_png,
+        _panel_png,
+    )
+    kind, rid = m.group(1).lower(), m.group(2)
+    label = f"@{kind}:{rid}"
+    png = None
+    if kind == "frame":
+        png = _frame_png(session, project_id, rid)
+    elif kind == "panel":
+        png = _panel_png(session, project_id, rid)
+    elif kind in ("media", "page"):
+        png = _page_png(session, project_id, rid)
+    elif kind == "gen":
+        png = _job_png(session, user.id, project_id, rid)
+    if png is None:
+        return None, "", (
+            f"Trace: could not read {label} as an image "
+            "(wrong project, unfinished generation, or missing file)."
+        )
+    try:
+        fitted = _fit_png_into(png, W, H)
+    except (ValueError, OSError) as exc:
+        return None, "", f"Trace: {label} did not decode ({exc})."
+    return _trace_rgb(Image.open(io.BytesIO(fitted))), label, ""
+
+
+#: Trace frontends the agent can draw with (linedraw stays lab-only).
+TRACE_MODES = ("ink", "edges", "bezier", *SKETCH_MODES)
+TRACE_DETAILS = ("fast", "fine", "auto")
+
+
+def trace_default_mode() -> str:
+    """Brain drawing default: studio trace_mode, validated, ink fallback."""
+    mode = str(getattr(settings, "trace_mode", None) or "ink").strip().lower()
+    return mode if mode in TRACE_MODES else "ink"
+
+
+def trace_default_detail() -> str:
+    """Brain drawing default: studio trace_detail, validated, auto fallback."""
+    detail = str(getattr(settings, "trace_detail", None) or "auto").strip().lower()
+    return detail if detail in TRACE_DETAILS else "auto"
+
+
+def trace_default_thin() -> bool:
+    """Brain drawing default: studio trace_thin (bool or true/false string)."""
+    raw = getattr(settings, "trace_thin", True)
+    if isinstance(raw, bool):
+        return raw
+    return str(raw).strip().lower() in ("1", "true", "yes", "on")
+
+
+def trace_default_raw() -> bool:
+    """Brain drawing default: studio trace_raw (bool or true/false string).
+
+    Raw places the frontend's lineart map directly instead of replaying
+    it with brushes — the tech output itself, no shaky replay.
+    """
+    raw = getattr(settings, "trace_raw", False)
+    if isinstance(raw, bool):
+        return raw
+    return str(raw).strip().lower() in ("1", "true", "yes", "on")
+
+
+def _expand_trace_shapes(session, user, project_id, f, target, W, H, shapes):
+    """Expand {"type":"trace"} shapes into brush strokes (plotter redraw).
+
+    Each trace shape reads reference art — a same-frame layer or any
+    app image via @frame:/@panel:/@media:/@gen: — and becomes real
+    strokes on the target layer. Returns (shapes, traced_total, error).
+    """
+    out: list = []
+    traced_total = 0
+    for shape in shapes:
+        if (
+            not isinstance(shape, dict)
+            or str(shape.get("type") or "").strip().lower() != "trace"
+        ):
+            out.append(shape)
+            continue
+        ref = str(shape.get("from_layer") or shape.get("from") or "").strip()
+        img, name, err = _trace_source_image(
+            session, user, project_id, f, target, ref, W, H,
+        )
+        if err:
+            return [], 0, err
+        brush = str(shape.get("brush") or "trace").strip().lower().replace("_", "-")
+        if brush not in BRUSHES:
+            return [], 0, f"Trace: unknown brush '{brush}'."
+        mode = str(shape.get("mode") or "").strip().lower() or trace_default_mode()
+        if mode not in TRACE_MODES:
+            return [], 0, (
+                "Trace: unknown mode "
+                f"(want {'|'.join(TRACE_MODES)})."
+            )
+        detail = str(shape.get("detail") or "").strip().lower() or trace_default_detail()
+        try:
+            detail = _resolve_detail(detail, W, H)
+        except ValueError:
+            return [], 0, "Trace: unknown detail (want fast|fine|auto)."
+        raw_thin = shape.get("thin", None)
+        thin = trace_default_thin() if raw_thin is None else bool(raw_thin)
+        try:
+            strokes = trace_ink_to_strokes(
+                img, W, H,
+                brush=brush, color=str(shape.get("color") or "ink"),
+                max_strokes=(FINE_MAX_STROKES if detail == "fine"
+                             else min(MAX_TRACE_STROKES, MAX_TRACE_STROKES_PER_CALL)),
+                mode=mode, detail=detail, thin=thin,
+            )
+        except ValueError as exc:
+            return [], 0, f"Trace failed: {exc}."
+        if not strokes:
+            return [], 0, (
+                f"Trace found no linework on '{name}' — it traces ink "
+                "lines, not flat fills or empty art."
+            )
+        out.extend(strokes)
+        traced_total += len(strokes)
+    return out, traced_total, ""
+
+
 def tool_manage_layers(
     session, user, project_id, frame, op="list", layer=None, name=None,
     opacity=None, visible=None, locked=None, blend=None, position=None,
     sequence=None, shapes=None, from_frame=None, to_frame=None, to_layer=None,
-    box=None, scale=None, at=None,
+    box=None, scale=None, at=None, concept=None, keep=None, frames=None,
 ) -> str:
     """Draw-layer ops: list/add/rename/set/move/remove/duplicate/clear/
     merge/draw/erase-aware-draw/text/copy/resize. Frame-to-frame work
@@ -3494,6 +3753,12 @@ def tool_manage_layers(
         target = sorted(f.layers, key=lambda l: l.layer_order)[-1]
     elif op == "copy":
         target = None  # source/dest resolve inside the op
+    elif op == "subject":
+        target = None  # source/dest resolve inside the op
+    elif op == "plan":
+        target = None  # layers resolve inside the op
+    elif op == "frames":
+        target = None  # per-frame layers resolve inside the op
     else:
         target = _resolve_layer(f, layer)
         if isinstance(target, str):
@@ -3585,6 +3850,207 @@ def tool_manage_layers(
         session.delete(target)
         session.commit()
         return f"Merged '{target.name}' down into '{below.name}'."
+    if op == "plan":
+        # Layered reference redraw: lines/shade/tone passes from one
+        # spec dict, executed bottom-up with atomic rollback. Opt-in:
+        # the model chooses plan explicitly; the plotter enforcer
+        # leaves it alone (non-stroke shapes pass through).
+        from komaverse.art_plan import (
+            PlanAbort,
+            plan_drawing,
+            plan_summary,
+            shade_shapes,
+        )
+        spec = next(
+            (s for s in (shapes or []) if isinstance(s, dict)
+             and str(s.get("type") or "").strip().lower() == "plan"),
+            None,
+        )
+        if spec is None:
+            return ("Plan needs shapes=[{type:plan, from}] with from naming "
+                    "the reference art (layer or @frame:/@panel:/@media:/@gen:).")
+        ref = str(spec.get("from") or spec.get("from_layer") or "").strip()
+        W, H = int(f.width), int(f.height)
+        if ref:
+            img, _src_name, src_err = _trace_source_image(
+                session, user, project_id, f, None, ref, W, H)
+            if src_err:
+                return src_err
+        else:
+            ordered = sorted(f.layers, key=lambda lay: lay.layer_order, reverse=True)
+            src = next((lay for lay in ordered if lay.visible), None)
+            if src is None:
+                return ("Plan needs reference art (from) - import or draw it "
+                        "first, or pass an @frame:/@panel:/@media:/@gen: token.")
+            img = _trace_rgb(_layer_rgba(src, W, H))
+        try:
+            line_brush = str(spec.get("line_brush") or "trace")
+            line_mode = str(spec.get("line_mode") or "bezier")
+            hatch_spacing = float(spec.get("hatch_spacing") or 6.0)
+            stipple_spacing = float(spec.get("stipple_spacing") or 7.0)
+            refine = bool(spec.get("refine", False))
+            target_ssim = float(spec.get("target_ssim") or 0.75)
+            max_rounds = min(3, max(0, int(spec.get("max_rounds") or 2)))
+        except (TypeError, ValueError):
+            return "Plan: line_brush/line_mode must be text and the rest numbers."
+        if line_mode not in ("ink", "edges", "bezier", *SKETCH_MODES):
+            return (
+                "Plan: unknown line_mode "
+                f"(want ink|edges|bezier|{'|'.join(SKETCH_MODES)})."
+            )
+        plan = plan_drawing(img, W, H, line_brush=line_brush, line_mode=line_mode,
+                            hatch_spacing=hatch_spacing,
+                            stipple_spacing=stipple_spacing)
+        if not plan:
+            return "Plan: " + plan_summary(plan)
+        existing = {lay.name for lay in f.layers}
+        need = [p["layer"] for p in plan if p["layer"] not in existing]
+        if len(f.layers) + len(need) + (max_rounds if refine else 0) > MAX_LAYERS:
+            return (f"Plan needs {len(need)} new layers but the frame holds "
+                    f"{len(f.layers)}/{MAX_LAYERS} - remove or merge layers first.")
+        created: list[str] = []
+
+        def _rollback() -> None:
+            for lay in created:
+                tool_manage_layers(session, user, project_id, f.id,
+                                   op="remove", layer=lay)
+
+        def _plan_draw(lay: str, part: list[dict]) -> None:
+            if isinstance(_resolve_layer(f, lay), str):
+                res = tool_manage_layers(session, user, project_id, f.id,
+                                         op="add", name=lay)
+                if not res.startswith("Added layer"):
+                    raise PlanAbort(res)
+                created.append(lay)
+            for i in range(0, len(part), 100):
+                res = tool_manage_layers(session, user, project_id, f.id,
+                                         op="draw", layer=lay,
+                                         shapes=part[i:i + 100])
+                if not res.startswith("Drew "):
+                    raise PlanAbort(res)
+
+        try:
+            for p in plan:
+                _plan_draw(p["layer"], p["shapes"])
+            trail = ""
+            if refine:
+                from komaverse.api.ai import _frame_png
+                from komaverse.eval_diff import score_render
+
+                def _score_now():
+                    png = _frame_png(session, project_id, f.id)
+                    if png is None:
+                        raise PlanAbort("Plan refine: could not render the frame.")
+                    return score_render(
+                        Image.open(io.BytesIO(png)).convert("RGB"), img)
+
+                scores = [_score_now()]
+                for rnd in range(1, max_rounds + 1):
+                    if scores[-1]["ssim"] >= target_ssim:
+                        break
+                    rlayer = f"shade-r{rnd}"
+                    rshapes = shade_shapes(img, W, H,
+                                           spacing=hatch_spacing * (0.7 ** rnd))
+                    if not rshapes:
+                        break
+                    before = len(created)
+                    _plan_draw(rlayer, rshapes)
+                    score = _score_now()
+                    scores.append(score)
+                    if score["ssim"] <= scores[-2]["ssim"]:
+                        tool_manage_layers(session, user, project_id, f.id,
+                                           op="remove", layer=rlayer)
+                        del created[before:]
+                        break
+                trail = " Refine ssim " + " -> ".join(
+                    f"{r['ssim']:.2f}" for r in scores)
+                trail += f" (target {target_ssim}, {len(scores)} rounds)."
+            layers_done = [p["layer"] for p in plan]
+            return (f"Painted plan on layers {layers_done}: "
+                    + plan_summary(plan) + trail)
+        except PlanAbort as abort:
+            _rollback()
+            return f"Plan aborted, rolled back ({abort})."
+        except Exception as exc:
+            _rollback()
+            return f"Plan failed and rolled back ({exc})."
+
+    if op == "frames":
+        # Multi-frame draw: the same shapes land on N frames in one
+        # call — trace specs re-expand per frame, plain strokes repeat
+        # (keyframes + holds in a single turn; cadence comes from
+        # duplicate + clip durations).
+        from komaverse.art_plan import PlanAbort
+
+        raw = frames if isinstance(frames, list) else [frames]
+        tokens = [str(v).strip() for v in raw if str(v or "").strip()]
+        if not tokens:
+            return ("Frames needs frames: a list of frame ids or names "
+                    "to draw onto.")
+        if len(tokens) > MAX_FRAMES_PER_CALL:
+            return (f"Frames takes at most {MAX_FRAMES_PER_CALL} frames "
+                    "per call.")
+        if not isinstance(shapes, list) or not shapes:
+            return "Frames needs shapes: the draw shapes for every frame."
+        resolved = []
+        for tok in tokens:
+            r = _resolve_frame(session, user, project_id, tok, sequence)
+            if isinstance(r, str):
+                return r
+            resolved.append(r)
+        by_id = {tf.id: tf for tf in resolved}
+        by_name = {(tf.name or "").lower(): tf for tf in resolved}
+
+        def scope_of(shape) -> list | None:
+            if not isinstance(shape, dict) or shape.get("frames", None) is None:
+                return None
+            raw_scope = shape["frames"]
+            scoped = raw_scope if isinstance(raw_scope, list) else [raw_scope]
+            out = []
+            for item in scoped:
+                tok = str(item or "").strip()
+                hit = by_id.get(tok) or by_name.get(tok.lower())
+                if hit is None:
+                    return None
+                out.append(hit)
+            return out
+
+        for shape in shapes:
+            if (isinstance(shape, dict) and shape.get("frames", None) is not None
+                    and scope_of(shape) is None):
+                return ("Unknown frame in shapes: scoped frames must name "
+                        "frames from this call's frames list.")
+        created: list[tuple[str, str]] = []
+        done: list[str] = []
+        try:
+            for tf in resolved:
+                part = [s for s in shapes
+                        if (scope := scope_of(s)) is None or tf in scope]
+                if not part:
+                    continue
+                want = str(layer or "").strip() or "Trace"
+                if isinstance(_resolve_layer(tf, want), str):
+                    res = tool_manage_layers(
+                        session, user, project_id, tf.id,
+                        op="add", name=want)
+                    if not res.startswith("Added layer"):
+                        raise PlanAbort(res)
+                    created.append((tf.id, want))
+                res = tool_manage_layers(
+                    session, user, project_id, tf.id, op="draw",
+                    layer=want, shapes=part)
+                if not (res.startswith("Drew ") or res.startswith("Placed ")):
+                    raise PlanAbort(
+                        f"frame '{tf.name or 'Untitled'}': {res}")
+                done.append(f"'{tf.name or 'Untitled'}'")
+        except PlanAbort as abort:
+            for cfd, clay in created:
+                tool_manage_layers(session, user, project_id, cfd,
+                                   op="remove", layer=clay)
+            return (f"Frames painted {len(done)} frame(s), "
+                    f"rolled back ({abort}).")
+        return f"Drew on {len(done)} frames: {', '.join(done)}."
+
     if op == "draw":
         if target.locked:
             return f"Layer '{target.name}' is locked - unlock it first."
@@ -3598,6 +4064,61 @@ def tool_manage_layers(
             return "Draw takes at most 100 shapes per call."
         W, H = int(f.width), int(f.height)
         jobs = []
+        raw_ids = {
+            id(s) for s in shapes
+            if isinstance(s, dict)
+            and str(s.get("type") or "").strip().lower() == "trace"
+            and (trace_default_raw() if s.get("raw", None) is None
+                 else bool(s.get("raw")))
+        }
+        placed: list[str] = []
+        if raw_ids:
+            for s in shapes:
+                if id(s) not in raw_ids:
+                    continue
+                ref = str(s.get("from_layer") or s.get("from") or "").strip()
+                mode = str(s.get("mode") or "").strip().lower() or trace_default_mode()
+                if mode not in RAW_LINEART_MODES:
+                    return ("Raw placement needs a lineart mode "
+                            f"(want {'|'.join(RAW_LINEART_MODES)}).")
+                img, name, err = _trace_source_image(
+                    session, user, project_id, f, target, ref, W, H)
+                if err:
+                    return err
+                try:
+                    gray = trace_raw_lineart(img, mode)
+                except ValueError as exc:
+                    return f"Trace failed: {exc}."
+                if gray.size != (W, H):
+                    gray = gray.resize((W, H), Image.Resampling.LANCZOS)
+                at = s.get("at", None)
+                if at is None:
+                    px, py = 0, 0
+                elif (isinstance(at, (list, tuple)) and len(at) == 2
+                        and all(isinstance(v, (int, float)) for v in at)):
+                    px, py = int(at[0]), int(at[1])
+                else:
+                    return "Raw at needs [x, y] numbers."
+                line = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+                line.putalpha(gray.point(lambda v: 255 - v))
+                sheet = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+                sheet.paste(
+                    line, (min(max(px, -W), W), min(max(py, -H), H)), line)
+                canvas = _layer_rgba(target, W, H)
+                canvas.alpha_composite(sheet)
+                target.data_url = _png_data_url(canvas)
+                placed.append(f"raw {mode} lineart from '{name}'")
+            session.commit()
+            shapes = [s for s in shapes if id(s) not in raw_ids]
+            if not shapes:
+                return (f"Placed {', '.join(placed)} on layer "
+                        f"'{target.name}' [{target.id}] of frame "
+                        f"'{f.name or 'Untitled'}' [frame {f.id}].")
+        shapes, traced_total, trace_err = _expand_trace_shapes(
+            session, user, project_id, f, target, W, H, shapes,
+        )
+        if trace_err:
+            return trace_err
         for i, shape in enumerate(shapes):
             if not isinstance(shape, dict):
                 return f"Shape {i} must be an object."
@@ -3726,7 +4247,84 @@ def tool_manage_layers(
         session.commit()
         return (
             f"Drew {len(jobs)} shape(s) on layer '{target.name}' [{target.id}] "
+            + (f"({traced_total} traced strokes) " if traced_total else "")
+            + (f"(placed {', '.join(placed)}) " if placed else "") +
             f"of frame '{f.name or 'Untitled'}' [frame {f.id}]."
+        )
+    if op == "subject":
+        # iPhone-style subject lift, box-level: SAM finds the concept on
+        # the source layer, its boxes land on a fresh layer (copy), and
+        # keep="cut" also clears them from the source (background removal).
+        W, H = int(f.width), int(f.height)
+        if str(layer or "").strip():
+            src_layer = _resolve_layer(f, layer)
+            if isinstance(src_layer, str):
+                return src_layer
+        else:
+            by_order = sorted(f.layers, key=lambda lay: lay.layer_order, reverse=True)
+            src_layer = next((lay for lay in by_order if lay.visible), None)
+            if src_layer is None:
+                return "Subject needs a source layer - add one first."
+        subject = str(concept or "subject").strip()[:80] or "subject"
+        cut = str(keep or "copy").strip().lower() == "cut"
+        if cut and src_layer.locked:
+            return f"Source layer '{src_layer.name}' is locked - use copy, not cut."
+        if len(f.layers) >= MAX_LAYERS:
+            return f"Too many layers ({len(f.layers)}), remove one first."
+        src_img = _layer_rgba(src_layer, W, H)
+        if src_img.getbbox() is None:
+            return f"Layer '{src_layer.name}' is empty - nothing to lift."
+        tmp = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
+        try:
+            src_img.convert("RGB").save(tmp.name)
+            tmp.close()
+            try:
+                found = MetaProvider().segment(tmp.name, subject)
+            except (ProviderError, ProviderUnavailable) as exc:
+                return f"Subject lift needs a Meta key (Brain panel): {exc}."
+        finally:
+            try:
+                os.unlink(tmp.name)
+            except OSError:
+                pass
+        boxes = [
+            b for b in found[:8]
+            if b.get("w", 0) >= 4 and b.get("h", 0) >= 4
+        ]
+        if not boxes:
+            return f"No '{subject}' found on '{src_layer.name}'."
+        cut_img = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+        keep_img = src_img.copy() if cut else None
+        for b in boxes:
+            x0 = min(max(int(b["x"]), 0), W)
+            y0 = min(max(int(b["y"]), 0), H)
+            x1 = min(max(x0 + int(b["w"]), 0), W)
+            y1 = min(max(y0 + int(b["h"]), 0), H)
+            if x1 <= x0 or y1 <= y0:
+                continue
+            cut_img.paste(src_img.crop((x0, y0, x1, y1)), (x0, y0))
+            if keep_img is not None:
+                keep_img.paste(Image.new("RGBA", (x1 - x0, y1 - y0), (0, 0, 0, 0)), (x0, y0))
+        label = str(name or "").strip() or f"{subject[:24]} subject"
+        row = LayerRow(
+            frame_id=f.id,
+            name=label[:200],
+            opacity=100,
+            visible=True,
+            locked=False,
+            blend_mode="normal",
+            layer_order=max([lay.layer_order for lay in f.layers], default=-1) + 1,
+            data_url=_png_data_url(cut_img),
+        )
+        session.add(row)
+        session.flush()
+        if cut and keep_img is not None:
+            src_layer.data_url = _png_data_url(keep_img)
+        session.commit()
+        return (
+            f"Lifted {len(boxes)} '{subject}' box(es) from '{src_layer.name}' "
+            f"onto '{row.name}' [{row.id}]"
+            + (" (source cleared)." if cut else ".")
         )
     if op == "copy":
         src_frame = f
@@ -3815,7 +4413,7 @@ def tool_manage_layers(
         return f"Resized layer '{target.name}' to {nw}x{nh}px (centered)."
     return (
         f"Unknown layer op '{op}'. Valid: list, add, rename, set, move, "
-        'remove, duplicate, clear, merge, draw, copy, resize.'
+        'remove, duplicate, clear, merge, draw, frames, copy, resize.'
     )
 
 
@@ -4604,15 +5202,17 @@ def _wants_canvas_op(text: str) -> bool:
 _REF_SOURCE_RE = re.compile(r"@(media|panel|gen):")
 
 
-def _wants_paint_on_frame(text: str) -> bool:
+def _wants_paint_on_frame(text: str, has_frame: bool = False) -> bool:
     """A subject directed at the canvas ('draw a samurai on the current
     frame'), not a gallery generation and not a geometric shape op.
 
     The verb decides: draw/paint/sketch + frame-directed words paint onto
-    the named frame; generate/create verbs (or no frame) generate media.
-    Shapes ("draw a circle") stay on manage_layers even when frame-directed.
-    Explicit gallery sources (@media:/@panel:/@gen:) and "redraw" (which is
-    a regeneration verb, not \bdraw\b) stay on the generation flow.
+    the named frame; a bare draw verb with an open frame paints there too
+    (the user is looking at the canvas, not the gallery). Generate/create
+    verbs (or no frame at all) generate media. Shapes ("draw a circle")
+    stay on manage_layers even when frame-directed. Explicit gallery
+    sources (@media:/@panel:/@gen:) and "redraw" (which is a regeneration
+    verb, not \\bdraw\\b) stay on the generation flow.
     """
     if "video" in text or "generat" in text:
         return False
@@ -4622,7 +5222,9 @@ def _wants_paint_on_frame(text: str) -> bool:
         return False
     if _REF_SOURCE_RE.search(text or ""):
         return False
-    return bool(FRAME_DIRECTED_RE.search(text))
+    if FRAME_DIRECTED_RE.search(text):
+        return True
+    return bool(has_frame)
 
 
 def tool_extend_sequence(session, user, project_id, frame, sequence=None, count=1) -> str:
@@ -4723,6 +5325,82 @@ def _demo_shape_for(text: str, W: int, H: int) -> dict:
         "width": max(4, min(64, r / 6)),
         "points": [[cx - r, cy - r], [cx + r, cy + r]],
     }
+
+
+def _wants_plotter_redraw(text: str) -> bool:
+    """Demo-fallback routing only: artwork token + draw verb, minus
+    shape ops and restyles.
+
+    The cloud agent never uses this (it reads the tool schemas, in
+    any language). The demo brain has no model, so a small verb set
+    routes it - that is the only text matching in the redraw path.
+    """
+    lowered = text or ""
+    if "video" in lowered or "generat" in lowered:
+        return False
+    if _wants_draw_shape(lowered):
+        # Geometric shape work ("draw a red dot") stays on the shape
+        # path even when a frame token rides along.
+        return False
+    if _PLOTTER_RESTYLE_RE.search(lowered):
+        # "redraw it as night" is a restyle: generation, not tracing.
+        return False
+    if not any(
+        kind in ("frame", "panel", "media", "gen")
+        for kind, _ in REF_TOKEN_RE.findall(lowered)
+    ):
+        return False
+    return bool(_PLOTTER_VERBS_RE.search(lowered))
+
+
+def _wants_art_plan(text: str) -> bool:
+    """Demo-fallback routing only: an explicit full-plan request."""
+    return _wants_plotter_redraw(text) and re.search(
+        r"\bplan\b", text or "", re.IGNORECASE) is not None
+
+
+def _demo_plan_turn(session, user, project_id, message, current_frame_id=None):
+    """Paint a full layered plan (demo brain, single pass, no refine)."""
+    message = _with_open_frame(session, user, project_id, message, current_frame_id)
+    f = _resolve_frame(session, user, project_id, current_frame_id or message)
+    if isinstance(f, str):
+        return f
+    tok = _plotter_source_token(
+        session, user, project_id, message, None, exclude_frame_id=f.id,
+    )
+    if tok is None:
+        return _demo_redraw_turn(
+            session, user, project_id, message, current_frame_id,
+        )
+    return tool_manage_layers(
+        session, user, project_id, f.id, op="plan",
+        shapes=[{"type": "plan", "from": tok}],
+    )
+
+
+def _demo_redraw_turn(session, user, project_id, message, current_frame_id=None):
+    """Plotter-exact redraw of a referenced image (demo brain).
+
+    Same guarantee as the cloud plotter hook with no model in the
+    loop: the reference is traced stroke by stroke onto the target
+    frame - never a freehand interpretation.
+    """
+    message = _with_open_frame(session, user, project_id, message, current_frame_id)
+    f = _resolve_frame(session, user, project_id, current_frame_id or message)
+    if isinstance(f, str):
+        return f
+    tok = _plotter_source_token(
+        session, user, project_id, message, None, exclude_frame_id=f.id,
+    )
+    if tok is None:
+        return _demo_paint_subject(
+            session, user, project_id, message, f.id, current_frame_id,
+        )
+    drawn = tool_manage_layers(
+        session, user, project_id, frame=f.id, op="draw",
+        shapes=[{"type": "trace", "from": tok}],
+    )
+    return f"Redrew {tok} with plotter strokes ({drawn})"
 
 
 def _demo_draw_turn(session, user, project_id, message, current_frame_id=None):
@@ -4890,17 +5568,24 @@ def demo_turn(
                     reply = resolved
         else:
             reply = run("check_job", tool_check_job, session, user, jid)
+    elif _wants_art_plan(text):
+        reply = run("manage_layers", _demo_plan_turn, session, user, project_id,
+                    message, current_frame_id=current_frame_id)
+    elif _wants_plotter_redraw(text):
+        reply = run("manage_layers", _demo_redraw_turn, session, user, project_id,
+                    message, current_frame_id=current_frame_id)
     elif _wants_draw_shape(text):
         reply = run("manage_layers", _demo_draw_turn, session, user, project_id,
                     message, current_frame_id=current_frame_id)
-    elif _wants_paint_on_frame(text):
-        target = _resolve_frame(session, user, project_id, message)
+    elif _wants_paint_on_frame(text, has_frame=current_frame_id is not None):
+        msg = _with_open_frame(session, user, project_id, message, current_frame_id)
+        target = _resolve_frame(session, user, project_id, msg)
         if isinstance(target, str):
             reply = target
         else:
             reply = run(
                 "manage_layers", _demo_paint_subject, session, user,
-                project_id, message, target.id,
+                project_id, msg, target.id,
                 current_frame_id=current_frame_id,
             )
     elif _wants_video(text):
@@ -5781,17 +6466,52 @@ _TOOLS_SCHEMA = [
                 "for those verbs. "
                 "Ops: list, add, rename, set (opacity/visible/locked/blend), "
                 "move (position 0 is bottom), remove, duplicate, clear, merge down, "
-                "draw (stroke/rect/ellipse/fill/text in frame pixels; any shape takes "
-                "erase:true to cut instead of paint; omitted layer means the top layer), "
-                "copy (pixels from a box/frame/layer onto another frame/layer, optional scale), "
+                "subject (lift a named thing off a layer onto a fresh one: "
+                "concept + keep copy|cut; box cutouts via SAM, needs a Meta key), "
+                "draw (stroke/rect/ellipse/fill/text/trace in frame pixels; any shape takes "
+                "erase:true to cut instead of paint; omitted layer means the top layer; "
+                "a bare draw/paint/sketch request with an open frame paints on it, "
+                "never generate unless the user says generate), "
+                "copy (pixels from a box/frame/layer onto another frame/layer, optional scale; "
+                "the animation loop: place raw lineart once, then copy it with at:[x,y] "
+                "onto later frames for slides, with box: to lift one drawing, with "
+                "scale: to zoom; subject lifts a named character off the background "
+                "when a Meta key is set, keep:cut removes it from the source), "
                 "resize (scale layer pixels about center). "
+                "trace (redraw a referenced image as real brush strokes here: "
+                "shapes [{type:trace, from}] — plotter-style replication, not "
+                "generation and not copy-paste: the source is re-drawn stroke "
+                "by stroke with the Draw tab brushes, enforced server-side, so ""authored strokes beside a reference always become its trace. "
+                "from names any art in the app: a layer on this frame, or an "
+                "@frame:/@panel:/@media:/@gen: token (aspect preserved, never "
+                "stretched). Omit mode/detail/thin for the Brain drawing "
+                "defaults (Brain panel: linework frontend, detail, thin lines); "
+                "or set them per shape — mode:bezier refits linework as smooth "
+                "curves, mode:edges for photos, "
+                "mode:mangaline|anilines|anilines-detail|linedistiller|a2s run a neural lineart frontend first (best on colored or shaded art: "
+                "anilines-detail for clean manga lines, a2s for pencil/anime art, "
+                "mangaline for print manga, linedistiller when speed matters); "
+                "detail fast (seconds) or fine (native resolution, "
+                "minutes on large frames, plotter-exact); thin:true replays "
+                "fast uniform thin lines with no width profiling; raw:true "
+                "places the frontend's lineart map directly (no brush replay "
+                "at all — cleanest lines, pixels not strokes). "
+                "To CHANGE a reference (restyle, variant) use create_image; "
+                "for exact pixel duplicates use copy; text and labels are text "
+                "shapes, never strokes). ""plan (multi-layer reference redraw: shapes [{type:plan, from, ""refine}] paints lines/shade/tone passes onto their own layers, ""optionally refine:true re-scores the render vs the reference ""with denser shade rounds). "
+                "frames (one call paints an animation pass: each shape lands "
+                "on every frame in frames:[ids] unless the shape carries its "
+                "own frames:[subset] — different drawings and positions per "
+                "frame in a single call; trace re-expands per frame; raw "
+                "trace takes at:[x,y] to slide the lineart; at most 8 frames; "
+                "holds come from duplicate, cadence from clip durations). "
                 "Strokes take a brush (same marks as the Draw tab): g-pen/maru "
                 "tapered manga linework, fineliner constant lines, pencil sketch, "
                 "brush/fude expressive ink, marker flat cel fills, chalk grain, "
                 "hatch manga shading, watercolor/sumi/airbrush soft tone, "
                 "calligraphy/chisel shaped marks, toneline dotted contours, "
                 "splatter droplets; pressures [0..1] per point tapers the mark "
-                "(default 0.5), opacity 0..1 layers tone. Compose like an "
+                "(omitted = inked swell), opacity 0..1 layers tone. Compose like an "
                 "animator: pencil construction strokes, g-pen clean linework, "
                 "marker flats, hatch shade — many strokes per drawing, never "
                 "one flat line. Cel craft: hard-edge flat color on characters, "
@@ -5822,21 +6542,39 @@ _TOOLS_SCHEMA = [
                     "to_layer": {"type": "string"},
                     "box": {"type": "array"},
                     "scale": {"type": "number"},
+                    "concept": {"type": "string"},
+                    "keep": {"type": "string"},
                     "from_frame": {"type": "string"},
                     "to_frame": {"type": "string"},
                     "shapes": {
                         "type": "array",
                         "description": (
                             "draw op: up to 100 shapes, each "
-                            "{type: stroke|rect|ellipse|fill|text, color (name or #rrggbb), "
+                            "{type: stroke|rect|ellipse|fill|text|trace, color (name or #rrggbb), "
                             "width 1..64, points [[x, y], ...] for stroke, "
                             "box [x, y, w, h] for rect/ellipse, text/xy/size for text, "
                             "fill true to paint solid, erase true to cut; stroke-only: "
                             "brush pen|brush|marker|pencil|airbrush|g-pen|maru|fude|sumi|"
                             "fineliner|calligraphy|chisel|chalk|hatch|toneline|watercolor|"
-                            "splatter (default fineliner), size 0.5..256 (default = brush "
-                            "preset), pressures [0..1] per point (default 0.5), "
-                            "opacity 0..1 (default = brush preset)}."
+                            "splatter|trace (default g-pen), size 0.5..256 (default = brush "
+                            "preset), pressures [0..1] per point (omitted = inked swell), "
+                            "opacity 0..1 (default = brush preset); trace-only: "
+                            "mode ink|edges|bezier|a2s|mangaline|anilines|"
+                            "anilines-detail|linedistiller (default studio), "
+                            "detail fast|fine|auto (default studio), "
+                            "thin true for fast uniform sketch-like lines "
+                            "(default studio), raw true to place the lineart "
+                            "map directly with no brush replay (default studio), "
+                            "at [x, y] slides raw placement, "
+                            "frames [ids] scopes a shape to those frames "
+                            "(frames op only)}."
+                        ),
+                    },
+                    "frames": {
+                        "type": "array",
+                        "description": (
+                            "frames op: frame ids or names to paint the "
+                            "shapes onto (at most 8 per call)."
                         ),
                     },
                 },
@@ -6115,10 +6853,90 @@ def _stub_skill_bodies(messages, skill_bodies, current_id=None):
     return stubbed
 
 
+def _plotter_enforce_layer_args(session, user, project_id, message,
+                                  turn_references, args, plottered):
+    """(args, note): pure-stroke draws beside artwork become its trace.
+
+    Reads no language - only structured facts: the call draws, every
+    shape is a hand-authored stroke (no trace yet), and an artwork
+    token names an image that is not the draw target. The points are
+    then replaced by a single trace shape, so replication is exact in
+    every language. A mixed call (trace plus hand strokes) strips
+    just the hand strokes and keeps the trace with any text/shapes:
+    strokes beside a replication are interpretation, not the pen.
+    Text, shapes, token-less turns, and video/unfinished generations
+    pass through untouched. Each token enforces once per turn:
+    a repeated draw with the same source is the model insisting,
+    and is let through.
+    """
+    note = ""
+    if (
+        isinstance(args, dict)
+        and str(args.get("op") or "list").strip().lower() == "draw"
+    ):
+        shapes = args.get("shapes")
+        strokes_only = (
+            isinstance(shapes, list) and len(shapes) > 0 and all(
+                isinstance(s, dict)
+                and str(s.get("type") or "").strip().lower() == "stroke"
+                for s in shapes
+            )
+        )
+        traced_already = isinstance(shapes, list) and any(
+            isinstance(s, dict)
+            and str(s.get("type") or "").strip().lower() == "trace"
+            for s in shapes
+        )
+        if strokes_only and not traced_already:
+            fr = str(args.get("frame") or "")
+            m = re.search(r"@frame:([A-Za-z0-9_-]+)", fr)
+            target_id = m.group(1) if m else None
+            if target_id is None and fr.strip():
+                try:
+                    resolved = _resolve_frame(session, user, project_id, fr)
+                except Exception:
+                    resolved = None
+                if resolved is not None and not isinstance(resolved, str):
+                    target_id = resolved.id
+            tok = _plotter_source_token(
+                session, user, project_id, message, turn_references,
+                exclude_frame_id=target_id,
+            )
+            if tok is not None and tok not in plottered:
+                args = {**args, "shapes": [{"type": "trace", "from": tok}]}
+                note = (
+                    f" Plotter redraw: {tok} was replicated stroke by "
+                    "stroke (exact, not interpreted) - add nothing "
+                    "unless the request asks for changes."
+                )
+        if traced_already:
+            hand_free = [
+                s for s in shapes
+                if not (isinstance(s, dict)
+                        and str(s.get("type") or "").strip().lower() == "stroke")
+            ]
+            if len(hand_free) != len(shapes):
+                toks = sorted({
+                    str(s.get("from") or "") for s in shapes
+                    if isinstance(s, dict)
+                    and str(s.get("type") or "").strip().lower() == "trace"
+                    and re.fullmatch(r"@(panel|media|gen|frame):[A-Za-z0-9_-]+",
+                                   str(s.get("from") or ""))
+                })
+                if toks and toks[0] not in plottered:
+                    args = {**args, "shapes": hand_free}
+                    note = (
+                        f" Plotter redraw: {toks[0]} was replicated stroke by "
+                        "stroke (exact, not interpreted) - add nothing "
+                        "unless the request asks for changes."
+                    )
+    return args, note
+
+
 def _exec_cloud_tool(
     name, args, *, message, session, user, project_id, job_factory,
     turn_references=None, skills_read=None, asked=None, media_seen=None,
-    history=None,
+    history=None, plottered=None,
 ) -> str:
     """Run one model-requested tool; shared by sync turns and streams.
 
@@ -6338,6 +7156,12 @@ def _exec_cloud_tool(
                 session, user, project_id, args.get("sequence")
             )
         elif name == "manage_layers":
+            if plottered is None:
+                plottered = set()
+            args, plotter_note = _plotter_enforce_layer_args(
+                session, user, project_id, message, turn_references,
+                args, plottered,
+            )
             result = tool_manage_layers(
                 session, user, project_id,
                 args.get("frame"), args.get("op", "list"),
@@ -6350,6 +7174,12 @@ def _exec_cloud_tool(
                 args.get("box"),
                 args.get("scale"), args.get("at"),
             )
+            if plotter_note:
+                result = f"{result}{plotter_note}"
+                if "traced strokes" in result:
+                    m = re.search(r"@(panel|media|gen|frame):([A-Za-z0-9_-]+)", plotter_note)
+                    if m:
+                        plottered.add(f"@{m.group(1)}:{m.group(2)}")
         elif name == "extend_sequence":
             result = tool_extend_sequence(
                 session, user, project_id,
@@ -6515,6 +7345,9 @@ def _cloud_loop(
     # burning another model round.
     asked: set[tuple[str, tuple[str, ...]]] = set()
     media_seen: set[tuple[str, str]] = set()
+    # Artwork tokens already plotter-traced this turn: a repeated
+    # draw with the same source is the model insisting, let through.
+    plottered: set[str] = set()
     for _ in range(CLOUD_MAX_STEPS):
         # Older skill bodies collapse to pointers; the newest full body
         # stays for the step about to read it.
@@ -6550,6 +7383,7 @@ def _cloud_loop(
                 project_id=project_id, job_factory=job_factory,
                 turn_references=turn_references, skills_read=skills_read,
                 asked=asked, media_seen=media_seen, history=history,
+                plottered=plottered,
             )
             summary = result[:200]
             actions.append({"tool": name, "summary": summary})

@@ -4,6 +4,8 @@ export const VIDEOS = [
   "/videos/showcase_02.mp4",
   "/videos/showcase_03.mp4",
   "/videos/showcase_04.mp4",
+  "/videos/showcase_05.mp4",
+  "/videos/showcase_06.mp4",
 ];
 
 export type Reel = {
@@ -25,5 +27,5 @@ export const REELS: Reel[] = [
   { v: 2, title: "Ink Drift", tag: "AI · 4s", span: 4, ratio: "1 / 1", cut: "slash-l" },
   { v: 3, title: "Frame by Frame", tag: "Timeline · 8s", span: 3, ratio: "3 / 4", cut: "slash" },
   { v: 0, title: "Redline Run", tag: "AI · 5s", span: 5, ratio: "5 / 4", cut: "slash-r" },
-  { v: 1, title: "Static Bloom", tag: "AI · 7s", span: 12, ratio: "21 / 9" },
+  { v: 4, title: "Static Bloom", tag: "AI · 4s", span: 12, ratio: "21 / 9" },
 ];

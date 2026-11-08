@@ -113,6 +113,75 @@ def test_agent_config_transcribe_model_roundtrip(factory, user, saved_settings):
         assert settings.meta_transcribe_model == "muse-voice-transcribe-1.0"
 
 
+def test_agent_config_trace_defaults_round_trip(factory, user, saved_settings):
+    """The Brain Drawing section persists linework frontend + detail + thin."""
+    with factory() as s:
+        out = agent_config(
+            AgentConfigBody(
+                trace_mode="anilines-detail", trace_detail="fast", trace_thin=False
+            ),
+            session=s,
+            user=user,
+        )
+    assert out.trace_mode == "anilines-detail"
+    assert out.trace_detail == "fast"
+    assert out.trace_thin is False
+    assert settings.trace_mode == "anilines-detail"
+    assert settings.trace_detail == "fast"
+    assert settings.trace_thin == "false"
+    with factory() as s:
+        assert get_ai_overrides(s)["trace_mode"] == "anilines-detail"
+        out = agent_config(
+            AgentConfigBody(trace_mode="", trace_detail=""), session=s, user=user
+        )
+        assert "trace_mode" not in out.overrides
+        assert "trace_detail" not in out.overrides
+        assert settings.trace_mode == "ink"
+        assert settings.trace_detail == "auto"
+
+
+def test_agent_config_trace_raw_round_trip(factory, user, saved_settings):
+    """The Brain Direct switch persists; null leaves it alone."""
+    with factory() as s:
+        out = agent_config(AgentConfigBody(trace_raw=True), session=s, user=user)
+    assert out.trace_raw is True
+    assert settings.trace_raw == "true"
+    with factory() as s:
+        out = agent_config(AgentConfigBody(), session=s, user=user)
+        assert out.trace_raw is True
+        out = agent_config(
+            AgentConfigBody(trace_raw=False), session=s, user=user
+        )
+        assert out.trace_raw is False
+        assert "trace_raw" in out.overrides
+
+
+def test_agent_config_second_user_is_forbidden(factory, user, saved_settings):
+    """Studio-wide config is first-account-only; members get 403."""
+    with factory() as s:
+        other = create_user(s, email="member@test.local")
+        other_id = other.id
+    with factory() as s:
+        other = s.get(UserRow, other_id)
+        with pytest.raises(HTTPException) as exc:
+            agent_config(AgentConfigBody(trace_mode="edges"), session=s, user=other)
+    assert exc.value.status_code == 403
+    with factory() as s:
+        out = agent_config(
+            AgentConfigBody(trace_mode="edges"), session=s, user=user
+        )
+        assert out.trace_mode == "edges"
+
+
+def test_agent_config_trace_mode_rejects_lab_only(factory, user, saved_settings):
+    """linedraw is a lab comparison, not an agent frontend: 400, unchanged."""
+    with factory() as s:
+        with pytest.raises(HTTPException) as exc:
+            agent_config(AgentConfigBody(trace_mode="linedraw"), session=s, user=user)
+    assert exc.value.status_code == 400
+    assert settings.trace_mode == "ink"
+
+
 def test_agent_config_rejects_unknown_provider(factory, user, saved_settings):
     with factory() as s:
         with pytest.raises(HTTPException) as exc:

@@ -92,3 +92,29 @@ export function hitTestFrame(
   if (Math.abs(lx) <= f.hw && Math.abs(ly) <= f.hh) return "move";
   return null;
 }
+
+/** Axis-aligned bounding box of freehand points (lasso commit). */
+export function bboxOfPoints(pts: Pt[]): { x: number; y: number; w: number; h: number } {
+  let x0 = Infinity;
+  let y0 = Infinity;
+  let x1 = -Infinity;
+  let y1 = -Infinity;
+  for (const p of pts) {
+    if (p.x < x0) x0 = p.x;
+    if (p.y < y0) y0 = p.y;
+    if (p.x > x1) x1 = p.x;
+    if (p.y > y1) y1 = p.y;
+  }
+  if (!pts.length || x1 < x0 || y1 < y0) return { x: 0, y: 0, w: 0, h: 0 };
+  return { x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
+}
+
+/** Stride-sample a long trail down to at most max points (keeps endpoints). */
+export function strideCap(pts: Pt[], max = 2000): Pt[] {
+  if (pts.length <= max) return pts;
+  const stride = Math.ceil(pts.length / max);
+  const out: Pt[] = [];
+  for (let i = 0; i < pts.length; i += stride) out.push(pts[i]);
+  if (out[out.length - 1] !== pts[pts.length - 1]) out.push(pts[pts.length - 1]);
+  return out;
+}

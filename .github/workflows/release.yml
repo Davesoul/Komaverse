@@ -1,0 +1,57 @@
+name: release
+
+# Desktop installers: tag `v*` (e.g. v0.1.0) to build the Tauri bundles on
+# all three OSs and attach them to a draft GitHub release. Publish the
+# draft to make the landing page Download buttons live. The desktop shell
+# is frontend-only: point it at a backend via the Home tab API base URL
+# (local `http://127.0.0.1:8001` or your hosted https server).
+#
+# Auto-updates (one-time setup, needs Rust locally):
+#   1. `cargo install tauri-cli && tauri signer generate -w ~/.tauri/komaverse.key`
+#   2. Repo secrets: TAURI_SIGNING_PRIVATE_KEY = key file contents,
+#      TAURI_SIGNING_PRIVATE_KEY_PASSWORD = the password you set.
+#   3. Paste the printed public key over REPLACE_WITH_UPDATER_PUBKEY in
+#      apps/studio-desktop/src-tauri/tauri.conf.json.
+# After that every published release updates installed apps in place
+# (Tauri checks the latest.json manifest on launch and prompts).
+on:
+  push:
+    tags: ["v*"]
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+          - os: windows-latest
+          - os: macos-latest
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install Tauri Linux deps
+        if: matrix.os == 'ubuntu-22.04'
+        run: >
+          sudo apt-get update &&
+          sudo apt-get install -y --no-install-recommends
+          build-essential curl wget file
+          libwebkit2gtk-4.1-dev libxdo-dev libssl-dev
+          libayatana-appindicator3-dev librsvg2-dev
+      - run: npm install --no-audit --no-fund
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: "Komaverse ${{ github.ref_name }}"
+          releaseDraft: true
+          releaseBody: "Desktop installers (Windows/macOS/Linux). The app needs a backend: run it locally or point the Home tab at your server."
+          projectPath: apps/studio-desktop

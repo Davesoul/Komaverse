@@ -42,7 +42,6 @@ export default function InkDots() {
     if (w.requestIdleCallback) idleId = w.requestIdleCallback(start, { timeout: 2500 });
     else timer = window.setTimeout(start, 1500);
 
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const build = (THREE: any) => {
       const el = hostRef.current!;
       const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
@@ -115,7 +114,6 @@ export default function InkDots() {
       const reduced = prefersReducedMotion();
       const mouse = { x: 0, y: 0, active: false };
       let raf = 0;
-      let lastT = performance.now();
       let spin = 0;
       let visible = true;
 
@@ -156,7 +154,6 @@ export default function InkDots() {
       const loop = () => {
         const now = performance.now();
         if (!document.hidden && visible) render(now);
-        lastT = now;
         raf = requestAnimationFrame(loop);
       };
 

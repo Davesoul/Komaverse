@@ -163,6 +163,11 @@ class CloudProvider:
     """
 
     name = "cloud"
+
+    def __init__(self, api_key: str | None = None) -> None:
+        # BYOK override: a user's own key for this call chain only.
+        # None = studio key from settings (existing behavior everywhere).
+        self._own_key = api_key
     _detect_prompt = (
         "Detect manga panels. Reply ONLY with JSON: "
         '[{"x":0-1000,"y":0-1000,"w":0-1000,"h":0-1000}] in reading order.'
@@ -172,7 +177,7 @@ class CloudProvider:
         return settings.ai_base_url
 
     def _api_key(self) -> str | None:
-        return settings.ai_api_key
+        return self._own_key or settings.ai_api_key
 
     def _image_model(self) -> str:
         return settings.ai_image_model
@@ -678,17 +683,18 @@ def list_elevenlabs_voices() -> list[dict]:
     return out
 
 
-def get_provider(name: str) -> AIProvider:
+def get_provider(name: str, api_key: str | None = None) -> AIProvider:
+    """Provider instance; api_key is a BYOK override for this chain only."""
     if name == "cloud":
-        return CloudProvider()
+        return CloudProvider(api_key=api_key)
     if name == "comfyui":
         return ComfyUIProvider()
     if name == "local":
         return LocalProvider()
     if name == "meta":
-        return MetaProvider()
+        return MetaProvider(api_key=api_key)
     if name == "openrouter":
-        return OpenRouterProvider()
+        return OpenRouterProvider(api_key=api_key)
     if name == "fake" and not settings.is_production:
         return FakeProvider()
     raise ValueError(f"unknown provider: {name}")
@@ -983,6 +989,13 @@ class MetaProvider:
     """Meta Model API (https://api.meta.ai/v1). Chat, vision, image, voice, SAM."""
 
     name = "meta"
+
+    def __init__(self, api_key: str | None = None) -> None:
+        # BYOK override: a user's own key for this call chain only.
+        self._own_key = api_key
+
+    def _key(self) -> str | None:
+        return self._own_key or settings.meta_api_key
     # Last Responses-API usage payload (input/output/total tokens), set by
     # generate_image/segment for telemetry. Read via getattr (absent = {}).
     last_usage: dict = {}
@@ -1002,7 +1015,8 @@ class MetaProvider:
         # takes a text input; reference images ride as input_image parts in
         # a user message (steer/compose). The image is the base64 `result`
         # on the image_generation_call output item.
-        if not settings.meta_api_key:
+        key = self._key()
+        if not key:
             raise ProviderError("meta image needs META_API_KEY (dev.meta.ai)")
         model = model or settings.meta_image_model
         text = prompt.strip()
@@ -1019,7 +1033,7 @@ class MetaProvider:
             turn = text
         data, self.last_usage = _post_responses(
             base_url=settings.meta_base_url,
-            api_key=settings.meta_api_key,
+            api_key=key,
             payload={"model": model, "input": turn},
         )
         for item in data.get("output") or []:
@@ -1303,9 +1317,9 @@ def check_openrouter_model(kind: str, model: str) -> None:
         raise ProviderError(f'unknown {kind} model "{model}" (want: {want})')
 
 
-def _openrouter_headers() -> dict[str, str]:
+def _openrouter_headers(api_key: str | None = None) -> dict[str, str]:
     return {
-        "Authorization": f"Bearer {settings.openrouter_api_key}",
+        "Authorization": f"Bearer {api_key or settings.openrouter_api_key}",
         "HTTP-Referer": settings.openrouter_referer,
         "X-Title": "Komaverse Studio",
     }
@@ -1462,11 +1476,21 @@ class OpenRouterProvider:
     """OpenRouter gateway: chat models, image models, async video models."""
 
     name = "openrouter"
+
+    def __init__(self, api_key: str | None = None) -> None:
+        # BYOK override: a user's own key for this call chain only.
+        self._own_key = api_key
+
+    def _key(self) -> str | None:
+        return self._own_key or settings.openrouter_api_key
+
+    def _headers(self) -> dict[str, str]:
+        return _openrouter_headers(api_key=self._key())
     # Last image-endpoint usage payload, set by generate_image for telemetry.
     last_usage: dict = {}
 
     def _check(self) -> None:
-        if not settings.openrouter_api_key:
+        if not self._key():
             raise ProviderUnavailable("OPENROUTER_API_KEY not configured")
 
     def generate_image(
@@ -1506,7 +1530,7 @@ class OpenRouterProvider:
             resp = httpx.post(
                 f"{settings.openrouter_base_url.rstrip('/')}/images",
                 json=payload,
-                headers=_openrouter_headers(),
+                headers=self._headers(),
                 timeout=180.0,
             )
         except httpx.HTTPError as exc:
@@ -1569,7 +1593,7 @@ class OpenRouterProvider:
         # takes and timeline cues are the studio mix, not model audio.
         self._check()
         base = settings.openrouter_base_url.rstrip("/")
-        headers = _openrouter_headers()
+        headers = self._headers()
         payload: dict = {
             "model": model or settings.openrouter_video_model,
             "prompt": prompt,

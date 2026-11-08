@@ -8,6 +8,7 @@ import {
   type AgentReply,
   type AgentStatus,
   type AgentThread,
+  type OwnKey,
 } from "../api";
 import { getCurrentProject, getDrawFrame } from "../lib/studio";
 import { probeDuration } from "../lib/audio/peaks";
@@ -630,14 +631,17 @@ export default function AgentDock() {
     transcribe: "",
     voiceProvider: "free-tts",
     voice: "",
-    meta_api_key: "",
-    openrouter_api_key: "",
-    baseten_api_key: "",
-    elevenlabs_api_key: "",
-    ai_api_key: "",
+    traceFrontend: "",
+    traceDetail: "",
+    traceThin: null as boolean | null,
+    traceRaw: null as boolean | null,
   });
   const [brainSaving, setBrainSaving] = useState(false);
   const [brainError, setBrainError] = useState<string | null>(null);
+  const [ownKeys, setOwnKeys] = useState<OwnKey[]>([]);
+  const [ownKeyInputs, setOwnKeyInputs] = useState<Record<string, string>>({});
+  const [ownKeyBusy, setOwnKeyBusy] = useState<string | null>(null);
+  const [ownKeyError, setOwnKeyError] = useState<string | null>(null);
   const [brainCatalog, setBrainCatalog] = useState<{
     image: { id: string; label: string; maker?: string }[];
     video: { id: string; label: string; maker?: string }[];
@@ -1827,6 +1831,42 @@ export default function AgentDock() {
   const defaultThread = threads.find((t) => !t.id);
   const brainOverridden = new Set(agentInfo?.overrides ?? []);
   const brainCustom = (field: string) => (brainOverridden.has(field) ? " •" : "");
+  const refreshOwnKeys = async () => {
+    try {
+      setOwnKeys(await api.listOwnKeys());
+    } catch {
+      // Vault off or unreachable: the keys section stays empty.
+      setOwnKeys([]);
+    }
+  };
+  const saveOwnKey = async (provider: string) => {
+    const key = (ownKeyInputs[provider] ?? "").trim();
+    if (!key || ownKeyBusy) return;
+    setOwnKeyBusy(provider);
+    setOwnKeyError(null);
+    try {
+      await api.saveOwnKey(provider, key);
+      setOwnKeyInputs((m) => ({ ...m, [provider]: "" }));
+      await refreshOwnKeys();
+    } catch (e) {
+      setOwnKeyError((e as Error).message);
+    } finally {
+      setOwnKeyBusy(null);
+    }
+  };
+  const forgetOwnKey = async (provider: string) => {
+    if (!window.confirm(`Forget your ${provider} key? Generations fall back to studio credits.`)) return;
+    setOwnKeyBusy(provider);
+    setOwnKeyError(null);
+    try {
+      await api.deleteOwnKey(provider);
+      await refreshOwnKeys();
+    } catch (e) {
+      setOwnKeyError((e as Error).message);
+    } finally {
+      setOwnKeyBusy(null);
+    }
+  };
   const openBrain = () => {
     if (!showBrain) {
       const p = agentInfo?.providers ?? {};
@@ -1838,6 +1878,7 @@ export default function AgentDock() {
         voiceProvider: p.voice ?? "free-tts",
       }));
       setBrainError(null);
+      void refreshOwnKeys();
       if (!brainCatalog) {
         api
           .listAiModels()
@@ -1913,7 +1954,7 @@ export default function AgentDock() {
     return maker ? `${maker} · ${route}` : route;
   };
   const saveBrain = async (reset = false) => {
-    const body: Record<string, string> = reset
+    const body: Record<string, string | boolean> = reset
       ? {
           chat_provider: "",
           vision_provider: "",
@@ -1925,11 +1966,10 @@ export default function AgentDock() {
           video_model: "",
           transcribe_model: "",
           voice_model: "",
-          meta_api_key: "",
-          openrouter_api_key: "",
-          baseten_api_key: "",
-          elevenlabs_api_key: "",
-          ai_api_key: "",
+          trace_mode: "",
+          trace_detail: "",
+          trace_thin: true,
+          trace_raw: false,
         }
       : {
           chat_provider: brainForm.chatProvider,
@@ -1947,11 +1987,10 @@ export default function AgentDock() {
       put("video_model", brainForm.video);
       put("transcribe_model", brainForm.transcribe);
       put("voice_model", brainForm.voice);
-      put("meta_api_key", brainForm.meta_api_key);
-      put("openrouter_api_key", brainForm.openrouter_api_key);
-      put("baseten_api_key", brainForm.baseten_api_key);
-      put("elevenlabs_api_key", brainForm.elevenlabs_api_key);
-      put("ai_api_key", brainForm.ai_api_key);
+      put("trace_mode", brainForm.traceFrontend);
+      put("trace_detail", brainForm.traceDetail);
+      if (brainForm.traceThin !== null) body["trace_thin"] = brainForm.traceThin;
+      if (brainForm.traceRaw !== null) body["trace_raw"] = brainForm.traceRaw;
     }
     setBrainSaving(true);
     setBrainError(null);
@@ -1963,7 +2002,7 @@ export default function AgentDock() {
       setBrainCatalog(null);
       setBrainVoices(null);
       if (!reset) {
-        setBrainForm((f) => ({ ...f, chat: "", vision: "", image: "", video: "", transcribe: "", voice: "", meta_api_key: "", openrouter_api_key: "", baseten_api_key: "", elevenlabs_api_key: "", ai_api_key: "" }));
+        setBrainForm((f) => ({ ...f, chat: "", vision: "", image: "", video: "", transcribe: "", voice: "", traceFrontend: "", traceDetail: "", traceThin: null, traceRaw: null }));
       }
     } catch (e) {
       setBrainError((e as Error).message);
@@ -2291,6 +2330,67 @@ export default function AgentDock() {
               </div>
             );
           })}
+          <div style={{ display: "flex", flexDirection: "column", gap: 4, marginTop: 4 }}>
+            <div style={{ fontSize: 13, fontWeight: 700 }}>Drawing{brainCustom("trace_mode")}{brainCustom("trace_detail")}{brainCustom("trace_thin")}{brainCustom("trace_raw")}</div>
+            <div style={{ fontSize: 12, color: "var(--kv-muted)" }}>
+              Linework frontend for agent drawings — applies when the request names no tech.
+              Current: {agentInfo?.trace_mode ?? "ink"} · {agentInfo?.trace_detail ?? "auto"} · {agentInfo?.trace_thin === false ? "measured widths" : "thin lines"}{agentInfo?.trace_raw ? " · direct" : ""}.
+              Neural frontends fetch weights on first use.
+            </div>
+            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <span style={{ width: 64, fontSize: 13 }}>Lines</span>
+              <SelectInput
+                value={brainForm.traceFrontend}
+                onChange={(e) => setBrainForm((f) => ({ ...f, traceFrontend: e.target.value }))}
+                aria-label="Drawing linework frontend (blank keeps current)"
+                style={{ flex: 1 }}
+              >
+                <option value="">Keep ({agentInfo?.trace_mode ?? "ink"})</option>
+                <option value="ink">ink — print linework</option>
+                <option value="edges">edges — photos, shaded art</option>
+                <option value="bezier">bezier — smooth curves</option>
+                <option value="anilines-detail">anilines-detail — clean manga lines</option>
+                <option value="anilines">anilines — outlines</option>
+                <option value="a2s">a2s — pencil, anime art</option>
+                <option value="mangaline">mangaline — print manga</option>
+                <option value="linedistiller">linedistiller — fastest neural</option>
+              </SelectInput>
+            </div>
+            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <span style={{ width: 64, fontSize: 13 }}>Detail</span>
+              <SelectInput
+                value={brainForm.traceDetail}
+                onChange={(e) => setBrainForm((f) => ({ ...f, traceDetail: e.target.value }))}
+                aria-label="Drawing detail (blank keeps current)"
+                style={{ flex: 1 }}
+              >
+                <option value="">Keep ({agentInfo?.trace_detail ?? "auto"})</option>
+                <option value="auto">auto — fine ≤1100px, else fast</option>
+                <option value="fast">fast — seconds</option>
+                <option value="fine">fine — native, minutes</option>
+              </SelectInput>
+            </div>
+            <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13 }}>
+              <span style={{ width: 64 }}>Thin</span>
+              <input
+                type="checkbox"
+                checked={brainForm.traceThin ?? agentInfo?.trace_thin ?? true}
+                onChange={(e) => setBrainForm((f) => ({ ...f, traceThin: e.target.checked }))}
+                aria-label="Thin uniform lines (uncheck for measured ink widths)"
+              />
+              <span style={{ fontSize: 12, color: "var(--kv-muted)" }}>uniform thin lines</span>
+            </label>
+            <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13 }}>
+              <span style={{ width: 64 }}>Direct</span>
+              <input
+                type="checkbox"
+                checked={brainForm.traceRaw ?? agentInfo?.trace_raw ?? false}
+                onChange={(e) => setBrainForm((f) => ({ ...f, traceRaw: e.target.checked }))}
+                aria-label="Place tech lineart directly (no brush replay)"
+              />
+              <span style={{ fontSize: 12, color: "var(--kv-muted)" }}>tech output, no replay</span>
+            </label>
+          </div>
           {(["chat", "vision", "image", "video", "transcribe", "voice"] as const).map((kind) => (
             <datalist key={kind} id={`kv-brain-${kind}`}>
               {brainOptions(kind).map((m) => (
@@ -2300,43 +2400,64 @@ export default function AgentDock() {
               ))}
             </datalist>
           ))}
-          <div style={{ display: "flex", flexDirection: "column", gap: 4, marginTop: 4 }}>
-            <div style={{ fontSize: 13, fontWeight: 700 }}>Provider keys</div>
-            <div style={{ fontSize: 12, color: "var(--kv-muted)" }}>
-              Paste a key to use it immediately, no restart, no .env edit. Stored
-              server-side, never shown again - blank keeps the current value.
+                      <div style={{ display: "flex", flexDirection: "column", gap: 4, marginTop: 4 }}>
+              <div style={{ fontSize: 13, fontWeight: 700 }}>Keys</div>
+              <div style={{ fontSize: 12, color: "var(--kv-muted)" }}>
+                One rule: the studio key applies until you fill yours — then
+                generations on it bill your provider account instead of studio
+                credits. Freemium is daily-limited; subscribers get unlimited.
+                Chat, voice, and detection always use studio keys.
+              </div>
+              {(
+                [
+                  { provider: "openrouter", field: "openrouter_api_key", label: "OpenRouter", hint: "Chat, vision, image, video" },
+                  { provider: "meta", field: "meta_api_key", label: "Meta", hint: "Muse brain, vision, image" },
+                  { provider: "cloud", field: "ai_api_key", label: "Cloud AI", hint: "Fallback chat, vision, image" },
+                ] as const
+              ).map(({ provider, field, label, hint }) => {
+                const saved = ownKeys.find((k) => k.provider === provider);
+                const state = saved
+                  ? `your key ${saved.masked} (in use)`
+                  : brainOverridden.has(field) || agentInfo?.keys_set?.includes(field)
+                    ? "studio key"
+                    : "not set";
+                return (
+                  <div key={provider} style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                    <span style={{ width: 64, fontSize: 13 }}>{label}</span>
+                    <TextInput
+                      type="password"
+                      value={ownKeyInputs[provider] ?? ""}
+                      onChange={(e) => setOwnKeyInputs((m) => ({ ...m, [provider]: e.target.value }))}
+                      placeholder={state}
+                      aria-label={`${label} API key (fill yours, forget for studio)`}
+                      title={hint}
+                      autoComplete="off"
+                      style={{ flex: 1, fontFamily: "var(--kv-mono)", fontSize: 12 }}
+                    />
+                    <Btn
+                      small
+                      disabled={ownKeyBusy !== null || !(ownKeyInputs[provider] ?? "").trim()}
+                      onClick={() => void saveOwnKey(provider)}
+                      title={`Use your ${label} key — generations bill your account`}
+                    >
+                      {ownKeyBusy === provider ? "Saving…" : "Save"}
+                    </Btn>
+                    {saved && (
+                      <IconBtn
+                        danger
+                        label={`Forget your ${label} key, back to studio`}
+                        onClick={() => void forgetOwnKey(provider)}
+                      >
+                        ×
+                      </IconBtn>
+                    )}
+                  </div>
+                );
+              })}
             </div>
-            {(
-              [
-                { field: "meta_api_key", label: "Meta", hint: "Muse brain, vision, image, transcribe" },
-                { field: "openrouter_api_key", label: "OpenRouter", hint: "Chat, vision, image, video" },
-                { field: "baseten_api_key", label: "Baseten", hint: "Open-weight Muse Spark brain" },
-                { field: "elevenlabs_api_key", label: "ElevenLabs", hint: "Voice-over" },
-                { field: "ai_api_key", label: "Cloud AI", hint: "Fallback chat, vision, image" },
-              ] as const
-            ).map(({ field, label, hint }) => {
-              const state = brainOverridden.has(field)
-                ? "saved in studio"
-                : agentInfo?.keys_set?.includes(field)
-                  ? "from environment"
-                  : "not set";
-              return (
-                <div key={field} style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                  <span style={{ width: 64, fontSize: 13 }}>{label}</span>
-                  <TextInput
-                    type="password"
-                    value={brainForm[field]}
-                    onChange={(e) => setBrainForm((f) => ({ ...f, [field]: e.target.value }))}
-                    placeholder={state}
-                    aria-label={`${label} API key (blank keeps current)`}
-                    title={hint}
-                    autoComplete="off"
-                    style={{ flex: 1, fontFamily: "var(--kv-mono)", fontSize: 12 }}
-                  />
-                </div>
-              );
-            })}
-          </div>
+          {ownKeyError && (
+            <div style={{ fontSize: 12, color: "var(--kv-danger)" }}>{ownKeyError}</div>
+          )}
           {brainError && (
             <div style={{ fontSize: 12, color: "var(--kv-danger)" }}>{brainError}</div>
           )}

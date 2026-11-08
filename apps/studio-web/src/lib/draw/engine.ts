@@ -12,6 +12,8 @@ import {
   hitTestFrame,
   rotateHandlePos,
   transformedBox,
+  bboxOfPoints,
+  strideCap,
   type FrameHit,
   type SelectFrame,
 } from "./transform";
@@ -34,9 +36,11 @@ export type ToolId =
   | "pan"
   | "select";
 
-/** Rectangular pixel selection in logical frame coords. */
+/** Pixel selection in logical frame coords: rect box, plus the closed freehand path when lassoed. */
 export interface PixelSelection {
   layerId: string;
+  /** Closed freehand path (lasso); absent for rectangle selections. */
+  path?: { x: number; y: number }[];
   x: number;
   y: number;
   w: number;
@@ -126,6 +130,8 @@ export class DrawEngine {
   /** Committed marquee selection (marching ants) or null. */
   selection: PixelSelection | null = null;
   private marquee: { x0: number; y0: number; x1: number; y1: number } | null = null;
+  /** In-flight freehand path (lasso) in logical coords; null when idle. */
+  private lasso: { x: number; y: number }[] | null = null;
   /** In-flight transform: cut pixels following the cursor until drop
    * (move/scale/rotate) or Esc (restored untransformed). */
   private float: {
@@ -171,6 +177,8 @@ export class DrawEngine {
   /** Select behavior: "all" lifts the whole marquee rect, "ink" lifts only
    * dark ink pixels so a same-layer background stays intact. */
   selectMode: "all" | "ink" = "ink";
+  /** Marquee shape: "rect" drags a box, "lasso" draws a freehand loop. */
+  selectShape: "rect" | "lasso" = "rect";
   color = "#111111";
   brush: BrushSettings = {
     size: 8,
@@ -531,6 +539,7 @@ export class DrawEngine {
       this.drawing = true;
       this.gesture = null;
       this.marquee = { x0: p.x, y0: p.y, x1: p.x, y1: p.y };
+      this.lasso = this.selectShape === "lasso" ? [{ x: p.x, y: p.y }] : null;
       this.composite();
       return { status: "stroke" };
     }
@@ -637,6 +646,7 @@ export class DrawEngine {
       }
       if (this.marquee) {
         this.marquee = { ...this.marquee, x1: p.x, y1: p.y };
+        this.accumulateLasso(p);
         this.composite();
         return;
       }
@@ -664,6 +674,13 @@ export class DrawEngine {
     this.queueLivePaint(this.activeId!);
   }
 
+  /** Append to the in-flight lasso when one is active (no-op otherwise). */
+  private accumulateLasso(p: { x: number; y: number }) {
+    const trail = this.lasso;
+    if (!trail) return;
+    const last = trail[trail.length - 1];
+    if (Math.hypot(p.x - last.x, p.y - last.y) >= 3) trail.push({ x: p.x, y: p.y });
+  }
   pointerUp(e?: PointerEvent) {
     if (e) this.release(e);
     if (!this.drawing) return;
@@ -671,6 +688,8 @@ export class DrawEngine {
       if (this.marquee) {
         const m = this.marquee;
         this.marquee = null;
+        const trail = this.lasso;
+        this.lasso = null;
         const w = Math.abs(m.x1 - m.x0);
         const h = Math.abs(m.y1 - m.y0);
         let next: PixelSelection | null = null;
@@ -683,6 +702,13 @@ export class DrawEngine {
           );
           if (box.w >= 1 && box.h >= 1) {
             next = { layerId: this.activeId, ...box };
+            if (trail && trail.length >= 3) {
+              const bb = bboxOfPoints(trail);
+              const cb = this.clampRect(bb.x, bb.y, bb.w, bb.h);
+              if (cb.w >= 1 && cb.h >= 1) {
+                next = { layerId: this.activeId, ...cb, path: strideCap(trail) };
+              }
+            }
           }
         }
         this.selection = next;
@@ -745,6 +771,7 @@ export class DrawEngine {
     this.paintedMirrorSteps = 0;
     this.strokeRand = null;
     this.strokeRandMirror = null;
+    this.lasso = null;
   }
 
   // ---- selection -----------------------------------------------------
@@ -786,7 +813,21 @@ export class DrawEngine {
     const c = document.createElement("canvas");
     c.width = sw;
     c.height = sh;
-    c.getContext("2d")!.drawImage(layer.canvas, sx, sy, sw, sh, 0, 0, sw, sh);
+    const g = c.getContext("2d")!;
+    g.drawImage(layer.canvas, sx, sy, sw, sh, 0, 0, sw, sh);
+    const liftPath = (r as PixelSelection).path;
+    if (liftPath && liftPath.length >= 3) {
+      g.save();
+      g.globalCompositeOperation = "destination-in";
+      g.scale(d, d);
+      g.translate(-r.x, -r.y);
+      g.beginPath();
+      g.moveTo(liftPath[0].x, liftPath[0].y);
+      for (const q of liftPath.slice(1)) g.lineTo(q.x, q.y);
+      g.closePath();
+      g.fill();
+      g.restore();
+    }
     return c;
   }
 
@@ -799,6 +840,14 @@ export class DrawEngine {
     c.save();
     c.setTransform(1, 0, 0, 1, 0, 0);
     c.globalCompositeOperation = "destination-out";
+    const clipPath = (r as PixelSelection).path;
+    if (clipPath && clipPath.length >= 3) {
+      c.beginPath();
+      c.moveTo(clipPath[0].x * d, clipPath[0].y * d);
+      for (const q of clipPath.slice(1)) c.lineTo(q.x * d, q.y * d);
+      c.closePath();
+      c.clip();
+    }
     c.fillRect(Math.round(r.x * d), Math.round(r.y * d), Math.round(r.w * d), Math.round(r.h * d));
     c.restore();
   }
@@ -862,10 +911,43 @@ export class DrawEngine {
     c.save();
     c.setTransform(1, 0, 0, 1, 0, 0);
     const out = c.getImageData(Math.round(r.x * d), Math.round(r.y * d), sw, sh);
+    const selPath = (r as PixelSelection).path;
+    if (selPath && selPath.length >= 3) {
+      const mask = DrawEngine.pathMask(selPath, r.x, r.y, sw, sh, d);
+      if (mask) {
+        for (let i = 0; i < sw * sh; i++) {
+          if (mask[i * 4 + 3] < 128) out.data[i * 4 + 3] = 0;
+        }
+      }
+    }
     c.restore();
     return out;
   }
 
+  /** Alpha mask of a lasso polygon over a bbox (canvas-rasterized, fast). */
+  private static pathMask(
+    path: { x: number; y: number }[],
+    originX: number,
+    originY: number,
+    w: number,
+    h: number,
+    dpr: number,
+  ): Uint8ClampedArray | null {
+    if (path.length < 3 || w < 1 || h < 1) return null;
+    const c = document.createElement("canvas");
+    c.width = w;
+    c.height = h;
+    const g = c.getContext("2d", { willReadFrequently: true })!;
+    g.scale(dpr, dpr);
+    g.translate(-originX, -originY);
+    g.beginPath();
+    g.moveTo(path[0].x, path[0].y);
+    for (let i = 1; i < path.length; i++) g.lineTo(path[i].x, path[i].y);
+    g.closePath();
+    g.fillStyle = "#fff";
+    g.fill();
+    return g.getImageData(0, 0, c.width, c.height).data;
+  }
   private static pixelsToCanvas(
     data: Uint8ClampedArray,
     w: number,
@@ -902,10 +984,27 @@ export class DrawEngine {
   private eraseInk(layer: Layer, sel: PixelSelection): number {
     const data = this.regionData(layer, sel);
     if (!data) return 0;
+    const pristine = sel.path ? new Uint8ClampedArray(data.data) : null;
     const count = clearInk(
       { data: data.data, width: data.width, height: data.height },
       INK_LUMA_THRESHOLD,
     );
+    if (pristine && sel.path) {
+      // regionData zeroed everything outside the lasso; restore those
+      // pixels so the write-back only cuts inside the loop.
+      const mask = DrawEngine.pathMask(sel.path, sel.x, sel.y, data.width, data.height, this.dpr);
+      if (mask) {
+        const n = data.width * data.height;
+        for (let i = 0; i < n; i++) {
+          if (mask[i * 4 + 3] < 128) {
+            data.data[i * 4] = pristine[i * 4];
+            data.data[i * 4 + 1] = pristine[i * 4 + 1];
+            data.data[i * 4 + 2] = pristine[i * 4 + 2];
+            data.data[i * 4 + 3] = pristine[i * 4 + 3];
+          }
+        }
+      }
+    }
     if (count > 0) {
       const c = layer.canvas.getContext("2d")!;
       c.save();
@@ -1726,7 +1825,16 @@ export class DrawEngine {
       const w = Math.abs(m.x1 - m.x0);
       const h = Math.abs(m.y1 - m.y0);
       if (w >= 1 && h >= 1) {
-        strokeAnts(() => ctx.rect(x, y, w, h));
+        if (this.lasso && this.lasso.length >= 2) {
+          const trail = this.lasso;
+          strokeAnts(() => {
+            ctx.beginPath();
+            ctx.moveTo(trail[0].x, trail[0].y);
+            for (const q of trail.slice(1)) ctx.lineTo(q.x, q.y);
+          });
+        } else {
+          strokeAnts(() => ctx.rect(x, y, w, h));
+        }
       }
     }
     const fl = this.float;
@@ -1769,7 +1877,17 @@ export class DrawEngine {
     } else if (!this.marquee && this.selection) {
       const s = this.selection;
       if (s.w >= 1 && s.h >= 1) {
-        strokeAnts(() => ctx.rect(s.x, s.y, s.w, s.h));
+        if (s.path && s.path.length >= 3) {
+          const loop = s.path;
+          strokeAnts(() => {
+            ctx.beginPath();
+            ctx.moveTo(loop[0].x, loop[0].y);
+            for (const q of loop.slice(1)) ctx.lineTo(q.x, q.y);
+            ctx.closePath();
+          });
+        } else {
+          strokeAnts(() => ctx.rect(s.x, s.y, s.w, s.h));
+        }
       }
     }
   }

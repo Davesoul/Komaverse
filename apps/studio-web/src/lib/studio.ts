@@ -54,6 +54,33 @@ export function getDrawFrame(projectId: string): string | null {
   }
 }
 
+/* Prune per-project session keys whose project no longer exists (deleted
+ * elsewhere, stale tab). Call after listProjects so reopened tabs never
+ * restore a dead draw frame / timeline / sequence. */
+export function pruneStaleProjectSession(knownIds: string[]) {
+  const known = new Set(knownIds);
+  try {
+    const stored = localStorage.getItem(PROJECT_KEY);
+    if (stored && !known.has(stored)) localStorage.removeItem(PROJECT_KEY);
+    if (currentProject && !known.has(currentProject)) currentProject = null;
+    const dropPrefix = (prefix: string) => {
+      const dead: string[] = [];
+      for (let i = 0; i < localStorage.length; i++) {
+        const k = localStorage.key(i);
+        if (!k || !k.startsWith(prefix)) continue;
+        const pid = k.slice(prefix.length);
+        if (!known.has(pid)) dead.push(k);
+      }
+      dead.forEach((k) => localStorage.removeItem(k));
+    };
+    dropPrefix("komaverse.drawFrame.");
+    dropPrefix("komaverse.sequence.");
+    dropPrefix("komaverse.scene.");
+  } catch {
+    currentProject = null;
+  }
+}
+
 /* Current animation sequence, per project. Draw and Media share it so
  * "Open in Draw" lands on the right sequence. */
 const sequenceKey = (projectId: string) => `komaverse.sequence.${projectId}`;
@@ -103,6 +130,14 @@ export type StudioTab = "home" | "scan" | "draw" | "render" | "media";
 
 export function gotoTab(tab: StudioTab) {
   window.dispatchEvent(new CustomEvent("komaverse:goto-tab", { detail: tab }));
+  // Move keyboard focus to the new tab's main landmark on the next frame,
+  // once the shell has swapped pages. Screen-reader and keyboard users
+  // otherwise stay stranded on the old tab's last position.
+  window.requestAnimationFrame(() => {
+    window.requestAnimationFrame(() => {
+      document.getElementById("kv-main")?.focus({ preventScroll: true });
+    });
+  });
 }
 
 

@@ -14,8 +14,8 @@ from komaverse.observability import (
     Metrics,
     check_readiness,
     normalize_path,
-    record_error,
     recent_errors,
+    record_error,
 )
 
 
@@ -64,7 +64,9 @@ def test_metrics_render_prometheus_format():
 def test_check_readiness_ok_and_degraded(tmp_path):
     ok, checks = check_readiness(f"sqlite:///{tmp_path}/ok.db", tmp_path / "media")
     assert ok is True
-    assert checks == {"database": "ok", "media": "ok"}
+    assert checks["database"] == "ok"
+    assert checks["media"] == "ok"
+    assert checks["ffmpeg"].startswith("ok")
     ok, checks = check_readiness("sqlite:////nonexistent-dir-xyz/db.sqlite", tmp_path / "m2")
     assert ok is False
     assert checks["database"].startswith("fail:")

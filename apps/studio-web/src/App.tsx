@@ -6,17 +6,20 @@ import AgentDock from "./components/AgentDock";
 import SystemCard from "./components/SystemCard";
 import UsageCard from "./components/UsageCard";
 import { Btn, Card, Kanji, LoadingLine, PrimaryBtn, SelectInput, TextInput, Toasts } from "./components/ui";
-import { getCurrentProject, setCurrentProject } from "./lib/studio";
+import { getCurrentProject, pruneStaleProjectSession, setCurrentProject } from "./lib/studio";
 import { prefersReducedMotion } from "./components/Reveal";
-import LandingPage from "./pages/LandingPage";
 
-// Perf: one chunk per editor surface; landing stays in the entry bundle.
+// Perf: one chunk per editor surface; landing is lazy too so logged-in
+// users never download the marketing bundle.
+const LandingPage = lazy(() => import("./pages/LandingPage"));
 const ScanPage = lazy(() => import("./pages/ScanPage"));
 const DrawPage = lazy(() => import("./pages/DrawPage"));
 const RenderPage = lazy(() => import("./pages/RenderPage"));
 const MediaPage = lazy(() => import("./pages/MediaPage"));
+const PortalPage = lazy(() => import("./pages/PortalPage"));
+const TraceLabPage = lazy(() => import("./pages/TraceLabPage"));
 
-type Tab = "home" | "scan" | "draw" | "render" | "media";
+type Tab = "home" | "scan" | "draw" | "render" | "media" | "portal";
 
 const TABS: { id: Tab; label: string; hint: string }[] = [
   { id: "home", label: "Home", hint: "Overview & connection" },
@@ -24,6 +27,7 @@ const TABS: { id: Tab; label: string; hint: string }[] = [
   { id: "draw", label: "Draw", hint: "Layered canvas" },
   { id: "render", label: "Render", hint: "Timeline, AI & export" },
   { id: "media", label: "Media", hint: "Library, takes & storage" },
+  { id: "portal", label: "Portal", hint: "Credits, top-ups & costs" },
 ];
 
 /** Bottom-left card while first-run detection weights download (all tabs).
@@ -88,6 +92,20 @@ export default function App() {
   const [user, setUser] = useState<User | null | undefined>(undefined);
   const [authMode, setAuthMode] = useState<"login" | "register">("register");
   const [showAuth, setShowAuth] = useState(false);
+  // Standalone test-lab route (#/trace-lab): not a tab, renders the
+  // trace inspector instead of the tab content.
+  const [labRoute, setLabRoute] = useState(
+    () => window.location.hash === "#/trace-lab",
+  );
+  useEffect(() => {
+    const onHash = () => setLabRoute(window.location.hash === "#/trace-lab");
+    window.addEventListener("hashchange", onHash);
+    return () => window.removeEventListener("hashchange", onHash);
+  }, []);
+  // Landing preview while logged in: the marketing page renders
+  // inside the shell with the session kept; its auth buttons just
+  // exit the preview.
+  const [showLanding, setShowLanding] = useState(false);
   const [tab, setTabState] = useState<Tab>(() => {
     const t = (() => {
       try {
@@ -102,6 +120,7 @@ export default function App() {
   // The shell tab survives reloads next to the published project id, so a
   // refresh drops you back where you were instead of Home with nothing open.
   const setTab = (t: Tab) => {
+    setShowLanding(false);
     setTabState(t);
     try {
       localStorage.setItem("komaverse.tab", t);
@@ -127,6 +146,7 @@ export default function App() {
     api
       .listProjects()
       .then((ps) => {
+        pruneStaleProjectSession(ps.map((p) => p.id));
         setProjectCount(ps.length);
         setHomeProjects(ps);
         const stored = getCurrentProject();
@@ -203,11 +223,13 @@ export default function App() {
   }, []);
 
   const logout = async () => {
+    // Reload instead of just clearing the user: module singletons (the
+    // project cache, dock threads, in-flight dedupe) outlive setUser and
+    // the next login would reuse the previous account's threads.
     try {
       await api.logout();
     } finally {
-      setUser(null);
-      setShowAuth(false);
+      window.location.reload();
     }
   };
 
@@ -277,16 +299,18 @@ export default function App() {
               />
             </>
           ) : (
-            <LandingPage
-              onSignIn={() => {
-                setAuthMode("login");
-                setShowAuth(true);
-              }}
-              onRegister={() => {
-                setAuthMode("register");
-                setShowAuth(true);
-              }}
-            />
+            <Suspense fallback={<LoadingLine label="Loading…" />}>
+              <LandingPage
+                onSignIn={() => {
+                  setAuthMode("login");
+                  setShowAuth(true);
+                }}
+                onRegister={() => {
+                  setAuthMode("register");
+                  setShowAuth(true);
+                }}
+              />
+            </Suspense>
           )}
         </div>
       </div>
@@ -373,6 +397,15 @@ export default function App() {
               <span style={{ color: "var(--kv-danger)" }}>{apiStatus}</span>
             )}
             {user.name || user.email}
+            {showLanding ? (
+              <Btn small onClick={() => setShowLanding(false)} title="Back to the studio">
+                Create
+              </Btn>
+            ) : (
+              <Btn small onClick={() => setShowLanding(true)} title="View the landing page">
+                Landing
+              </Btn>
+            )}
             <Btn small onClick={logout}>
               Sign out
             </Btn>
@@ -399,7 +432,31 @@ export default function App() {
       )}
 
       <main id="kv-main" tabIndex={-1} style={{ maxWidth: 1280, margin: "0 auto", outline: "none" }} ref={mainRef}>
-        {tab === "home" ? (
+        {labRoute ? (
+          <Suspense
+            fallback={
+              <div style={{ display: "flex", gap: 8, padding: 32 }}>
+                <LoadingLine label="Loading lab…" />
+              </div>
+            }
+          >
+            <TraceLabPage />
+          </Suspense>
+        ) : showLanding ? (
+          <Suspense
+            fallback={
+              <div style={{ display: "flex", gap: 8, padding: 32 }}>
+                <LoadingLine label="Loading…" />
+              </div>
+            }
+          >
+            <LandingPage
+              hideNav
+              onSignIn={() => setShowLanding(false)}
+              onRegister={() => setShowLanding(false)}
+            />
+          </Suspense>
+        ) : tab === "home" ? (
           <>
           <div style={{ position: "relative" }}>
             <h1 style={{ margin: "4px 0 4px", fontSize: 24, fontWeight: 600 }}>
@@ -545,12 +602,19 @@ export default function App() {
               <DrawPage />
             ) : tab === "render" ? (
               <RenderPage />
-            ) : (
+) : tab === "media" ? (
               <MediaPage />
+            ) : (
+              <PortalPage />
             )}
           </Suspense>
         )}
       </main>
+      <div style={{ maxWidth: 1280, margin: "0 auto", fontSize: 12 }}>
+        <a href="#/trace-lab" style={{ color: "var(--kv-muted)" }}>
+          Trace lab (plotting test page)
+        </a>
+      </div>
       <AgentDock />
       <ModelDownloadCard active={user !== null} />
       <Toasts />

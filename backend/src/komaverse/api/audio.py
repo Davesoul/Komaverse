@@ -16,7 +16,7 @@ from sqlalchemy.orm import Session
 from komaverse import storage
 from komaverse.ai.providers import ElevenLabsProvider, MetaProvider, ProviderError
 from komaverse.ai.voice_local import synthesize_local
-from komaverse.studio_settings import provider_for
+from komaverse.api.ai import COSTS, spend_credits
 from komaverse.api.usage import record_usage
 from komaverse.auth import ensure_owner, get_current_user, own_project
 from komaverse.config import settings
@@ -24,6 +24,7 @@ from komaverse.db import get_session
 from komaverse.db_models import AudioCueRow, AudioTakeRow, SceneRow, UserRow
 from komaverse.models import AudioCue, AudioTake
 from komaverse.renderer import audio_has_stream, transcode_to_wav
+from komaverse.studio_settings import provider_for
 
 router = APIRouter(prefix="/api/v1")
 
@@ -326,6 +327,9 @@ def synthesize_take(
             if provider == "elevenlabs"
             else settings.freetts_voice_model
         ) or None
+    if provider == "elevenlabs" and not (voice or "").startswith("xtts:"):
+        if not spend_credits(session, user.id, COSTS["voice"], "voice synthesis"):
+            raise HTTPException(402, f"insufficient credits (need {COSTS['voice']})")
     try:
         if provider == "elevenlabs" and not (voice or "").startswith("xtts:"):
             data = ElevenLabsProvider().synthesize(text, voice=voice)

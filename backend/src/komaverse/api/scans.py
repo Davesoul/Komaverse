@@ -10,14 +10,13 @@ from fastapi import APIRouter, Depends, File, HTTPException, Response, UploadFil
 from PIL import Image
 from pydantic import BaseModel
 from sqlalchemy import delete, select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
 
 from komaverse import storage
+from komaverse.api.usage import record_usage
 from komaverse.auth import ensure_owner, get_current_user, own_project
 from komaverse.config import settings
-from komaverse.api.usage import record_usage
 from komaverse.db import get_session
-from komaverse.security import limiter
 from komaverse.db_models import (
     ClipRow,
     ExportReportRow,
@@ -29,8 +28,9 @@ from komaverse.db_models import (
     UserRow,
 )
 from komaverse.detect import run_detector, weight_status
-from komaverse.models import Page, Panel, Project
+from komaverse.models import Page, Panel, Project, ProjectSummary, ProjectView, Scene
 from komaverse.observability import metrics
+from komaverse.security import limiter
 
 router = APIRouter(prefix="/api/v1")
 
@@ -115,13 +115,27 @@ def create_project(
     return row.to_schema()
 
 
-@router.get("/projects", response_model=list[Project])
+@router.get("/projects", response_model=list[ProjectSummary])
 def list_projects(
     session: Session = Depends(get_session),
     user: UserRow = Depends(get_current_user),
 ):
-    res = session.execute(select(ProjectRow).where(ProjectRow.user_id == user.id))
-    return [r.to_schema() for r in res.scalars().all()]
+    res = (
+        session.execute(
+            select(ProjectRow)
+            .where(ProjectRow.user_id == user.id)
+            .options(
+                selectinload(ProjectRow.pages),
+                selectinload(ProjectRow.scenes),
+                selectinload(ProjectRow.frames),
+                selectinload(ProjectRow.sequences),
+                selectinload(ProjectRow.audios),
+            )
+        )
+        .scalars()
+        .all()
+    )
+    return [r.to_summary() for r in res]
 
 
 @router.get("/projects/{project_id}", response_model=Project)
@@ -131,6 +145,48 @@ def get_project(
     user: UserRow = Depends(get_current_user),
 ):
     return own_project(session, user, project_id).to_schema()
+
+
+@router.get("/projects/{project_id}/summary", response_model=ProjectSummary)
+def get_project_summary(
+    project_id: str,
+    session: Session = Depends(get_session),
+    user: UserRow = Depends(get_current_user),
+):
+    """Tab bootstrap header: ids, canvas, and counts — no pixels."""
+    return own_project(session, user, project_id).to_summary()
+
+
+@router.get("/projects/{project_id}/pages", response_model=list[Page])
+def get_project_pages(
+    project_id: str,
+    session: Session = Depends(get_session),
+    user: UserRow = Depends(get_current_user),
+):
+    """Scan tab slice: pages + panels only (no scenes, frames, or takes)."""
+    return [p.to_schema() for p in own_project(session, user, project_id).pages]
+
+
+@router.get("/projects/{project_id}/timeline", response_model=list[Scene])
+def get_project_timeline(
+    project_id: str,
+    session: Session = Depends(get_session),
+    user: UserRow = Depends(get_current_user),
+):
+    """Render tab slice: scenes + clips/cues only (no pages or layers)."""
+    return [s.to_schema() for s in own_project(session, user, project_id).scenes]
+
+
+@router.get("/projects/{project_id}/view", response_model=ProjectView)
+def get_project_view(
+    project_id: str,
+    session: Session = Depends(get_session),
+    user: UserRow = Depends(get_current_user),
+):
+    """One-round-trip tab bootstrap: summary counts plus the pages slice."""
+    row = own_project(session, user, project_id)
+    summary = row.to_summary()
+    return ProjectView(**summary.model_dump(), pages=[p.to_schema() for p in row.pages])
 
 
 @router.delete("/projects/{project_id}", status_code=204)
@@ -363,7 +419,7 @@ def _annotate_panels(image: Image.Image, boxes: list[tuple[int, int, int, int]])
     for i, (x, y, w, h) in enumerate(boxes):
         draw.rectangle([x, y, x + w, y + h], outline=(255, 45, 85), width=max(3, image.width // 300))
         label = str(i + 1)
-        tw, th = draw.textlength(label), 24
+        tw = draw.textlength(label)
         draw.rectangle([x, y - 28, x + tw + 12, y], fill=(255, 45, 85))
         draw.text((x + 6, y - 26), label, fill=(255, 255, 255))
     buf = io.BytesIO()
@@ -406,7 +462,7 @@ def read_page(
     retry = limiter.check(f"page-read:{user.id}", 10, 60)
     if retry is not None:
         raise HTTPException(
-            429, f"page read rate limited", headers={"Retry-After": str(int(retry) + 1)}
+            429, "page read rate limited", headers={"Retry-After": str(int(retry) + 1)}
         )
     if not settings.meta_api_key:
         raise HTTPException(400, "page reading needs META_API_KEY (dev.meta.ai)")

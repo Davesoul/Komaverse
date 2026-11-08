@@ -136,6 +136,7 @@ def call_tool(
             reference_frame_id=args.get("reference_frame_id"),
             references=args.get("references"),
             entity_ids=args.get("entity_ids"),
+            paint_on_frame=args.get("paint_on_frame"),
             background=True,
             attach_frame=bool(args.get("attach_frame")),
         )
@@ -222,6 +223,14 @@ def call_tool(
             args.get("position"),
             args.get("sequence"),
             args.get("shapes"),
+            args.get("from_frame"),
+            args.get("to_frame"),
+            args.get("to_layer"),
+            args.get("box"),
+            args.get("scale"),
+            args.get("at"),
+            args.get("concept"),
+            args.get("keep"),
         )
     if name == "tone_layer":
         return tool_tone_layer(
@@ -498,10 +507,11 @@ def _tool_defs() -> list[dict]:
         {
             "name": "create_image",
             "description": (
-                "Generate an image from a prompt into the media gallery. "
-                "References: @-mention tokens may stay in the prompt "
-                "(@frame:/@panel:/@media:/@gen: ids), or pass structured "
-                "references/entity ids."
+                "Generate an image from a prompt into the media gallery — "
+                "unless the user said draw/paint/sketch it ON a frame, in "
+                "which case pass paint_on_frame and the image lands on "
+                "that frame as a layer. Geometric shapes are never yours: "
+                "they go to manage_layers draw."
             ),
             "inputSchema": {
                 "type": "object",
@@ -516,6 +526,7 @@ def _tool_defs() -> list[dict]:
                     "references": arr,
                     "entity_ids": arr,
                     "attach_frame": {"type": "boolean"},
+                    "paint_on_frame": s
                 },
                 "required": ["project_id", "prompt"],
             },
@@ -634,8 +645,10 @@ def _tool_defs() -> list[dict]:
                 "Draw-layer ops on one frame (frame id, @frame: mention, or name). "
                 "Ops: list, add, rename, set (opacity/visible/locked/blend), "
                 "move (position 0 is bottom), remove, duplicate, clear, merge down, "
-                "draw (paint shapes: stroke/rect/ellipse/fill in frame pixels; "
-                "omitted layer means the top layer)."
+                "draw (stroke/rect/ellipse/fill/text/trace; any shape takes erase:true; trace={type:trace,from} redraws any app image (layer or @frame:/@panel:/@media:/@gen:) as strokes, mode:edges for photos, mode:bezier for smooth-curve refit, mode:mangaline|anilines|anilines-detail|linedistiller|a2s for neural lineart frontends, detail:auto|fast|fine (auto=fine up to 1100px); plan={type:plan,from} paints a layered lines/shade/tone plan with optional refine; "
+                "omitted layer means the top layer), "
+                "copy (pixels frame/layer to frame/layer, optional scale), "
+                "resize (scale layer pixels about center)."
             ),
             "inputSchema": {
                 "type": "object",
@@ -652,6 +665,14 @@ def _tool_defs() -> list[dict]:
                     "position": num,
                     "sequence": s,
                     "shapes": {"type": "array"},
+                    "from_frame": s,
+                    "to_frame": s,
+                    "to_layer": s,
+                    "box": {"type": "array"},
+                    "scale": num,
+                    "at": {"type": "array"},
+                    "concept": s,
+                    "keep": s,
                 },
                 "required": ["project_id", "frame", "op"],
             },

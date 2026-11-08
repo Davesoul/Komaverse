@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from sqlalchemy import DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 from komaverse import models as schemas
@@ -509,6 +509,10 @@ class JobRow(Base):
     # provider is local; NULL on rows written before this column existed).
     # Refunds credit exactly this back — never a recomputed estimate.
     cost_credits: Mapped[int | None] = mapped_column(Integer, default=None)
+    # True when the job ran on the user's own provider key: no studio
+    # credits were debited. NULL on rows written before this column
+    # existed (ALTER backfill): same guard pattern as enhance/genre.
+    used_own_key: Mapped[bool | None] = mapped_column(Boolean, default=None)
     result_url: Mapped[str | None] = mapped_column(String(500), default=None)
     error: Mapped[str | None] = mapped_column(Text, default=None)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, index=True)
@@ -524,6 +528,7 @@ class JobRow(Base):
             seed=self.seed,
             negative_prompt=self.negative_prompt or "",
             cost_credits=self.cost_credits or 0,
+            used_own_key=self.used_own_key if self.used_own_key is not None else False,
             style=self.style or "none",
             # Pre-genre rows hold NULL (ALTER backfill): same guard as clips.
             genre=self.genre if self.genre is not None else "none",
@@ -773,3 +778,19 @@ class StudioSettingRow(Base):
 
     key: Mapped[str] = mapped_column(String(64), primary_key=True)
     value: Mapped[str] = mapped_column(Text, default="")
+
+
+class UserProviderKeyRow(Base):
+    """One user's own provider key (BYOK), Fernet-encrypted at rest.
+
+    One row per (user, provider). Reads never return the value — the
+    API reports set-or-not plus last-four for identification. New table
+    (create_all covers old DBs).
+    """
+
+    __tablename__ = "user_provider_keys"
+
+    user_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    provider: Mapped[str] = mapped_column(String(32), primary_key=True)
+    key_encrypted: Mapped[str] = mapped_column(Text, default="")
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)

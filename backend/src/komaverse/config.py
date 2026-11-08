@@ -34,6 +34,29 @@ class Settings(BaseSettings):
     )
 
     paywall_enabled: bool = Field(default=False, validation_alias="PAYWALL_ENABLED")
+    # Koma Portal billing (Stripe top-ups → credit ledger). Keys empty =
+    # checkout/webhook answer 503; the studio keeps running on freemium.
+    stripe_secret_key: str | None = Field(default=None, validation_alias="STRIPE_SECRET_KEY")
+    stripe_publishable_key: str | None = Field(
+        default=None, validation_alias="STRIPE_PUBLISHABLE_KEY"
+    )
+    stripe_webhook_secret: str | None = Field(
+        default=None, validation_alias="STRIPE_WEBHOOK_SECRET"
+    )
+    # Public app URL for Stripe success/cancel redirects.
+    app_url: str = Field(default="http://localhost:5173", validation_alias="APP_URL")
+    # Freemium: free credits granted once per calendar month on first spend.
+    free_monthly_credits: int = Field(default=100, validation_alias="FREE_MONTHLY_CREDITS")
+    # Bring-your-own-key vault (Fernet secret, urlsafe-base64 32 bytes).
+    # Empty = users cannot save own keys (503 with the fix); studio keys
+    # keep working. Generate once: python -c "from cryptography.fernet
+    # import Fernet; print(Fernet.generate_key().decode())".
+    key_vault_secret: str | None = Field(default=None, validation_alias="KEY_VAULT_SECRET")
+    # Own-key freemium guardrail: paid subscribers generate unlimited on
+    # their own keys; freemium own-key users stop here per calendar day.
+    own_key_freemium_daily_limit: int = Field(
+        default=20, validation_alias="OWN_KEY_FREEMIUM_DAILY_LIMIT"
+    )
 
     mcp_user_email: str = Field(default="", validation_alias="KOMAVERSE_MCP_USER")
 
@@ -97,6 +120,12 @@ class Settings(BaseSettings):
     elevenlabs_voice_model: str = Field(
         default="21m00Tcm4TlvDq8ikWAM", validation_alias="ELEVENLABS_VOICE_ID"
     )
+    # Agent drawing defaults (widget Brain panel: linework frontend).
+    # Trace specs that omit a key inherit these; explicit keys win.
+    trace_mode: str = Field(default="ink", validation_alias="TRACE_MODE")
+    trace_detail: str = Field(default="auto", validation_alias="TRACE_DETAIL")
+    trace_thin: bool = Field(default=True, validation_alias="TRACE_THIN")
+    trace_raw: bool = Field(default=False, validation_alias="TRACE_RAW")
     freetts_voice_model: str = Field(
         default="kokoro:af_sarah", validation_alias="FREE_TTS_VOICE"
     )
@@ -162,6 +191,10 @@ class Settings(BaseSettings):
         default=180, validation_alias="COMFYUI_TIMEOUT_SEC"
     )
 
+    # Local default lives next to the checkout. Container deploys MUST
+    # override this (Dockerfile + compose set
+    # sqlite:////data/komaverse.db on the persistent /data volume), or
+    # the DB dies with the container layer. See README "Data locations".
     database_url: str = Field(
         default="sqlite:///./komaverse.db",
         validation_alias="DATABASE_URL",
@@ -170,6 +203,8 @@ class Settings(BaseSettings):
         default="redis://localhost:6379/0", validation_alias="REDIS_URL"
     )
 
+    # Same split as database_url: ./media locally, /data/media in the
+    # container (Dockerfile + compose override).
     media_dir: Path = Field(default=Path("./media"), validation_alias="MEDIA_DIR")
 
     # YOLO panel detector weights. Absolute or backend-root-relative path;
@@ -194,6 +229,32 @@ class Settings(BaseSettings):
     @property
     def is_production(self) -> bool:
         return self.app_env == "production"
+
+
+def validate_prod_env(s: Settings) -> list[str]:
+    """Fail-fast production misconfiguration for real public deploys.
+
+    Local judging runs with APP_ENV=development, so this never fires
+    there — it only refuses a public start with unsafe settings.
+    """
+    problems = []
+    if not s.app_url.startswith("https://"):
+        problems.append("APP_URL must be https in production")
+    if "localhost" in s.app_url:
+        problems.append("APP_URL must be the public app origin in production")
+    if s.paywall_enabled:
+        for field in (
+            "stripe_secret_key",
+            "stripe_publishable_key",
+            "stripe_webhook_secret",
+        ):
+            if not getattr(s, field):
+                problems.append(f"{field} is required when PAYWALL_ENABLED=true")
+    if s.seed_demo:
+        problems.append(
+            "KOMA_SEED_DEMO must be false in production (known-password account)"
+        )
+    return problems
 
 
 settings = Settings()
