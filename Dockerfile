@@ -1,7 +1,9 @@
 # Komaverse all-in-one image: built web UI + API on one port.
 # Keys ship empty: paste them in the studio Brain panel (Provider keys)
-# or pass -e flags / env_file. First scan fetches YOLO weights when
-# KOMA_YOLO_URL is set, otherwise detection falls back to heuristics.
+# or pass -e flags / env_file. The image wires KOMA_YOLO_URL to the
+# public YOLOv12 comic-panel weights, so the first scan downloads them
+# (~119MB) and detection works with no setup; without a reachable
+# URL it falls back to heuristics.
 #
 #   docker build -t komaverse .
 #   docker run -p 8000:8000 -v komaverse-data:/data komaverse
@@ -22,11 +24,13 @@ ENV PYTHONUNBUFFERED=1 \
     PORT=8000 \
     DATABASE_URL=sqlite:////data/komaverse.db \
     MEDIA_DIR=/data/media \
+    KOMA_YOLO_MODEL=/data/models/best-comic-panel-detection.pt \
+    KOMA_YOLO_URL=https://huggingface.co/mosesb/best-comic-panel-detection/resolve/main/best.pt \
     KOMAVERSE_WEB_DIST=/srv/komaverse/apps/studio-web/dist \
     KOMAVERSE_SKILLS_DIR=/srv/komaverse/.agents/skills
 # onnxruntime/ultralytics/ffmpeg runtime libs (slim lacks them).
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    libgomp1 libglib2.0-0 libgl1 ffmpeg \
+    libgomp1 libglib2.0-0 libgl1 ffmpeg espeak-ng \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /srv/komaverse
 # CPU-only torch first so ultralytics does not pull CUDA wheels.
