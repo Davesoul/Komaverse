@@ -2,20 +2,15 @@
 # One-click: connect the repo in Render → New → Blueprint → select this file.
 # Keys ship empty on purpose: paste them in the studio Brain panel after
 # first login (demo@komaverse.local / demo1234 seeds only with KOMA_SEED_DEMO).
-# NOTE: the disk below needs a paid instance type (Starter+); on the free
-# tier remove the disk and accept ephemeral storage (uploads vanish on
-# restart — fine for a demo, not for keeps).
+# Free tier: no disk (uploads vanish on restart — fine for a demo, not
+# for keeps). Paid upgrade path: plan starter + a 5GB disk at /data.
 services:
   - type: web
     name: komaverse
     runtime: docker
     dockerfilePath: ./Dockerfile
-    plan: starter
+    plan: free
     healthCheckPath: /health
-    disk:
-      name: komaverse-data
-      mountPath: /data
-      sizeGB: 5
     envVars:
       - key: KOMA_SEED_DEMO
         value: "true"
