@@ -266,6 +266,7 @@ export default function DrawPage() {
   const [projectId, setProjectId] = useState("");
   const [frames, setFrames] = useState<DrawFrame[]>([]);
   const [sequences, setSequences] = useState<Sequence[]>([]);
+  const [seqExportFmt, setSeqExportFmt] = useState("pngzip");
   const [sequenceId, setSequenceIdState] = useState("");
   const sequenceIdRef = useRef("");
   const [frameId, setFrameId] = useState("");
@@ -1257,6 +1258,28 @@ export default function DrawPage() {
     } else {
       setDrawFrame(projectId, null);
       setFrameId("");
+    }
+  };
+
+  const seqFileRef = useRef<HTMLInputElement>(null);
+  const doImportSequenceFiles = async (files: File[]) => {
+    stopPlayback();
+    if (!projectId || busy || files.length === 0) return;
+    setBusy(true);
+    setNotice("Importing animation…");
+    try {
+      await flushCurrent();
+      const imported = await api.importSequence(projectId, files, {
+        sequence_id: sequenceId || undefined,
+      });
+      await loadDrawing();
+      const sid = imported[0]?.sequence_id;
+      if (sid) await pickSequence(sid, imported[0]?.id);
+      setNotice(`Imported ${imported.length} cels — opened in the strip.`);
+    } catch (e) {
+      setNotice(`Sequence import failed: ${(e as Error).message}`);
+    } finally {
+      setBusy(false);
     }
   };
 
@@ -2863,6 +2886,35 @@ export default function DrawPage() {
                 </SelectInput>
                 <IconBtn onClick={newSequence} label="New animation sequence — a fresh shot in this project">
                   ＋Seq
+                </IconBtn>
+                <input
+                  ref={seqFileRef}
+                  type="file"
+                  accept=".png,.jpg,.jpeg,.webp,.bmp,.gif,.apng,.zip,.mp4,.webm,.mov"
+                  multiple
+                  style={{ display: "none" }}
+                  onChange={(e) => {
+                    const files = Array.from(e.target.files ?? []);
+                    e.target.value = "";
+                    if (files.length > 0) void doImportSequenceFiles(files);
+                  }}
+                />
+                <IconBtn onClick={() => seqFileRef.current?.click()} label="Import an animation: Krita/CSP stills (multi-select), a zip, GIF/APNG, or a movie">
+                  ⇤
+                </IconBtn>
+                <SelectInput
+                  value={seqExportFmt}
+                  onChange={(e) => setSeqExportFmt(e.target.value)}
+                  title="Export format: numbered PNGs, looping GIF, or MP4"
+                  aria-label="Sequence export format"
+                  style={{ maxWidth: 110 }}
+                >
+                  <option value="pngzip">PNG ZIP</option>
+                  <option value="gif">GIF</option>
+                  <option value="mp4">MP4</option>
+                </SelectInput>
+                <IconBtn disabled={seqFrames.length === 0} onClick={() => { window.location.href = api.exportSequenceUrl(sequenceId, seqExportFmt, fps); }} label="Download this sequence for Krita/Clip Studio or the web">
+                  ⇩
                 </IconBtn>
                 <div style={{ flex: 1, minWidth: 0 }}>
                   <SectionTitle>Frames ({seqFrames.length})</SectionTitle>

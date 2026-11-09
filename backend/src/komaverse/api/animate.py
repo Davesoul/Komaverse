@@ -8,6 +8,8 @@ import io
 import json
 import logging
 import re
+import subprocess
+import zipfile
 from pathlib import Path
 
 import cv2
@@ -1917,6 +1919,313 @@ def video_to_frames(
         raise HTTPException(400, "could not read any frames from the video")
     session.commit()
     return out
+
+
+SEQ_IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".webp", ".bmp")
+SEQ_VIDEO_EXTENSIONS = (".mp4", ".webm", ".mov")
+#: One import call never makes more cels than this (Krita/CSP scenes run
+#: long — export a range and import in parts past this).
+MAX_SEQIMPORT_FRAMES = 48
+#: Export cap: keeps GIF/MP4/ZIP builds inside one request.
+MAX_SEQEXPORT_FRAMES = 480
+
+
+def _unform(value):
+    """None for FastAPI Form() marker defaults on direct calls.
+
+    Over HTTP FastAPI resolves Form(None) to None, but unit tests
+    calling the endpoint function directly get the marker object
+    (truthy, unusable) — normalize it here.
+    """
+    from fastapi import params
+
+    return None if isinstance(value, params.Form) else value
+
+
+def _fit_rgba(img: Image.Image, width: int, height: int) -> Image.Image:
+    """Fit one cel onto a transparent canvas (video_to_frames geometry)."""
+    img = img.convert("RGBA")
+    scale = min(width / max(1, img.width), height / max(1, img.height))
+    nw, nh = max(1, round(img.width * scale)), max(1, round(img.height * scale))
+    canvas = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+    canvas.paste(img.resize((nw, nh)), ((width - nw) // 2, (height - nh) // 2))
+    return canvas
+
+
+def _read_capped_upload(up: UploadFile, fname: str) -> bytes:
+    try:
+        data = storage.read_upload_capped(
+            up.file, settings.upload_max_mb * 1024 * 1024
+        )
+    except storage.UploadTooLargeError:
+        raise HTTPException(413, f"{fname}: file too large") from None
+    if not data:
+        raise HTTPException(400, f"{fname}: empty file")
+    return data
+
+
+@router.post(
+    "/projects/{project_id}/sequences/import",
+    response_model=list[DrawFrame],
+    status_code=201,
+)
+def import_sequence(
+    project_id: str,
+    files: list[UploadFile] = File(...),
+    name: str | None = Form(None),
+    width: int | None = Form(None),
+    height: int | None = Form(None),
+    sequence_id: str | None = Form(None),
+    session: Session = Depends(get_session),
+    user: UserRow = Depends(get_current_user),
+):
+    """Import an animation sequence from desktop tools.
+
+    Krita (File > Render Animation > PNG/JPEG sequence, .ora, GIF) and
+    Clip Studio Paint (File > Export animation > image sequence or
+    movie) all land here: multi-select the numbered stills, or send one
+    .zip of them, one GIF/APNG, or one MP4/WebM/MOV. Every cel becomes
+    a draw frame with one fitted raster layer, in upload order, inside
+    a fresh (or the given) sequence. Single stills may be
+    .png/.jpg/.jpeg/.webp/.bmp.
+    """
+    from komaverse.layered_import import LayeredImportError, split_animation
+
+    project = own_project(session, user, project_id)
+    if not files:
+        raise HTTPException(400, "attach at least one file")
+    # Direct-call tolerance (see _unform): HTTP resolves these already.
+    name = _unform(name)
+    width = _unform(width)
+    height = _unform(height)
+    sequence_id = _unform(sequence_id)
+    cels: list[Image.Image] = []
+    for up in files:
+        fname = (up.filename or "frame").lower()
+        data = _read_capped_upload(up, up.filename or "frame")
+        if fname.endswith(".zip"):
+            try:
+                zf = zipfile.ZipFile(io.BytesIO(data))
+            except zipfile.BadZipFile as exc:
+                raise HTTPException(400, f"{up.filename}: not a zip file") from exc
+            for entry in sorted(zf.namelist()):
+                if entry.endswith("/") or not entry.lower().endswith(SEQ_IMAGE_EXTENSIONS):
+                    continue
+                try:
+                    cels.append(Image.open(io.BytesIO(zf.read(entry))).convert("RGBA"))
+                except Exception as exc:
+                    raise HTTPException(400, f"{up.filename}:{entry}: unreadable image") from exc
+                if len(cels) > MAX_SEQIMPORT_FRAMES:
+                    break
+        elif fname.endswith((".gif", ".apng")) or (
+            fname.endswith(".png") and len(files) == 1
+        ):
+            try:
+                _, _, pngs = split_animation(data)
+            except LayeredImportError as exc:
+                raise HTTPException(400, f"{up.filename}: {exc}") from None
+            for png in pngs:
+                try:
+                    cels.append(Image.open(io.BytesIO(png)).convert("RGBA"))
+                except Exception as exc:
+                    raise HTTPException(400, f"{up.filename}: unreadable cel") from exc
+                if len(cels) > MAX_SEQIMPORT_FRAMES:
+                    break
+        elif fname.endswith(SEQ_IMAGE_EXTENSIONS):
+            try:
+                cels.append(Image.open(io.BytesIO(data)).convert("RGBA"))
+            except Exception as exc:
+                raise HTTPException(400, f"{up.filename}: unreadable image") from exc
+        elif fname.endswith(SEQ_VIDEO_EXTENSIONS):
+            tmp = storage.save_upload(project.id, up.filename or "clip.mp4", data)[0]
+            cap = cv2.VideoCapture(str(storage.resolve(tmp)))
+            try:
+                while len(cels) <= MAX_SEQIMPORT_FRAMES:
+                    ok, bgr = cap.read()
+                    if not ok or bgr is None:
+                        break
+                    rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+                    cels.append(Image.fromarray(rgb).convert("RGBA"))
+            finally:
+                cap.release()
+        else:
+            raise HTTPException(
+                400,
+                f"{up.filename}: want stills (.png/.jpg/.webp/.bmp), "
+                ".zip, .gif/.apng, or video (.mp4/.webm/.mov)",
+            )
+        if len(cels) > MAX_SEQIMPORT_FRAMES:
+            break
+    if not cels:
+        raise HTTPException(400, "no animation cels found in the upload")
+    if len(cels) > MAX_SEQIMPORT_FRAMES:
+        raise HTTPException(
+            400,
+            f"too many cels ({len(cels)} > {MAX_SEQIMPORT_FRAMES}) — "
+            "export a shorter range and import in parts",
+        )
+    w = width or cels[0].width
+    h = height or cels[0].height
+    _check_dims(w, h)
+    stem = (name or (files[0].filename or "Import").rsplit(".", 1)[0] or "Import")[:200]
+    if sequence_id:
+        seq = _resolve_sequence(session, user, project.id, sequence_id)
+    else:
+        seqs = list(_sequence_rows(session, project.id))
+        seq = seqs[0] if len(seqs) == 1 else None
+        if seq is None:
+            seq = SequenceRow(
+                project_id=project.id,
+                name=f"Import {stem}",
+                index=len(seqs),
+            )
+            session.add(seq)
+            session.flush()
+    out: list[DrawFrame] = []
+    for k, cel in enumerate(cels):
+        canvas = _fit_rgba(cel, w, h)
+        buf = io.BytesIO()
+        canvas.save(buf, format="PNG")
+        row = FrameRow(
+            project_id=project.id,
+            sequence_id=seq.id,
+            name=f"{stem} {k + 1}"[:200],
+            index=_next_frame_index(session, seq.id),
+            width=w,
+            height=h,
+        )
+        session.add(row)
+        session.flush()
+        session.add(
+            LayerRow(
+                frame_id=row.id,
+                name="import",
+                opacity=100,
+                visible=True,
+                locked=False,
+                blend_mode="normal",
+                layer_order=0,
+                data_url="data:image/png;base64," + base64.b64encode(buf.getvalue()).decode(),
+            )
+        )
+        session.flush()
+        fresh = session.get(FrameRow, row.id)
+        out.append(fresh.to_schema() if fresh is not None else row.to_schema())
+    session.commit()
+    return out
+
+
+@router.get("/sequences/{sequence_id}/export")
+def export_sequence(
+    sequence_id: str,
+    format: str = "pngzip",
+    fps: int = 12,
+    session: Session = Depends(get_session),
+    user: UserRow = Depends(get_current_user),
+):
+    """Export one animation sequence for desktop tools and the web.
+
+    `format=pngzip` downloads numbered stills (frame_001.png, ...) for
+    Krita/Clip Studio timelines; `gif` loops the strip for previews
+    and social posts; `mp4` (H.264) plays anywhere. `fps` (1..60,
+    default 12) sets GIF/MP4 pacing; every frame renders at the first
+    frame's canvas size.
+    """
+    import imageio_ffmpeg
+
+    seq = session.get(SequenceRow, sequence_id)
+    if seq is None:
+        raise HTTPException(404, "sequence not found")
+    ensure_owner(session, user, seq.project_id)
+    fmt = (format or "").strip().lower()
+    if fmt not in ("pngzip", "gif", "mp4"):
+        raise HTTPException(400, "format must be pngzip, gif, or mp4")
+    fps = min(max(int(fps or 12), 1), 60)
+    rows = (
+        session.execute(
+            select(FrameRow)
+            .where(FrameRow.sequence_id == seq.id)
+            .order_by(FrameRow.index)
+        )
+        .scalars()
+        .all()
+    )
+    if not rows:
+        raise HTTPException(400, "sequence has no frames to export")
+    if len(rows) > MAX_SEQEXPORT_FRAMES:
+        raise HTTPException(
+            400,
+            f"too many frames ({len(rows)} > {MAX_SEQEXPORT_FRAMES}) — "
+            "split the sequence first",
+        )
+    w, h = rows[0].width, rows[0].height
+    rendered: list[Image.Image] = []
+    for row in rows:
+        img = composite_frame_image(row).convert("RGBA")
+        if (img.width, img.height) != (w, h):
+            img = img.resize((w, h))
+        rendered.append(img)
+    stem = "".join(c for c in (seq.name or "sequence") if c.isalnum() or c in ("-", "_", " ")).strip().replace(" ", "_") or "sequence"
+    if fmt == "pngzip":
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+            for i, img in enumerate(rendered):
+                cel = io.BytesIO()
+                img.save(cel, format="PNG")
+                zf.writestr(f"{stem}_{i + 1:03d}.png", cel.getvalue())
+        return Response(
+            content=buf.getvalue(),
+            media_type="application/zip",
+            headers={"Content-Disposition": f'attachment; filename="{stem}.zip"'},
+        )
+    if fmt == "gif":
+        buf = io.BytesIO()
+        flat = [img.convert("RGB") for img in rendered]
+        flat[0].save(
+            buf,
+            format="GIF",
+            save_all=True,
+            append_images=flat[1:],
+            duration=int(1000 / fps),
+            loop=0,
+        )
+        return Response(
+            content=buf.getvalue(),
+            media_type="image/gif",
+            headers={"Content-Disposition": f'attachment; filename="{stem}_{fps}fps.gif"'},
+        )
+    import tempfile
+
+    exe = imageio_ffmpeg.get_ffmpeg_exe()
+    # MP4/faststart needs a seekable output: pipes fail, so the encode
+    # lands on a temp file first (same pattern as the MP4 renderer).
+    with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as tmp:
+        tmp_path = tmp.name
+    try:
+        proc = subprocess.run(
+            [
+                exe, "-y",
+                "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", f"{w}x{h}",
+                "-r", str(fps), "-i", "pipe:0",
+                "-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "20",
+                "-movflags", "+faststart", tmp_path,
+            ],
+            input=b"".join(img.convert("RGB").tobytes() for img in rendered),
+            capture_output=True,
+        )
+        if proc.returncode != 0:
+            raise HTTPException(500, f"mp4 encode failed: {proc.stderr.decode()[-300:]}")
+        with open(tmp_path, "rb") as fh:
+            mp4 = fh.read()
+    finally:
+        Path(tmp_path).unlink(missing_ok=True)
+    if not mp4:
+        raise HTTPException(500, "mp4 encode produced no bytes")
+    return Response(
+        content=mp4,
+        media_type="video/mp4",
+        headers={"Content-Disposition": f'attachment; filename="{stem}_{fps}fps.mp4"'},
+    )
 
 
 @router.get("/frames/{frame_id}/thumbnail")

@@ -500,6 +500,7 @@ export default function MediaPage() {
   const vidInputRef = useRef<HTMLInputElement>(null);
   const audInputRef = useRef<HTMLInputElement>(null);
   const layInputRef = useRef<HTMLInputElement>(null);
+  const seqInputRef = useRef<HTMLInputElement>(null);
 
   const probeAudioDuration = (file: File): Promise<number> =>
     new Promise((resolve) => {
@@ -566,6 +567,27 @@ export default function MediaPage() {
       setNotice(`Imported "${file.name}" as ${detail} — opened in Draw.`);
     } catch (e) {
       setNotice(`Import failed: ${(e as Error).message}`);
+    } finally {
+      setBusy("");
+    }
+  };
+
+  const doImportSequence = async (files: File[]) => {
+    if (!project || files.length === 0) return;
+    setBusy("Importing animation…");
+    try {
+      const frames = await api.importSequence(project.id, files);
+      await refresh(project.id);
+      if (frames.length === 0) {
+        setNotice("Imported — nothing to open.");
+        return;
+      }
+      setCurrentSequence(project.id, frames[0].sequence_id);
+      setDrawFrame(project.id, frames[0].id);
+      gotoTab("draw");
+      setNotice(`Imported ${frames.length} cels — opened in Draw.`);
+    } catch (e) {
+      setNotice(`Sequence import failed: ${(e as Error).message}`);
     } finally {
       setBusy("");
     }
@@ -971,6 +993,9 @@ export default function MediaPage() {
           <Btn small onClick={() => layInputRef.current?.click()} title="Import a layered Krita/GIMP file (.ora) or animation (.gif/.apng) as draw frames">
             Layers
           </Btn>
+          <Btn small onClick={() => seqInputRef.current?.click()} title="Import an animation sequence: Krita/CSP stills (multi-select), a zip, GIF/APNG, or a movie">
+            Sequence
+          </Btn>
           <input
             ref={imgInputRef}
             type="file"
@@ -1013,6 +1038,18 @@ export default function MediaPage() {
               const f = e.target.files?.[0];
               e.target.value = "";
               if (f) void doImportLayered(f);
+            }}
+          />
+          <input
+            ref={seqInputRef}
+            type="file"
+            accept=".png,.jpg,.jpeg,.webp,.bmp,.gif,.apng,.zip,.mp4,.webm,.mov"
+            multiple
+            hidden
+            onChange={(e) => {
+              const files = Array.from(e.target.files ?? []);
+              e.target.value = "";
+              if (files.length > 0) void doImportSequence(files);
             }}
           />
         </div>
@@ -1526,6 +1563,15 @@ export default function MediaPage() {
                           </IconBtn>
                           <Btn small onClick={() => openSequenceInDraw(s)}>
                             Open in Draw
+                          </Btn>
+                          <Btn small disabled={s.frames.length === 0} onClick={() => { window.location.href = api.exportSequenceUrl(s.id, "pngzip"); }} title="Download numbered PNG stills for Krita/Clip Studio (12fps names)">
+                            ZIP
+                          </Btn>
+                          <Btn small disabled={s.frames.length === 0} onClick={() => { window.location.href = api.exportSequenceUrl(s.id, "gif"); }} title="Download a looping GIF preview">
+                            GIF
+                          </Btn>
+                          <Btn small disabled={s.frames.length === 0} onClick={() => { window.location.href = api.exportSequenceUrl(s.id, "mp4"); }} title="Download an H.264 MP4">
+                            MP4
                           </Btn>
                           <IconBtn danger onClick={() => void doDeleteSequence(s)} label={`Delete sequence "${s.name}" and its frames`}>
                             ×

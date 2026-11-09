@@ -746,6 +746,27 @@ export const api = {
       body: form,
     });
   },
+  /** Import an animation sequence from desktop tools: multi-select
+   * the numbered stills (Krita/CSP PNG or JPEG sequence), or send one
+   * .zip of them, one GIF/APNG, or one movie file. Every cel becomes
+   * a draw frame, in upload order. */
+  importSequence: (projectId: string, files: File[], opts?: { sequence_id?: string; name?: string; width?: number; height?: number }) => {
+    const form = new FormData();
+    for (const f of files) form.append("files", f, f.name);
+    if (opts?.sequence_id) form.append("sequence_id", opts.sequence_id);
+    if (opts?.name) form.append("name", opts.name);
+    if (opts?.width) form.append("width", String(opts.width));
+    if (opts?.height) form.append("height", String(opts.height));
+    return req<DrawFrame[]>(`/api/v1/projects/${projectId}/sequences/import`, {
+      method: "POST",
+      body: form,
+    });
+  },
+  /** Download one animation sequence: numbered PNG stills (zip) for
+   * Krita/Clip Studio timelines, a looping GIF, or an H.264 MP4.
+   * Cookie auth — usable as a plain link href. */
+  exportSequenceUrl: (sequenceId: string, format: string, fps = 12) =>
+    `${apiBase()}/api/v1/sequences/${sequenceId}/export?format=${format}&fps=${fps}`,
   detect: (pageId: string, detector: string, direction = "rtl", confirm = false) =>
     req<DetectResult>(`/api/v1/pages/${pageId}/detect`, {
       method: "POST",
