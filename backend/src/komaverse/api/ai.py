@@ -674,10 +674,10 @@ def generate(
         raise HTTPException(400, f"unknown kind: {body.kind}")
     if body.provider not in PROVIDERS:
         raise HTTPException(400, f"unknown provider: {body.provider}")
-    if body.kind == "video" and body.provider != "openrouter":
+    if body.kind == "video" and body.provider not in ("openrouter", "portal"):
         raise HTTPException(
-            400, "video generation needs provider=openrouter "
-            "(meta has no video endpoint)"
+            400, "video generation needs provider=openrouter or portal "
+            "(portal runs our endpoint; meta has no video endpoint)"
         )
     if body.model and body.provider not in ("openrouter", "local"):
         raise HTTPException(400, "per-model choice is openrouter/local-only")

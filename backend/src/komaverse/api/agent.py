@@ -114,6 +114,7 @@ class AgentConfigBody(BaseModel):
     chat_provider: str | None = None
     vision_provider: str | None = None
     image_provider: str | None = None
+    video_provider: str | None = None
     voice_provider: str | None = None
     chat_model: str | None = None
     vision_model: str | None = None
@@ -457,7 +458,7 @@ def agent_status(
         "chat": provider_for("chat"),
         "vision": provider_for("vision"),
         "image": provider_for("image"),
-        "video": "openrouter",
+        "video": provider_for("video"),
         "transcribe": "meta",
         "voice": provider_for("voice"),
     }
@@ -488,7 +489,7 @@ def agent_status(
         "portal": settings.ai_vision_model,
         "local": settings.local_vision_model or None,
     }
-    videos = {"openrouter": settings.openrouter_video_model}
+    videos = {"openrouter": settings.openrouter_video_model, "portal": None}
     transcribes = {"meta": settings.meta_transcribe_model}
     voices = {
         "elevenlabs": settings.elevenlabs_voice_model,
@@ -554,7 +555,7 @@ def agent_config(
             # Blank provider clears the override back to the env default.
             set_ai_override(session, "ai_provider", None)
     # Phase 1: per-kind providers, so phase 2 maps models against them.
-    for kind in ("chat", "vision", "image", "voice"):
+    for kind in ("chat", "vision", "image", "video", "voice"):
         wanted = getattr(body, f"{kind}_provider")
         if wanted is None:
             continue

@@ -41,6 +41,7 @@ AI_OVERRIDE_KEYS = (
     "openrouter_image_model",
     "openrouter_video_model",
     "baseten_chat_model",
+    "video_provider",
     "voice_provider",
     "elevenlabs_voice_model",
     "freetts_voice_model",
@@ -74,11 +75,13 @@ PROVIDER_PREFIX = {
 CHAT_PROVIDERS = ("meta", "openrouter", "baseten", "cloud", "portal", "local")
 VISION_PROVIDERS = ("meta", "openrouter", "cloud", "portal", "local")
 IMAGE_PROVIDERS = ("meta", "openrouter", "cloud", "portal", "local", "comfyui")
+VIDEO_PROVIDERS = ("openrouter", "portal")
 VOICE_PROVIDERS = ("elevenlabs", "free-tts")
 KIND_PROVIDERS = {
     "chat": CHAT_PROVIDERS,
     "vision": VISION_PROVIDERS,
     "image": IMAGE_PROVIDERS,
+    "video": VIDEO_PROVIDERS,
     "voice": VOICE_PROVIDERS,
 }
 
@@ -91,7 +94,8 @@ def provider_for(kind: str) -> str:
     through the global default chain.
     """
     if kind == "video":
-        return "openrouter"
+        specific = getattr(settings, "video_provider", None)
+        return specific or "openrouter"
     if kind == "transcribe":
         return "meta"
     if kind == "vision":

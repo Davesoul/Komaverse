@@ -627,6 +627,7 @@ export default function AgentDock() {
     vision: "",
     imageProvider: "openrouter",
     image: "",
+    videoProvider: "openrouter",
     video: "",
     transcribe: "",
     voiceProvider: "free-tts",
@@ -1798,6 +1799,7 @@ export default function AgentDock() {
     chat: ["meta", "openrouter", "baseten", "cloud", "portal", "local"],
     vision: ["meta", "openrouter", "cloud", "portal", "local"],
     image: ["meta", "openrouter", "cloud", "portal", "local", "comfyui"],
+    video: ["openrouter", "portal"],
     transcribe: ["meta"],
     voice: ["elevenlabs", "free-tts"],
   };
@@ -1814,7 +1816,7 @@ export default function AgentDock() {
     openrouter: "via OpenRouter",
     baseten: "Baseten open weights",
     cloud: "custom endpoint",
-    portal: "Koma Portal · our models, credits",
+    portal: "Koma Portal · our models, soon",
     local: "local server",
     comfyui: "ComfyUI",
     elevenlabs: "ElevenLabs cloud",
@@ -1877,6 +1879,7 @@ export default function AgentDock() {
         chatProvider: p.chat ?? agentInfo?.provider ?? "openrouter",
         visionProvider: p.vision ?? agentInfo?.provider ?? "meta",
         imageProvider: p.image ?? agentInfo?.provider ?? "openrouter",
+        videoProvider: p.video ?? "openrouter",
         voiceProvider: p.voice ?? "free-tts",
       }));
       setBrainError(null);
@@ -1915,11 +1918,9 @@ export default function AgentDock() {
   // Verified options for each row's provider (free text still takes any id).
   type BrainKind = "chat" | "vision" | "image" | "video" | "transcribe" | "voice";
   const brainRowProvider = (kind: BrainKind): string =>
-    kind === "video"
-      ? "openrouter"
-      : kind === "transcribe"
-        ? "meta"
-        : brainForm[`${kind}Provider` as "chatProvider" | "visionProvider" | "imageProvider" | "voiceProvider"];
+    kind === "transcribe"
+      ? "meta"
+      : brainForm[`${kind}Provider` as "chatProvider" | "visionProvider" | "imageProvider" | "videoProvider" | "voiceProvider"];
   const brainOptions = (
     kind: BrainKind,
   ): { id: string; label: string; maker?: string }[] => {
@@ -1977,6 +1978,7 @@ export default function AgentDock() {
           chat_provider: brainForm.chatProvider,
           vision_provider: brainForm.visionProvider,
           image_provider: brainForm.imageProvider,
+          video_provider: brainForm.videoProvider,
           voice_provider: brainForm.voiceProvider,
         };
     if (!reset) {
@@ -2277,14 +2279,10 @@ export default function AgentDock() {
                 <div style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13 }}>
                   <span style={{ width: 64, textTransform: "capitalize" }}>
                     {BRAIN_KIND_LABEL[kind]}
-                    {kind === "video" || kind === "transcribe" ? "" : brainCustom(`${kind}_provider`)}
+                    {kind === "transcribe" ? "" : brainCustom(`${kind}_provider`)}
                     {brainCustom(modelKey)}
                   </span>
-                  {kind === "video" ? (
-                    <span style={{ flex: 1, fontSize: 12, color: "var(--kv-muted)" }}>
-                      OpenRouter only
-                    </span>
-                  ) : kind === "transcribe" ? (
+                  {kind === "transcribe" ? (
                     <span style={{ flex: 1, fontSize: 12, color: "var(--kv-muted)" }}>
                       Meta only
                     </span>

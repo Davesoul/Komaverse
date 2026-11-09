@@ -511,3 +511,26 @@ def test_demo_account_portal_blocked(factory, monkeypatch):
             )
     assert exc.value.status_code == 402
     assert "Koma Portal" in exc.value.detail
+def test_portal_video_queues(factory, user):
+    """Koma Portal covers video too: credits billed, studio endpoint runs it."""
+    with factory() as s:
+        job = generate(
+            GenerateRequest(kind="video", prompt="a robot walks", provider="portal", seconds=2.0),
+            BackgroundTasks(),
+            s,
+            user,
+        )
+    assert job.status == "queued"
+
+
+def test_video_rejects_non_portal_non_openrouter(factory, user):
+    """The openrouter-only rule now admits portal and nothing else."""
+    with factory() as s:
+        with pytest.raises(HTTPException) as exc:
+            generate(
+                GenerateRequest(kind="video", prompt="a robot walks", provider="meta", seconds=2.0),
+                BackgroundTasks(),
+                s,
+                user,
+            )
+    assert exc.value.status_code == 400

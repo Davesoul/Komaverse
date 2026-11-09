@@ -115,6 +115,9 @@ class Settings(BaseSettings):
     # "voice" row picks the provider; the voice id is provider-shaped
     # (elevenlabs voice id, or free-tts "engine:voice").
     voice_provider: str | None = Field(default=None, validation_alias="VOICE_PROVIDER")
+    # Brain Video row override (openrouter = default, portal = our
+    # endpoint on credits). No override = OpenRouter, as before.
+    video_provider: str | None = Field(default=None, validation_alias="VIDEO_PROVIDER")
     elevenlabs_api_key: str | None = Field(
         default=None, validation_alias="ELEVENLABS_API_KEY"
     )

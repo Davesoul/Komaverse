@@ -104,10 +104,16 @@ export default function PortalPage() {
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
       <Card>
-        <h2 style={{ fontSize: 16, margin: "0 0 4px" }}>Koma Portal</h2>
+        <h2 style={{ fontSize: 16, margin: "0 0 4px" }}>
+          Koma Portal{" "}
+          <span style={{ fontSize: 11, fontWeight: 400, border: "1px solid var(--kv-border)", borderRadius: 999, padding: "1px 8px", opacity: 0.8 }}>
+            soon
+          </span>
+        </h2>
         <p style={{ fontSize: 13, opacity: 0.8, margin: "0 0 12px" }}>
           Credits pay the model providers, so you never paste API keys.
           Local models (YOLO, heuristic, XTTS, Kokoro) are always free.
+          Testing build — real payments aren't live yet.
         </p>
         <div style={{ display: "flex", gap: 16, alignItems: "baseline", flexWrap: "wrap" }}>
           <div className="kv-nums" style={{ fontSize: 32, fontWeight: 700 }}>
@@ -127,7 +133,7 @@ export default function PortalPage() {
       </Card>
 
       <Card>
-        <h3 style={{ fontSize: 14, margin: "0 0 8px" }}>Top up (from $5)</h3>
+        <h3 style={{ fontSize: 14, margin: "0 0 8px" }}>Top up (from $5) · soon</h3>
         {!portal.publishable_key && (
           <p style={{ fontSize: 13, opacity: 0.8 }}>
             Card top-ups aren't configured on this server yet — freemium credits still apply.
@@ -166,7 +172,7 @@ export default function PortalPage() {
       </Card>
 
       <Card>
-        <h3 style={{ fontSize: 14, margin: "0 0 8px" }}>Subscribe — credits every month</h3>
+        <h3 style={{ fontSize: 14, margin: "0 0 8px" }}>Subscribe — credits every month · soon</h3>
         {!portal.publishable_key && (
           <p style={{ fontSize: 13, opacity: 0.8 }}>
             Subscriptions aren't configured on this server yet — top-ups and freemium still apply.

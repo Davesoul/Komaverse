@@ -96,7 +96,7 @@ export default function UsageCard() {
         </h2>
         <button
           type="button"
-          title="Open the Koma Portal (credits & top-ups)"
+          title="Open the Koma Portal (credits & top-ups — coming soon)"
           onClick={() =>
             window.dispatchEvent(new CustomEvent("komaverse:goto-tab", { detail: "portal" }))
           }
@@ -111,7 +111,7 @@ export default function UsageCard() {
             fontWeight: 700,
           }}
         >
-          Koma Portal →
+          Koma Portal (soon) →
         </button>
         <div style={{ display: "flex", gap: 4 }} role="group" aria-label="Usage period">
           {PERIODS.map((p) => (

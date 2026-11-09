@@ -462,3 +462,14 @@ def test_agent_config_accepts_portal_chat(factory, user, saved_settings):
     assert settings.ai_chat_model == "koma-chat-1"
     assert "chat_provider" in out.overrides
     assert "ai_chat_model" in out.overrides
+def test_agent_config_accepts_portal_video(factory, user, saved_settings):
+    """Brain Video row: Koma Portal is selectable and persists."""
+    with factory() as s:
+        out = agent_config(
+            AgentConfigBody(video_provider="portal"),
+            session=s,
+            user=user,
+        )
+    assert out.providers["video"] == "portal"
+    assert "video_provider" in out.overrides
+    assert settings.video_provider == "portal"
