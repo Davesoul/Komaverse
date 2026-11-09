@@ -42,4 +42,4 @@ COPY .agents/skills ./.agents/skills
 COPY --from=web /build/apps/studio-web/dist ./apps/studio-web/dist
 VOLUME /data
 EXPOSE 8000
-CMD ["python", "-m", "uvicorn", "komaverse.main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["sh", "-c", "python -m uvicorn komaverse.main:app --host 0.0.0.0 --port ${PORT:-8000}"]
