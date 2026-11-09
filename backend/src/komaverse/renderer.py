@@ -566,8 +566,9 @@ def mix_audio_tracks(
     """Mix timeline tracks onto the silent render (AAC, video stream copied).
 
     Each track: path, start_sec, offset_sec, volume, fade_in, fade_out, rate,
-    end_sec. Video duration rules: audio is padded/trimmed to match.
-    Raises RuntimeError with ffmpeg's stderr tail on failure.
+    end_sec, lane. Video duration rules: audio is padded/trimmed to match.
+    Lane 0 is dialogue; other lanes duck under it via sidechain while it
+    speaks. Raises RuntimeError with ffmpeg's stderr tail on failure.
     """
     exe = imageio_ffmpeg.get_ffmpeg_exe()
     cmd = [exe, "-y", "-i", str(silent)]
@@ -600,7 +601,32 @@ def mix_audio_tracks(
             )
         parts.append(f"apad=whole_dur={video_dur:.3f}")
         chains.append(f"[{i + 1}:a]{','.join(parts)}[a{i}]")
-    if len(tracks) > 1:
+    dialogue = [i for i, t in enumerate(tracks) if t.get("lane", 1) == 0]
+    bed = [i for i in range(len(tracks)) if i not in dialogue]
+    if dialogue and bed:
+        # Anime mix order: dialogue stays intelligible; music/SFX beds
+        # duck under it, then everything mixes together.
+        chains.append(
+            f"{''.join(f'[a{i}]' for i in dialogue)}"
+            f"amix=inputs={len(dialogue)}:normalize=0[dlg]"
+        )
+        chains.append(
+            f"[dlg]asplit={len(bed) + 1}[dlgmix]"
+            + "".join("[dlgsc%d]" % n for n in range(len(bed)))
+        )
+        mixed = ["[dlgmix]"]
+        for n, i in enumerate(bed):
+            chains.append(
+                f"[a{i}][dlgsc{n}]sidechaincompress="
+                "threshold=0.03:ratio=6:attack=20:release=400"
+                f"[b{i}]"
+            )
+            mixed.append(f"[b{i}]")
+        chains.append(
+            f"{''.join(mixed)}amix=inputs={len(mixed)}:normalize=0[aout]"
+        )
+        amap = "[aout]"
+    elif len(tracks) > 1:
         chains.append(
             f"{''.join(f'[a{i}]' for i in range(len(tracks)))}"
             f"amix=inputs={len(tracks)}:normalize=0[aout]"
@@ -786,6 +812,7 @@ def render_project(
                         "start_sec": start,
                         "offset_sec": max(cue.offset_sec, 0),
                         "volume": min(max(cue.volume, 0), 2),
+                    "lane": cue.lane or 0,
                         "fade_in": max(cue.fade_in, 0),
                         "fade_out": max(cue.fade_out, 0),
                         "rate": rate,
@@ -877,12 +904,66 @@ def render_project(
     merged_subs.sort(key=lambda it: it[1].start)
 
     vtt_url: str | None = None
+    lipsync_url: str | None = None
     if merged_subs:
         vtt_rel = Path("exports") / project_id / f"{uuid_short()}.vtt"
         vtt_dest = settings.media_dir / vtt_rel
         vtt_dest.parent.mkdir(parents=True, exist_ok=True)
         vtt_dest.write_text(segments_to_vtt([s for _, s in merged_subs]), encoding="utf-8")
         vtt_url = f"/media/{vtt_rel.as_posix()}"
+
+    # Lip-sync: per-cue viseme tracks mapped onto the export timeline
+    # (same scene_starts + cue offset/rate/trim math as the audio mix
+    # above). Ships as a JSON sidecar next to the MP4 for the player
+    # and any renderer mouth overlay.
+    if include_audio:
+        import json as _json
+
+        from komaverse.lipsync import map_frames_to_cue as _map_cue
+
+        lip_cues: list[dict] = []
+        for scene in scenes:
+            base = scene_starts[scene.id]
+            for cue in sorted(scene.cues, key=lambda c: c.start_sec):
+                take = cue.audio
+                raw = getattr(take, "lipsync_json", "") if take is not None else ""
+                if not raw:
+                    continue
+                try:
+                    take_frames = _json.loads(raw)
+                except ValueError:
+                    continue
+                if not isinstance(take_frames, list) or not take_frames:
+                    continue
+                gstart = base + max(cue.start_sec or 0.0, 0.0)
+                cap = base + cue.end_sec if cue.end_sec is not None else None
+                mapped = _map_cue(
+                    take_frames, gstart,
+                    offset_sec=max(cue.offset_sec or 0.0, 0.0),
+                    rate=getattr(cue, "rate", 1.0) or 1.0,
+                    end_sec=cap,
+                )
+                mapped = [
+                    {**f, "end_sec": min(f["end_sec"], video_dur)}
+                    for f in mapped if f["start_sec"] < video_dur
+                ]
+                if not mapped:
+                    continue
+                lip_cues.append(
+                    {
+                        "cue_id": cue.id, "scene_id": scene.id,
+                        "audio_id": cue.audio_id, "start_sec": round(gstart, 3),
+                        "frames": mapped,
+                    }
+                )
+        if lip_cues:
+            lip_rel = Path("exports") / project_id / f"{uuid_short()}.lipsync.json"
+            lip_dest = settings.media_dir / lip_rel
+            lip_dest.parent.mkdir(parents=True, exist_ok=True)
+            lip_dest.write_text(
+                _json.dumps({"fps": fps, "cues": lip_cues}), encoding="utf-8"
+            )
+            lipsync_url = f"/media/{lip_rel.as_posix()}"
 
     export_id = uuid_short()
     rel = Path("exports") / project_id / f"{export_id}.mp4"
@@ -1093,4 +1174,5 @@ def render_project(
         "warnings": warnings,
         "audio_cues": audio_cues,
         "subtitles_vtt_url": vtt_url,
+        "lipsync_url": lipsync_url,
     }

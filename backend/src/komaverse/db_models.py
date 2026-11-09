@@ -6,6 +6,7 @@ Foreign keys and lookup columns are indexed (perf); emails/token hashes unique.
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
 
 from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint
@@ -328,6 +329,71 @@ class ClipRow(Base):
         )
 
 
+def _parse_lipsync_frames(raw):
+    """Parse stored take-local viseme frames (NULL/legacy rows read as [])."""
+    import json
+
+    if not raw:
+        return []
+    try:
+        frames = json.loads(raw)
+    except ValueError:
+        return []
+    out = []
+    for f in frames if isinstance(frames, list) else []:
+        if not isinstance(f, dict):
+            continue
+        try:
+            out.append(
+                schemas.VisemeFrame(
+                    start_sec=float(f.get("start_sec", 0.0)),
+                    end_sec=float(f.get("end_sec", 0.0)),
+                    viseme=str(f.get("viseme", "closed")),
+                    openness=float(f.get("openness", 0.0)),
+                )
+            )
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
+def _cue_lipsync_frames(cue):
+    """Take-local frames mapped onto the scene timeline for one cue."""
+    import json
+
+    from komaverse.lipsync import map_frames_to_cue
+
+    take = getattr(cue, "audio", None)
+    raw = getattr(take, "lipsync_json", "") if take is not None else ""
+    try:
+        frames = json.loads(raw) if raw else []
+    except ValueError:
+        return []
+    if not isinstance(frames, list) or not frames:
+        return []
+    mapped = map_frames_to_cue(
+        frames,
+        cue.start_sec or 0.0,
+        offset_sec=cue.offset_sec or 0.0,
+        rate=cue.rate or 1.0,
+        end_sec=cue.end_sec,
+    )
+    out = []
+    for f in mapped:
+        try:
+            out.append(
+                schemas.VisemeFrame(
+                    start_sec=float(f["start_sec"]),
+                    end_sec=float(f["end_sec"]),
+                    viseme=str(f.get("viseme", "closed")),
+                    openness=float(f.get("openness", 0.0)),
+                )
+            )
+        except (TypeError, ValueError, KeyError):
+            continue
+    return out
+
+
 class AudioTakeRow(Base):
     __tablename__ = "audio_takes"
 
@@ -338,6 +404,7 @@ class AudioTakeRow(Base):
     url: Mapped[str] = mapped_column(String(500))
     mime: Mapped[str] = mapped_column(String(100), default="")
     duration_sec: Mapped[float] = mapped_column(default=0)
+    lipsync_json: Mapped[str] = mapped_column(Text, default="")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
 
     project: Mapped[ProjectRow] = relationship(back_populates="audios")
@@ -352,6 +419,7 @@ class AudioTakeRow(Base):
             mime=self.mime,
             duration_sec=self.duration_sec,
             created_at=self.created_at.isoformat() if self.created_at else None,
+            lipsync=_parse_lipsync_frames(self.lipsync_json),
         )
 
 
@@ -370,6 +438,8 @@ class AudioCueRow(Base):
     fade_out: Mapped[float] = mapped_column(default=0)
     rate: Mapped[float] = mapped_column(default=1.0)
 
+    speaker: Mapped[str] = mapped_column(String(200), default="")
+    text: Mapped[str] = mapped_column(Text, default="")
     scene: Mapped[SceneRow] = relationship(back_populates="cues")
     audio: Mapped[AudioTakeRow] = relationship(back_populates="cues")
 
@@ -387,6 +457,9 @@ class AudioCueRow(Base):
             fade_in=self.fade_in if self.fade_in is not None else 0.0,
             fade_out=self.fade_out if self.fade_out is not None else 0.0,
             rate=self.rate if self.rate is not None else 1.0,
+            speaker=self.speaker or "",
+            text=self.text or "",
+            lipsync=_cue_lipsync_frames(self),
         )
 
 
@@ -418,6 +491,25 @@ class SubtitleTrackRow(Base):
         )
 
 
+def _frame_guides(raw: str | None) -> list[schemas.Guide]:
+    """Parse stored guides JSON; legacy/corrupt rows read as no guides."""
+    if not raw:
+        return []
+    try:
+        items = json.loads(raw)
+    except (ValueError, TypeError):
+        return []
+    guides: list[schemas.Guide] = []
+    if isinstance(items, list):
+        for item in items:
+            if isinstance(item, dict):
+                try:
+                    guides.append(schemas.Guide(**item))
+                except Exception:
+                    continue
+    return guides
+
+
 class FrameRow(Base):
     __tablename__ = "frames"
 
@@ -430,6 +522,8 @@ class FrameRow(Base):
     index: Mapped[int] = mapped_column(default=0)
     width: Mapped[int] = mapped_column(default=1920)
     height: Mapped[int] = mapped_column(default=1080)
+    guides_visible: Mapped[bool] = mapped_column(default=False)
+    guides_json: Mapped[str] = mapped_column(Text, default="[]")
 
     project: Mapped[ProjectRow] = relationship(back_populates="frames")
     sequence: Mapped[SequenceRow | None] = relationship(back_populates="frames")
@@ -448,6 +542,8 @@ class FrameRow(Base):
             height=self.height,
             layers=[layer.to_schema() for layer in self.layers],
             sequence_id=self.sequence_id,
+            guides_visible=bool(self.guides_visible),
+            guides=_frame_guides(self.guides_json),
         )
 
 
@@ -463,6 +559,9 @@ class LayerRow(Base):
     blend_mode: Mapped[str] = mapped_column(String(32), default="normal")
     layer_order: Mapped[int] = mapped_column(default=0)
     data_url: Mapped[str | None] = mapped_column(Text, default=None)
+    # M3 vector layers: nullable so pre-M3 rows read as raster/None.
+    kind: Mapped[str | None] = mapped_column(String(16), default="raster")
+    vector_data: Mapped[str | None] = mapped_column(Text, default=None)
 
     frame: Mapped[FrameRow] = relationship(back_populates="layers")
 
@@ -476,6 +575,8 @@ class LayerRow(Base):
             blend_mode=self.blend_mode,
             data_url=self.data_url,
             layer_order=self.layer_order,
+            kind=self.kind if self.kind in ("raster", "vector") else "raster",  # type: ignore[arg-type]
+            vector_data=self.vector_data,
         )
 
 
@@ -591,6 +692,7 @@ class EntityRow(Base):
     name: Mapped[str] = mapped_column(String(80), default="")
     anchor: Mapped[str] = mapped_column(Text, default="")
     frame_id: Mapped[str | None] = mapped_column(String(12), default=None)
+    voice: Mapped[str] = mapped_column(String(200), default="")
 
     def to_schema(self) -> schemas.Entity:
         return schemas.Entity(
@@ -599,6 +701,7 @@ class EntityRow(Base):
             kind=self.kind,
             name=self.name,
             anchor=self.anchor or "",
+            voice=self.voice or "",
             frame_id=self.frame_id,
         )
 
@@ -618,6 +721,7 @@ class ExportReportRow(Base):
     height: Mapped[int] = mapped_column(default=720)
     audio_cues: Mapped[int] = mapped_column(default=0)
     subtitles_vtt_url: Mapped[str | None] = mapped_column(String(500), default=None)
+    lipsync_url: Mapped[str | None] = mapped_column(String(500), default=None)
 
     def to_schema(self) -> schemas.ExportReport:
         import json
@@ -637,6 +741,7 @@ class ExportReportRow(Base):
             height=self.height,
             audio_cues=self.audio_cues,
             subtitles_vtt_url=self.subtitles_vtt_url,
+            lipsync_url=self.lipsync_url,
         )
 
 

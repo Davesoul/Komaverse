@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy import delete, desc, select
@@ -17,6 +17,7 @@ from komaverse.agent import (
     auto_direct_core,
     run_agent_turn,
     run_agent_turn_stream,
+    storyboard_preview,
     trace_default_detail,
     trace_default_mode,
     trace_default_raw,
@@ -33,7 +34,7 @@ from komaverse.auth import get_current_user
 from komaverse.config import settings
 from komaverse.db import get_session
 from komaverse.db_models import ChatTurnRow, UserRow
-from komaverse.models import Scene, uuid_short
+from komaverse.models import Scene, StoryboardShot, uuid_short
 from komaverse.studio_settings import (
     AI_OVERRIDE_KEYS,
     AI_SECRET_KEYS,
@@ -162,6 +163,7 @@ class AutoDirectBody(BaseModel):
     scene_id: str | None = None
     new_scene: bool = False
     page_id: str | None = None
+    preset: str | None = None
 
 
 @router.post("/agent/chat", response_model=AgentReply)
@@ -640,6 +642,25 @@ def auto_direct(
     scene, _ = auto_direct_core(
         session, user, project_id, seconds, body.motions,
         scene_id=body.scene_id, new_scene=body.new_scene,
-        page_id=body.page_id,
+        page_id=body.page_id, preset=body.preset,
     )
     return scene
+
+
+@router.get(
+    "/projects/{project_id}/storyboard", response_model=list[StoryboardShot]
+)
+def storyboard(
+    project_id: str,
+    session: Session = Depends(get_session),
+    user: UserRow = Depends(get_current_user),
+    page_id: str | None = Query(default=None),
+    preset: str = Query(default="manga-rtl"),
+    seconds: float = Query(default=2.0),
+):
+    """Preview the auto-direct shots (order, dialogue, motion) without
+    storing anything — the Scan tab reviews these before confirming."""
+    return storyboard_preview(
+        session, user, project_id, page_id=page_id,
+        preset=preset, seconds=seconds,
+    )

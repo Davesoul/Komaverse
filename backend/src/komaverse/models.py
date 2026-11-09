@@ -46,6 +46,21 @@ class Page(BaseModel):
     panels: list[Panel] = Field(default_factory=list)
 
 
+class StoryboardShot(BaseModel):
+    """One auto-direct shot previewed before anything is stored: the
+    panel in send order plus the dialogue already on it and the motion
+    the chosen camera preset assigns it."""
+
+    panel_id: str
+    page_id: str
+    page_index: int = 0
+    reading_order: int = 0
+    dialogue: str = ""
+    sfx: str = ""
+    motion: str = "none"
+    duration: float = 2.0
+
+
 class DrawLayer(BaseModel):
     id: str = Field(default_factory=uuid_short)
     name: str = "Layer"
@@ -55,6 +70,22 @@ class DrawLayer(BaseModel):
     blend_mode: str = "normal"
     layer_order: int = 0
     data_url: str | None = None
+    # M3 vector layers: "raster" paints pixels into data_url; "vector"
+    # stores editable SVG path data in vector_data (JSON list of
+    # {d, stroke, stroke_width, fill}). Vector layers also carry a baked
+    # data_url so thumbnails/exports keep compositing unchanged.
+    kind: Literal["raster", "vector"] = "raster"
+    vector_data: str | None = None
+
+
+class Guide(BaseModel):
+    """One drawing guide overlay (rule-of-thirds, center, diagonal...)."""
+
+    id: str = Field(default_factory=uuid_short)
+    kind: str = "thirds"  # thirds | center | diagonal | perspective
+    visible: bool = True
+    color: str = "#3b82f6"
+    opacity: int = 50  # 0-100
 
 
 class DrawFrame(BaseModel):
@@ -65,6 +96,8 @@ class DrawFrame(BaseModel):
     layers: list[DrawLayer] = Field(default_factory=list)
     thumbnail: str | None = None
     sequence_id: str | None = None
+    guides_visible: bool = False
+    guides: list[Guide] = Field(default_factory=list)
 
 
 class SequenceFrame(BaseModel):
@@ -125,6 +158,15 @@ class ClonedVoice(BaseModel):
     created_at: str | None = None
 
 
+class VisemeFrame(BaseModel):
+    """One coarse mouth-shape frame (M2 lip-sync, offline envelope)."""
+
+    start_sec: float = 0.0
+    end_sec: float = 0.0
+    viseme: str = "closed"  # closed | narrow | open | wide
+    openness: float = 0.0  # 0..1 mouth openness
+
+
 class AudioTake(BaseModel):
     """One library recording: mic take or uploaded file (metadata only)."""
 
@@ -136,6 +178,7 @@ class AudioTake(BaseModel):
     duration_sec: float = 0.0
     created_at: str | None = None  # ISO timestamp; serialized so the
     # library can sort takes newest-first (column already on AudioTakeRow)
+    lipsync: list[VisemeFrame] = Field(default_factory=list)
 
 
 class AudioCue(BaseModel):
@@ -152,6 +195,9 @@ class AudioCue(BaseModel):
     fade_in: float = 0.0
     fade_out: float = 0.0
     rate: float = 1.0  # playback speed; 2.0 = twice as fast
+    speaker: str = ""  # cast member or narrator name; "" = no speaker
+    text: str = ""  # dialogue line for speak + captions; "" = none
+    lipsync: list[VisemeFrame] = Field(default_factory=list)
 
 
 class SubtitleSegment(BaseModel):
@@ -234,6 +280,7 @@ class ExportReport(BaseModel):
     height: int = 720
     audio_cues: int = 0
     subtitles_vtt_url: str | None = None
+    lipsync_url: str | None = None
 
 
 class Job(BaseModel):
@@ -273,6 +320,7 @@ class Entity(BaseModel):
     name: str = ""
     anchor: str = ""  # stable description reused in every prompt
     frame_id: str | None = None  # optional visual snapshot (draw frame)
+    voice: str = ""  # TTS voice id for this cast member; "" = Brain default
 
 
 class CreditEntry(BaseModel):

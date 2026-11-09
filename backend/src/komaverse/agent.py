@@ -56,6 +56,7 @@ from komaverse.api.ai import (
 )
 from komaverse.api.animate import (
     BLEND_MODES,
+    CAMERA_PRESETS,
     MAX_LAYERS,
     MOTIONS,
     TRANSITIONS,
@@ -122,6 +123,7 @@ from komaverse.db_models import (
     SequenceRow,
     UserRow,
 )
+from komaverse.models import StoryboardShot
 from komaverse.studio_settings import provider_for
 from komaverse.subtitles import SubSegment, segments_to_srt
 from komaverse.sketch_frontends import SKETCH_MODES
@@ -1597,31 +1599,12 @@ def tool_detect_all(
     return "\n".join(lines)
 
 
-def auto_direct_core(
-    session: Session,
-    user: UserRow,
-    project_id: str,
-    seconds: float = 2.0,
-    motions: list[str] | None = None,
-    scene_id: str | None = None,
-    new_scene: bool = False,
-    page_id: str | None = None,
-):
-    """All panels → timeline clips in reading order. Returns the Scene.
+def _direct_panels(session: Session, user: UserRow, project_id: str, page_id: str | None = None):
+    """Pages + panels in send order for auto-direct and storyboard preview.
 
-    Destination control for the UI's current/new popup: scene_id appends
-    to that timeline (404 when foreign), new_scene forces a fresh one,
-    and neither keeps the legacy first-empty-else-new behavior.
-    page_id scopes the send to one page (404 when foreign) so the Scan
-    tab's "send this page" never drags in other pages' panels; omitted
-    keeps the whole-project cut used by Render and the agent.
+    Returns (page_rows, page_index_of, panels) with panels sorted by
+    (page index, reading order). Raises 404 unless owned / page found.
     """
-    from komaverse.api.animate import MOTIONS
-
-    motions = motions or DEFAULT_MOTIONS
-    for motion in motions:
-        if motion not in MOTIONS:
-            raise HTTPException(400, f"unknown motion: {motion}")
     own_project(session, user, project_id)  # 404 unless owned; rows below are scoped.
     if page_id is not None:
         scoped = session.execute(
@@ -1654,6 +1637,44 @@ def auto_direct_core(
         (index_of[pn.page_id], pn.reading_order, pn) for pn in panel_rows
     ]
     panels.sort(key=lambda t: (t[0], t[1]))
+    return page_rows, index_of, panels
+
+
+def auto_direct_core(
+    session: Session,
+    user: UserRow,
+    project_id: str,
+    seconds: float = 2.0,
+    motions: list[str] | None = None,
+    scene_id: str | None = None,
+    new_scene: bool = False,
+    page_id: str | None = None,
+    preset: str | None = None,
+):
+    """All panels → timeline clips in reading order. Returns the Scene.
+
+    Destination control for the UI's current/new popup: scene_id appends
+    to that timeline (404 when foreign), new_scene forces a fresh one,
+    and neither keeps the legacy first-empty-else-new behavior.
+    page_id scopes the send to one page (404 when foreign) so the Scan
+    tab's "send this page" never drags in other pages' panels; omitted
+    keeps the whole-project cut used by Render and the agent.
+    Motions default to DEFAULT_MOTIONS; an explicit preset picks a
+    named camera cycle instead, and an explicit motions list always
+    wins over both.
+    """
+    from komaverse.api.animate import MOTIONS
+
+    if motions is None and preset is not None:
+        spec = CAMERA_PRESETS.get(preset)
+        if spec is None:
+            raise HTTPException(400, f"unknown camera preset: {preset}")
+        motions = spec["motions"]
+    motions = motions or DEFAULT_MOTIONS
+    for motion in motions:
+        if motion not in MOTIONS:
+            raise HTTPException(400, f"unknown motion: {motion}")
+    _, _, panels = _direct_panels(session, user, project_id, page_id)
     if not panels:
         raise HTTPException(400, "no panels to direct — detect or upload first")
     scenes = list_scenes(project_id, session, user)
@@ -1688,20 +1709,62 @@ def auto_direct_core(
     return refreshed[0], added
 
 
+def storyboard_preview(
+    session: Session,
+    user: UserRow,
+    project_id: str,
+    page_id: str | None = None,
+    preset: str = "manga-rtl",
+    seconds: float = 2.0,
+) -> list[StoryboardShot]:
+    """Ordered auto-direct shots with dialogue and motion, storing nothing.
+
+    Same panel order and motion cycling the send would use, so the Scan
+    tab can review (and override per-shot motion) before confirming.
+    """
+    spec = CAMERA_PRESETS.get(preset or "manga-rtl")
+    if spec is None:
+        raise HTTPException(400, f"unknown camera preset: {preset}")
+    _, index_of, panels = _direct_panels(session, user, project_id, page_id)
+    if not panels:
+        raise HTTPException(400, "no panels to storyboard — detect or upload first")
+    seconds = min(max(seconds, 0.1), 30.0)
+    motions = spec["motions"]
+    return [
+        StoryboardShot(
+            panel_id=pn.id,
+            page_id=pn.page_id,
+            page_index=index_of[pn.page_id],
+            reading_order=pn.reading_order,
+            dialogue=pn.dialogue or "",
+            sfx=pn.sfx or "",
+            motion=motions[i % len(motions)],
+            duration=seconds,
+        )
+        for i, (_, _, pn) in enumerate(panels)
+    ]
+
+
 def tool_auto_direct(
     session: Session,
     user: UserRow,
     project_id: str,
     seconds: float = 2.0,
     motions: list[str] | None = None,
+    preset: str | None = None,
 ) -> str:
-    scene, added = auto_direct_core(session, user, project_id, seconds, motions)
+    scene, added = auto_direct_core(
+        session, user, project_id, seconds, motions, preset=preset
+    )
     if added == 0:
         return f"'{scene.name}' already has every panel — nothing to add."
-    return (
-        f"Added {added} clips to '{scene.name}' "
-        f"({seconds}s each, {', '.join(motions or DEFAULT_MOTIONS)})."
-    )
+    if motions:
+        how = ", ".join(motions)
+    elif preset:
+        how = f"{preset} camera"
+    else:
+        how = ", ".join(DEFAULT_MOTIONS)
+    return f"Added {added} clips to '{scene.name}' ({seconds}s each, {how})."
 
 
 def tool_export(
@@ -6981,8 +7044,11 @@ def _exec_cloud_tool(
                 isinstance(m, str) and m in MOTIONS for m in motions
             ):
                 motions = None
+            preset = args.get("preset")
+            if not isinstance(preset, str) or not preset:
+                preset = None
             result = tool_auto_direct(
-                session, user, project_id, seconds, motions
+                session, user, project_id, seconds, motions, preset
             )
         elif name == "export_video":
             result = tool_export(

@@ -37,7 +37,16 @@ from komaverse.db_models import (
     SubtitleTrackRow,
     UserRow,
 )
-from komaverse.models import Clip, DrawFrame, ExportReport, Job, Scene, Sequence, uuid_short
+from komaverse.models import (
+    Clip,
+    DrawFrame,
+    DrawLayer,
+    ExportReport,
+    Job,
+    Scene,
+    Sequence,
+    uuid_short,
+)
 from komaverse.observability import metrics
 from komaverse.renderer import MAX_TOTAL_SEC, composite_frame_image, render_project, resolve_clip_image
 
@@ -52,6 +61,47 @@ FILTERS = ("none", "grayscale", "sepia", "vintage", "vivid")
 TEXT_POSITIONS = ("top", "center", "bottom")
 TEXT_ANIMS = ("none", "fade", "rise")
 MAX_TEXT_CHARS = 500
+
+
+class CameraPreset(BaseModel):
+    id: str
+    label: str
+    description: str
+    motions: list[str]
+
+
+# Named motion cycles for the Scan → Render handoff and the agent: each
+# list cycles per panel in reading order, so direction-aware presets read
+# like manga (RTL) or comics (LTR). Every motion must stay in MOTIONS —
+# the renderer holds unknown moves still.
+CAMERA_PRESETS: dict[str, dict] = {
+    "manga-rtl": {
+        "label": "Manga flow (RTL)",
+        "description": "Right-to-left reading: push in, drift left and down the page.",
+        "motions": ["zoom-in", "pan-left", "pan-down", "zoom-out", "pan-left", "drift"],
+    },
+    "manga-ltr": {
+        "label": "Comic flow (LTR)",
+        "description": "Left-to-right reading: push in, drift right and down the page.",
+        "motions": ["zoom-in", "pan-right", "pan-down", "zoom-out", "pan-right", "drift"],
+    },
+    "slow-burn": {
+        "label": "Slow burn",
+        "description": "Lingering push-ins and drifts for quiet or emotional pages.",
+        "motions": ["zoom-in", "drift", "pan-up", "zoom-in", "drift", "zoom-out"],
+    },
+    "action": {
+        "label": "Action",
+        "description": "Punch in and out with lateral snaps for fights and chases.",
+        "motions": ["zoom-in", "pan-left", "zoom-out", "pan-right", "zoom-in", "drift"],
+    },
+}
+
+
+@router.get("/camera-presets", response_model=list[CameraPreset])
+def list_camera_presets():
+    """Named motion cycles for auto-direct; motions cycle per panel."""
+    return [CameraPreset(id=pid, **spec) for pid, spec in CAMERA_PRESETS.items()]
 
 
 def _check_fx(motion: str, transition: str, transition_duration: float, fade_in: float, fade_out: float) -> tuple[str, float, float, float]:
@@ -163,6 +213,79 @@ def _check_dims(width: int | None, height: int | None) -> None:
             )
 
 
+LAYER_KINDS = ("raster", "vector")
+MAX_VECTOR_DATA = 512 * 1024  # JSON path list; baked pixels ride data_url
+MAX_SVG_PATHS = 500
+MAX_SVG_PATH_LEN = 200_000
+GUIDE_KINDS = ("thirds", "center", "diagonal", "perspective")
+MAX_GUIDES = 16
+# SVG path data: command letters, numbers and separators only. Rejects
+# markup/script smuggled into a d attribute.
+_PATH_DATA_RE = re.compile(r"^[Mm][A-Za-z0-9\s\.,\+\-eE]*$")
+_SVG_PATH_RE = re.compile(r"<path\b[^>]*?\bd\s*=\s*(?:\"([^\"]+)\"|'([^']+)')", re.IGNORECASE | re.DOTALL)
+
+
+def _check_path_data(d: str) -> None:
+    if not d or len(d) > MAX_SVG_PATH_LEN:
+        raise HTTPException(400, "vector path 'd' must be 1..200000 chars")
+    if _PATH_DATA_RE.match(d.strip()) is None:
+        raise HTTPException(400, "vector path 'd' is not valid SVG path data")
+
+
+def _check_vector_data(vector_data: str) -> list[dict]:
+    if len(vector_data) > MAX_VECTOR_DATA:
+        raise HTTPException(413, "vector data too large")
+    try:
+        paths = json.loads(vector_data)
+    except (ValueError, TypeError) as err:
+        raise HTTPException(400, "vector_data must be a JSON list of paths") from err
+    if not isinstance(paths, list):
+        raise HTTPException(400, "vector_data must be a JSON list of paths")
+    if len(paths) > MAX_SVG_PATHS:
+        raise HTTPException(400, f"too many vector paths ({len(paths)} > {MAX_SVG_PATHS})")
+    for item in paths:
+        if not isinstance(item, dict) or not isinstance(item.get("d"), str):
+            raise HTTPException(400, "each vector path needs a 'd' string")
+        _check_path_data(item["d"])
+    return paths
+
+
+def _check_guides(guides: list[dict]) -> list[dict]:
+    if len(guides) > MAX_GUIDES:
+        raise HTTPException(400, f"too many guides ({len(guides)} > {MAX_GUIDES})")
+    cleaned: list[dict] = []
+    for item in guides:
+        if not isinstance(item, dict):
+            raise HTTPException(400, "each guide must be an object")
+        kind = item.get("kind", "thirds")
+        if kind not in GUIDE_KINDS:
+            raise HTTPException(400, f"unknown guide kind: {kind}")
+        try:
+            opacity = max(0, min(100, int(item.get("opacity", 50) or 0)))
+        except (TypeError, ValueError) as err:
+            raise HTTPException(400, "guide opacity must be 0..100") from err
+        cleaned.append(
+            {
+                "id": str(item.get("id") or uuid_short()),
+                "kind": kind,
+                "visible": item.get("visible", True) is not False,
+                "color": str(item.get("color", "#3b82f6"))[:32],
+                "opacity": opacity,
+            }
+        )
+    return cleaned
+
+
+def _harvest_svg_paths(svg: str) -> list[dict]:
+    if len(svg) > MAX_VECTOR_DATA:
+        raise HTTPException(413, "svg too large")
+    found: list[dict] = []
+    for m in _SVG_PATH_RE.finditer(svg):
+        d = m.group(1) if m.group(1) is not None else m.group(2)
+        found.append({"d": d.strip(), "stroke": "#000000", "stroke_width": 2.0, "fill": "none"})
+    return found
+
+
 def _check_layers(layers: list[LayerPut]) -> None:
     if len(layers) > MAX_LAYERS:
         raise HTTPException(400, f"too many layers ({len(layers)} > {MAX_LAYERS})")
@@ -175,6 +298,12 @@ def _check_layers(layers: list[LayerPut]) -> None:
             raise HTTPException(400, f"unknown blend mode: {layer.blend_mode}")
         if layer.data_url and len(layer.data_url) > MAX_LAYER_DATA_URL:
             raise HTTPException(413, "layer pixels too large")
+        if layer.kind not in LAYER_KINDS:
+            raise HTTPException(400, f"unknown layer kind: {layer.kind}")
+        if layer.kind == "raster" and layer.vector_data is not None:
+            raise HTTPException(400, "vector_data needs kind='vector'")
+        if layer.vector_data is not None:
+            _check_vector_data(layer.vector_data)
 
 
 class SceneCreate(BaseModel):
@@ -255,6 +384,8 @@ class LayerPut(BaseModel):
     blend_mode: str = "normal"
     layer_order: int = 0
     data_url: str | None = None
+    kind: str = "raster"
+    vector_data: str | None = None
 
 
 class FramePut(BaseModel):
@@ -262,6 +393,38 @@ class FramePut(BaseModel):
     width: int | None = None
     height: int | None = None
     layers: list[LayerPut] | None = None
+    guides_visible: bool | None = None
+    guides: list[dict] | None = None
+
+
+class VectorPath(BaseModel):
+    d: str
+    stroke: str = "#000000"
+    stroke_width: float = 2.0
+    fill: str = "none"
+
+
+class SvgImport(BaseModel):
+    name: str = "Vector"
+    paths: list[VectorPath] | None = None
+    svg: str | None = None  # raw <svg> fragment; <path d="..."> harvested
+
+
+class LayerPatch(BaseModel):
+    name: str | None = None
+    opacity: int | None = None
+    visible: bool | None = None
+    locked: bool | None = None
+    blend_mode: str | None = None
+    layer_order: int | None = None
+    data_url: str | None = None
+    kind: str | None = None
+    vector_data: str | None = None
+
+
+class GuidesPut(BaseModel):
+    guides_visible: bool | None = None
+    guides: list[dict] | None = None
 
 
 class ExportRequest(BaseModel):
@@ -1046,6 +1209,10 @@ def put_frame(
         row.width = body.width
     if body.height is not None:
         row.height = body.height
+    if body.guides_visible is not None:
+        row.guides_visible = body.guides_visible
+    if body.guides is not None:
+        row.guides_json = json.dumps(_check_guides(body.guides))
     if body.layers is not None:
         _check_layers(body.layers)
         session.execute(delete(LayerRow).where(LayerRow.frame_id == row.id))
@@ -1061,8 +1228,146 @@ def put_frame(
                     blend_mode=layer.blend_mode,
                     layer_order=layer.layer_order,
                     data_url=layer.data_url,
+                    kind=layer.kind,
+                    vector_data=layer.vector_data,
                 )
             )
+    session.commit()
+    session.refresh(row, ["layers"])
+    return row.to_schema()
+
+
+def _get_frame_row(session: Session, user: UserRow, frame_id: str) -> FrameRow:
+    row = session.get(FrameRow, frame_id)
+    if row is None:
+        raise HTTPException(404, "frame not found")
+    ensure_owner(session, user, row.project_id)
+    return row
+
+
+@router.post("/frames/{frame_id}/layers", response_model=DrawLayer, status_code=201)
+def create_layer(
+    frame_id: str,
+    body: LayerPut,
+    session: Session = Depends(get_session),
+    user: UserRow = Depends(get_current_user),
+):
+    """Append one layer (raster or vector) to a frame."""
+    row = _get_frame_row(session, user, frame_id)
+    if len(row.layers) >= MAX_LAYERS:
+        raise HTTPException(400, f"too many layers ({len(row.layers) + 1} > {MAX_LAYERS})")
+    _check_layers([body])
+    layer = LayerRow(
+        id=body.id or uuid_short(),
+        frame_id=row.id,
+        name=body.name,
+        opacity=body.opacity,
+        visible=body.visible,
+        locked=body.locked,
+        blend_mode=body.blend_mode,
+        layer_order=body.layer_order,
+        data_url=body.data_url,
+        kind=body.kind,
+        vector_data=body.vector_data,
+    )
+    session.add(layer)
+    session.commit()
+    return layer.to_schema()
+
+
+@router.patch("/frames/{frame_id}/layers/{layer_id}", response_model=DrawLayer)
+def patch_layer(
+    frame_id: str,
+    layer_id: str,
+    body: LayerPatch,
+    session: Session = Depends(get_session),
+    user: UserRow = Depends(get_current_user),
+):
+    """Update one layer's props, pixels, or vector path data."""
+    row = _get_frame_row(session, user, frame_id)
+    layer = next((cand for cand in row.layers if cand.id == layer_id), None)
+    if layer is None:
+        raise HTTPException(404, "layer not found")
+    if body.opacity is not None and not 0 <= body.opacity <= 100:
+        raise HTTPException(400, f"opacity must be 0..100, got {body.opacity}")
+    if body.blend_mode is not None and body.blend_mode not in BLEND_MODES:
+        raise HTTPException(400, f"unknown blend mode: {body.blend_mode}")
+    if body.kind is not None and body.kind not in LAYER_KINDS:
+        raise HTTPException(400, f"unknown layer kind: {body.kind}")
+    if body.data_url is not None and len(body.data_url) > MAX_LAYER_DATA_URL:
+        raise HTTPException(413, "layer pixels too large")
+    kind = body.kind if body.kind is not None else (layer.kind or "raster")
+    vector_data = body.vector_data if body.vector_data is not None else layer.vector_data
+    if kind == "raster" and body.vector_data is not None:
+        raise HTTPException(400, "vector_data needs kind='vector'")
+    if kind == "vector" and vector_data is not None:
+        _check_vector_data(vector_data)
+    for field in ("name", "opacity", "visible", "locked", "blend_mode", "layer_order", "data_url"):
+        value = getattr(body, field)
+        if value is not None:
+            setattr(layer, field, value)
+    layer.kind = kind
+    layer.vector_data = vector_data if kind == "vector" else None
+    session.commit()
+    return layer.to_schema()
+
+
+@router.post("/frames/{frame_id}/layers/import-svg", response_model=DrawLayer, status_code=201)
+def import_svg_layer(
+    frame_id: str,
+    body: SvgImport,
+    session: Session = Depends(get_session),
+    user: UserRow = Depends(get_current_user),
+):
+    """Trace-import: store SVG path data as an editable vector layer.
+
+    Accepts an explicit paths list, a raw <svg> fragment (every
+    <path d="..."> is harvested), or both. No pixels are baked here —
+    the studio paints vector_data to canvas and sends the baked data_url
+    on save, so thumbnails/exports keep compositing the same raster path.
+    """
+    row = _get_frame_row(session, user, frame_id)
+    if len(row.layers) >= MAX_LAYERS:
+        raise HTTPException(400, f"too many layers ({len(row.layers) + 1} > {MAX_LAYERS})")
+    harvested = _harvest_svg_paths(body.svg) if body.svg else []
+    explicit = [p.model_dump() for p in (body.paths or [])]
+    merged = explicit + harvested
+    if not merged:
+        raise HTTPException(400, "import-svg needs paths or an <svg> with <path d=...>")
+    if len(merged) > MAX_SVG_PATHS:
+        raise HTTPException(400, f"too many vector paths ({len(merged)} > {MAX_SVG_PATHS})")
+    for item in merged:
+        _check_path_data(item["d"])
+    layer = LayerRow(
+        frame_id=row.id,
+        name=body.name,
+        opacity=100,
+        visible=True,
+        locked=False,
+        blend_mode="normal",
+        layer_order=max([lay.layer_order for lay in row.layers] + [-1]) + 1,
+        data_url=None,
+        kind="vector",
+        vector_data=json.dumps(merged),
+    )
+    session.add(layer)
+    session.commit()
+    return layer.to_schema()
+
+
+@router.put("/frames/{frame_id}/guides", response_model=DrawFrame)
+def put_guides(
+    frame_id: str,
+    body: GuidesPut,
+    session: Session = Depends(get_session),
+    user: UserRow = Depends(get_current_user),
+):
+    """Toggle drawing guides / replace the frame's guide list."""
+    row = _get_frame_row(session, user, frame_id)
+    if body.guides_visible is not None:
+        row.guides_visible = body.guides_visible
+    if body.guides is not None:
+        row.guides_json = json.dumps(_check_guides(body.guides))
     session.commit()
     session.refresh(row, ["layers"])
     return row.to_schema()
@@ -1112,6 +1417,8 @@ def duplicate_frame(
         index=_next_frame_index(session, row.sequence_id),
         width=row.width,
         height=row.height,
+        guides_visible=row.guides_visible,
+        guides_json=row.guides_json,
     )
     session.add(copy)
     session.flush()
@@ -1127,6 +1434,8 @@ def duplicate_frame(
                 blend_mode=layer.blend_mode,
                 layer_order=layer.layer_order,
                 data_url=layer.data_url,
+                kind=layer.kind,
+                vector_data=layer.vector_data,
             )
         )
     session.commit()
@@ -1764,6 +2073,7 @@ def run_export_job(job_id: str, factory=None) -> None:
                 height=out["height"],
                 audio_cues=out.get("audio_cues", 0),
                 subtitles_vtt_url=out.get("subtitles_vtt_url"),
+                lipsync_url=out.get("lipsync_url"),
             )
         )
         session.commit()

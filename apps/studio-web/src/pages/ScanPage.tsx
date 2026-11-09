@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { api, mediaUrl, type Page, type Panel, type ProjectSummary, type ProjectView, type Scene } from "../api";
+import { api, mediaUrl, MOTIONS, PRESET_FALLBACK, type CameraPreset, type Page, type Panel, type ProjectSummary, type ProjectView, type Scene, type StoryboardShot } from "../api";
 import { getCurrentProject, getCurrentScene, gotoTab, setCurrentProject, setCurrentScene } from "../lib/studio";
 import {
   Btn,
@@ -655,11 +655,17 @@ export default function ScanPage() {
   // the project is already published, so Render restores it on mount.
   // The popup names the destination: current timeline or a fresh one.
   const [destScenes, setDestScenes] = useState<Scene[] | null>(null);
+  const [presets, setPresets] = useState<CameraPreset[]>([]);
+  const [presetId, setPresetId] = useState("manga-rtl");
+  const [shots, setShots] = useState<StoryboardShot[] | null>(null);
+  const [shotMotions, setShotMotions] = useState<Record<number, string>>({});
+  const [pendingDest, setPendingDest] = useState<string | "new" | null>(null);
   const openSendDestination = async () => {
     if (!project || panels.length === 0 || busy) return;
     setBusy("Loading timelines…");
     try {
       setDestScenes(await api.listScenes(project.id));
+      setPresets(await api.cameraPresets());
     } catch (e) {
       toast(`Couldn't load timelines: ${(e as Error).message}`, "error");
     } finally {
@@ -667,17 +673,34 @@ export default function ScanPage() {
     }
   };
   const doSendToAnimate = async (dest: string | "new") => {
-    // Scoped to the open page: a new timeline must carry only this page's
-    // panels, never the rest of the project.
-    if (!project || !page) return;
+    // Scoped to the open page — but review first: fetch the storyboard
+    // preview (order, dialogue, preset motion) and confirm from there.
+    if (!project || !page || busy) return;
     setDestScenes(null);
+    setPendingDest(dest);
+    setBusy("Loading storyboard…");
+    try {
+      const list = await api.storyboardPreview(project.id, { page_id: page.id, preset: presetId });
+      setShots(list);
+      setShotMotions({});
+    } catch (e) {
+      toast(`Couldn't preview storyboard: ${(e as Error).message}`, "error");
+      setPendingDest(null);
+    } finally {
+      setBusy("");
+    }
+  };
+  const confirmSend = async () => {
+    if (!project || !page || !shots || !pendingDest || busy) return;
+    const motions = shots.map((s, i) => shotMotions[i] ?? s.motion);
+    setShots(null);
     setBusy("Sending panels…");
     try {
       const target = await api.autoDirect(
         project.id,
-        dest === "new"
-          ? { seconds: 2, new_scene: true, page_id: page.id }
-          : { seconds: 2, scene_id: dest, page_id: page.id },
+        pendingDest === "new"
+          ? { seconds: 2, motions, new_scene: true, page_id: page.id }
+          : { seconds: 2, motions, scene_id: pendingDest, page_id: page.id },
       );
       toast(
         `Sent ${target.clips.length} clip${target.clips.length === 1 ? "" : "s"} into '${target.name}' — opening Render.`,
@@ -956,6 +979,17 @@ export default function ScanPage() {
               <IconBtn danger disabled={!!busy} onClick={doDeletePage} label="Delete this page and its scan file">
                 ×
               </IconBtn>
+              <SelectInput
+                value={presetId}
+                onChange={(e) => setPresetId(e.target.value)}
+                title="Camera preset: motion cycle applied per panel in reading order"
+                aria-label="Camera preset"
+                disabled={!!busy}
+              >
+                {(presets.length ? presets : PRESET_FALLBACK).map((p) => (
+                  <option key={p.id} value={p.id}>{p.label}</option>
+                ))}
+              </SelectInput>
               <PrimaryBtn
                 onClick={openSendDestination}
                 disabled={!!busy || panels.length === 0}
@@ -977,6 +1011,71 @@ export default function ScanPage() {
                   onPick={doSendToAnimate}
                   onClose={() => setDestScenes(null)}
                 />
+              ) : null}
+              {shots && pendingDest ? (
+                <div
+                  role="dialog"
+                  aria-modal="true"
+                  aria-label="Review storyboard"
+                  onClick={() => { setShots(null); setPendingDest(null); }}
+                  style={{
+                    position: "fixed",
+                    inset: 0,
+                    zIndex: 80,
+                    background: "rgba(0,0,0,0.6)",
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    padding: 16,
+                  }}
+                >
+                  <div
+                    onClick={(e) => e.stopPropagation()}
+                    style={{
+                      width: "min(560px, 100%)",
+                      maxHeight: "80vh",
+                      display: "flex",
+                      flexDirection: "column",
+                      background: "var(--kv-surface)",
+                      border: "1px solid var(--kv-border-strong)",
+                      borderRadius: "var(--kv-radius)",
+                      boxShadow: "var(--kv-shadow-hard)",
+                    }}
+                  >
+                    <div style={{ padding: "14px 16px 8px" }}>
+                      <div style={{ fontWeight: 900, fontSize: 15 }}>Review storyboard</div>
+                      <div style={{ fontSize: 12, color: "var(--kv-muted)", marginTop: 2 }}>
+                        {shots.length} shot{shots.length === 1 ? "" : "s"} in reading order — motion is editable per shot.
+                      </div>
+                    </div>
+                    <div style={{ display: "flex", flexDirection: "column", gap: 6, padding: "4px 16px 8px", overflowY: "auto" }}>
+                      {shots.map((s, i) => (
+                        <div key={s.panel_id} style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                          <span style={{ fontSize: 12, color: "var(--kv-muted)", minWidth: 28 }}>#{i + 1}</span>
+                          <span style={{ flex: 1, fontSize: 12, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                            {s.dialogue || <span style={{ color: "var(--kv-muted)" }}>no dialogue</span>}
+                          </span>
+                          <SelectInput
+                            value={shotMotions[i] ?? s.motion}
+                            onChange={(e) => setShotMotions((m) => ({ ...m, [i]: e.target.value }))}
+                            aria-label={`Shot ${i + 1} motion`}
+                            disabled={!!busy}
+                          >
+                            {MOTIONS.map((m) => (
+                              <option key={m} value={m}>{m}</option>
+                            ))}
+                          </SelectInput>
+                        </div>
+                      ))}
+                    </div>
+                    <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", padding: 16 }}>
+                      <Btn onClick={() => { setShots(null); setPendingDest(null); }} disabled={!!busy}>Cancel</Btn>
+                      <PrimaryBtn onClick={() => void confirmSend()} disabled={!!busy}>
+                        {busy ? "Sending…" : `Send ${shots.length} shot${shots.length === 1 ? "" : "s"} →`}
+                      </PrimaryBtn>
+                    </div>
+                  </div>
+                </div>
               ) : null}
               <Btn
                 disabled={!!busy || !page}

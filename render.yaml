@@ -16,3 +16,11 @@ services:
         value: "true"
       - key: PORT
         value: "8000"
+      # Bring-your-own-key vault: WITHOUT this, users cannot save their
+      # own provider keys (Brain panel answers 503). sync:false means
+      # Render asks for the value on first deploy and never overwrites
+      # it — paste the Fernet key handed over with this deploy, do NOT
+      # commit it to the repo. Generate a fresh one with:
+      #   python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+      - key: KEY_VAULT_SECRET
+        sync: false

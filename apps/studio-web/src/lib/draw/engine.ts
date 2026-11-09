@@ -76,6 +76,7 @@ export interface EngineLayerInfo {
   visible: boolean;
   locked: boolean;
   blend: string;
+  kind: string;
 }
 
 export interface SerializedLayer {
@@ -87,6 +88,8 @@ export interface SerializedLayer {
   blend_mode: string;
   layer_order: number;
   data_url: string | null;
+  kind?: string;
+  vector_data?: string | null;
 }
 
 interface Layer {
@@ -96,6 +99,64 @@ interface Layer {
   visible: boolean;
   locked: boolean;
   blend: string;
+  kind: string;
+  vectorData: string | null;
+}
+
+/** One editable SVG path on a vector layer. */
+export interface VectorPathSpec {
+  d: string;
+  stroke?: string;
+  stroke_width?: number;
+  fill?: string;
+}
+
+/** One drawing guide overlay (rule-of-thirds, center, diagonal...). */
+export interface GuideSpec {
+  id?: string;
+  kind: string;
+  visible?: boolean;
+  color?: string;
+  opacity?: number;
+}
+
+/** Parse vector_data JSON into path specs (never throws). */
+export function parseVectorData(raw: string | null | undefined): VectorPathSpec[] {
+  if (!raw) return [];
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter(
+      (p): p is VectorPathSpec =>
+        !!p && typeof p === "object" && typeof (p as { d?: unknown }).d === "string",
+    );
+  } catch {
+    return [];
+  }
+}
+
+/** Stroke/fill SVG path specs onto ctx (logical coords; caller sets transform). */
+export function paintVectorPaths(
+  ctx: CanvasRenderingContext2D,
+  paths: VectorPathSpec[],
+): void {
+  for (const p of paths) {
+    let path: Path2D;
+    try {
+      path = new Path2D(p.d);
+    } catch {
+      continue;
+    }
+    if (p.fill && p.fill !== "none") {
+      ctx.fillStyle = p.fill;
+      ctx.fill(path);
+    }
+    ctx.strokeStyle = p.stroke ?? "#000000";
+    ctx.lineWidth = p.stroke_width ?? 2;
+    ctx.lineCap = "round";
+    ctx.lineJoin = "round";
+    ctx.stroke(path);
+  }
 }
 
 export type DownStatus = "stroke" | "shape" | "done" | "pan" | "ignored";
@@ -193,6 +254,9 @@ export class DrawEngine {
   stabilizer = 0.35; // 0..1 extra weighted-average prefilter (Krita-style)
   fillTolerance = 24; // 0..255 channel distance
   shapeFill = false;
+  guidesVisible = false;
+  guides: GuideSpec[] = [];
+
   symmetry = false; // mirror strokes across the vertical canvas axis
   version = 0; // bumped on every mutation; drives page dirty/autosave
   onChange: (() => void) | null = null;
@@ -253,12 +317,98 @@ export class DrawEngine {
       visible: true,
       locked: false,
       blend: "normal",
+      kind: "raster",
+      vectorData: null,
     });
     this.order.push(id);
     this.activeId = id;
     this.composite();
     this.bump();
     return id;
+  }
+
+  /** Add an editable vector layer (SVG path data, painted via Path2D). */
+  addVectorLayer(name: string, vectorData: string | null = null): string {
+    const id = this.addLayer(name);
+    const layer = this.layers.get(id)!;
+    layer.kind = "vector";
+    layer.vectorData = vectorData;
+    if (vectorData) this.paintVectorLayer(layer);
+    this.composite();
+    this.bump();
+    return id;
+  }
+
+  /** Replace a vector layer's path data and repaint its baked canvas. */
+  setVectorData(id: string, vectorData: string | null): boolean {
+    const layer = this.layers.get(id);
+    if (!layer || layer.kind !== "vector") return false;
+    layer.vectorData = vectorData;
+    this.paintVectorLayer(layer);
+    this.composite();
+    this.bump();
+    return true;
+  }
+
+  private paintVectorLayer(layer: Layer): void {
+    const c = layer.canvas.getContext("2d")!;
+    c.setTransform(1, 0, 0, 1, 0, 0);
+    c.clearRect(0, 0, layer.canvas.width, layer.canvas.height);
+    c.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
+    paintVectorPaths(c, parseVectorData(layer.vectorData));
+  }
+
+  /** Drawing-guides overlay (display only; never baked into layers). */
+  setGuides(visible: boolean, guides: GuideSpec[]): void {
+    this.guidesVisible = visible;
+    this.guides = guides;
+    this.composite();
+    this.bump();
+  }
+
+  private drawGuides(ctx: CanvasRenderingContext2D): void {
+    if (!this.guidesVisible) return;
+    const { width: w, height: h } = this;
+    for (const g of this.guides) {
+      if (g.visible === false) continue;
+      if (g.kind !== "thirds" && g.kind !== "center" && g.kind !== "diagonal" && g.kind !== "perspective") {
+        continue;
+      }
+      ctx.save();
+      ctx.globalAlpha = Math.max(0, Math.min(100, g.opacity ?? 50)) / 100;
+      ctx.strokeStyle = g.color ?? "#3b82f6";
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      if (g.kind === "thirds") {
+        for (const f of [1 / 3, 2 / 3]) {
+          ctx.moveTo(w * f, 0);
+          ctx.lineTo(w * f, h);
+          ctx.moveTo(0, h * f);
+          ctx.lineTo(w, h * f);
+        }
+      } else if (g.kind === "center") {
+        ctx.moveTo(w / 2, 0);
+        ctx.lineTo(w / 2, h);
+        ctx.moveTo(0, h / 2);
+        ctx.lineTo(w, h / 2);
+      } else if (g.kind === "diagonal") {
+        ctx.moveTo(0, 0);
+        ctx.lineTo(w, h);
+        ctx.moveTo(w, 0);
+        ctx.lineTo(0, h);
+      } else {
+        ctx.moveTo(w / 2, h / 2);
+        ctx.lineTo(0, 0);
+        ctx.moveTo(w / 2, h / 2);
+        ctx.lineTo(w, 0);
+        ctx.moveTo(w / 2, h / 2);
+        ctx.lineTo(0, h);
+        ctx.moveTo(w / 2, h / 2);
+        ctx.lineTo(w, h);
+      }
+      ctx.stroke();
+      ctx.restore();
+    }
   }
 
   removeLayer(id: string) {
@@ -343,6 +493,8 @@ export class DrawEngine {
       visible: layer.visible,
       locked: false,
       blend: layer.blend,
+      kind: layer.kind,
+      vectorData: layer.vectorData,
     });
     this.order.splice(this.order.indexOf(id) + 1, 0, newId);
     this.activeId = newId;
@@ -396,6 +548,7 @@ export class DrawEngine {
           visible: layer.visible,
           locked: layer.locked,
           blend: layer.blend,
+          kind: layer.kind,
         };
       })
       .reverse(); // top-first for the UI
@@ -1801,6 +1954,7 @@ export class DrawEngine {
       ctx.globalCompositeOperation = layer.blend as GlobalCompositeOperation;
       ctx.drawImage(layer.canvas, 0, 0, this.width, this.height);
     }
+    this.drawGuides(ctx);
     ctx.globalAlpha = 1;
     ctx.globalCompositeOperation = "source-over";
     if (this.preview) this.drawShape(ctx, this.preview);
@@ -1921,6 +2075,8 @@ export class DrawEngine {
         blend_mode: layer.blend,
         layer_order: i,
         data_url: tmp.toDataURL("image/png"),
+        kind: layer.kind,
+        vector_data: layer.vectorData,
       };
     });
   }
@@ -1958,6 +2114,8 @@ export class DrawEngine {
       locked?: boolean;
       blend_mode?: string;
       data_url: string | null;
+      kind?: string;
+      vector_data?: string | null;
     }[],
   ) {
     this.layers.clear();
@@ -1991,6 +2149,8 @@ export class DrawEngine {
         (BLEND_MODES as readonly string[]).includes(saved.blend_mode)
           ? saved.blend_mode
           : "normal";
+      const kind = saved.kind === "vector" ? "vector" : "raster";
+      const vectorData = typeof saved.vector_data === "string" ? saved.vector_data : null;
       this.layers.set(saved.id, {
         canvas,
         name: saved.name,
@@ -1998,7 +2158,15 @@ export class DrawEngine {
         visible: saved.visible !== false,
         locked: saved.locked === true,
         blend,
+        kind,
+        vectorData,
       });
+      if (kind === "vector" && !saved.data_url && vectorData) {
+        // Fresh trace-import: no baked pixels yet — paint paths directly.
+        const c = canvas.getContext("2d")!;
+        c.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
+        paintVectorPaths(c, parseVectorData(vectorData));
+      }
       this.order.push(saved.id);
     }
     if (this.order.length === 0) {
@@ -2031,20 +2199,32 @@ export class DrawEngine {
       ctx.fillRect(0, 0, out.width, out.height);
     }
     for (const saved of layers) {
-      if (saved.visible === false || !saved.data_url) continue;
-      try {
-        const img = new Image();
-        img.src = saved.data_url;
-        await img.decode();
-        const opacity = Math.max(0, Math.min(100, Math.round(saved.opacity ?? 100))) / 100;
+      if (saved.visible === false) continue;
+      const opacity = Math.max(0, Math.min(100, Math.round(saved.opacity ?? 100))) / 100;
+      const op =
+        saved.blend_mode && (BLEND_MODES as readonly string[]).includes(saved.blend_mode)
+          ? (saved.blend_mode as GlobalCompositeOperation)
+          : "source-over";
+      if (saved.data_url) {
+        try {
+          const img = new Image();
+          img.src = saved.data_url;
+          await img.decode();
+          ctx.globalAlpha = opacity;
+          ctx.globalCompositeOperation = op;
+          ctx.drawImage(img, 0, 0, out.width, out.height);
+        } catch {
+          // Corrupt layer: skip, like load().
+        }
+      } else if (saved.kind === "vector" && saved.vector_data) {
+        // Unbaked vector layer (fresh trace-import): paint paths directly.
+        const tmp = document.createElement("canvas");
+        tmp.width = out.width;
+        tmp.height = out.height;
+        paintVectorPaths(tmp.getContext("2d")!, parseVectorData(saved.vector_data));
         ctx.globalAlpha = opacity;
-        ctx.globalCompositeOperation =
-          saved.blend_mode && (BLEND_MODES as readonly string[]).includes(saved.blend_mode)
-            ? (saved.blend_mode as GlobalCompositeOperation)
-            : "source-over";
-        ctx.drawImage(img, 0, 0, out.width, out.height);
-      } catch {
-        // Corrupt layer: skip, like load().
+        ctx.globalCompositeOperation = op;
+        ctx.drawImage(tmp, 0, 0);
       }
     }
     ctx.globalAlpha = 1;

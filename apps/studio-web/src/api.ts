@@ -168,6 +168,8 @@ export interface AudioCue {
   fade_in: number;
   fade_out: number;
   rate: number;
+  speaker: string | null;
+  text: string | null;
 }
 
 export interface Scene {
@@ -179,6 +181,21 @@ export interface Scene {
   cues: AudioCue[];
 }
 
+export interface VectorPath {
+  d: string;
+  stroke?: string;
+  stroke_width?: number;
+  fill?: string;
+}
+
+export interface Guide {
+  id: string;
+  kind: string;
+  visible: boolean;
+  color: string;
+  opacity: number;
+}
+
 export interface DrawLayer {
   id: string;
   name: string;
@@ -188,6 +205,10 @@ export interface DrawLayer {
   locked: boolean;
   data_url: string | null;
   layer_order: number;
+  /** raster (pixels) or vector (editable SVG path data). */
+  kind: string;
+  /** JSON list of VectorPath; vector layers also carry a baked data_url. */
+  vector_data: string | null;
 }
 
 export interface DrawFrame {
@@ -198,6 +219,8 @@ export interface DrawFrame {
   height: number;
   layers: DrawLayer[];
   sequence_id: string | null;
+  guides_visible: boolean;
+  guides: Guide[];
 }
 
 export interface SequenceFrame {
@@ -245,6 +268,35 @@ export interface SubtitleTrack {
   segments: SubtitleSegment[];
 }
 
+/** One take-local viseme frame (10 frames/sec, offline analysis). */
+export interface VisemeFrame {
+  start_sec: number;
+  end_sec: number;
+  /** closed | narrow | open | wide */
+  viseme: string;
+  openness: number;
+}
+
+/** Viseme timing for one take (take-local seconds). */
+export interface TakeLipsync {
+  take_id: string;
+  frames: VisemeFrame[];
+}
+
+/** Viseme timing for one cue, mapped to scene seconds. */
+export interface CueLipsync {
+  cue_id: string;
+  audio_id: string;
+  start_sec: number;
+  frames: VisemeFrame[];
+}
+
+/** Every voiced cue on one scene, mapped to scene time. */
+export interface SceneLipsync {
+  scene_id: string;
+  cues: CueLipsync[];
+}
+
 export interface Job {
   id: string;
   user_id: string;
@@ -275,7 +327,37 @@ export interface Entity {
   name: string;
   anchor: string;
   frame_id: string | null;
+  voice: string | null;
 }
+
+export interface CameraPreset {
+  id: string;
+  label: string;
+  description: string;
+  motions: string[];
+}
+
+export interface StoryboardShot {
+  panel_id: string;
+  page_id: string;
+  page_index: number;
+  reading_order: number;
+  dialogue: string;
+  sfx: string;
+  motion: string;
+  duration: number;
+}
+
+/** Renderer motion vocabulary (mirrors the backend MOTIONS). */
+export const MOTIONS = ["none", "zoom-in", "zoom-out", "pan-left", "pan-right", "pan-up", "pan-down", "drift"];
+
+/** Offline fallback when an older backend lacks /camera-presets. */
+export const PRESET_FALLBACK: CameraPreset[] = [
+  { id: "manga-rtl", label: "Manga flow (RTL)", description: "Right-to-left reading: push in, drift left and down the page.", motions: ["zoom-in", "pan-left", "pan-down", "zoom-out", "pan-left", "drift"] },
+  { id: "manga-ltr", label: "Comic flow (LTR)", description: "Left-to-right reading: push in, drift right and down the page.", motions: ["zoom-in", "pan-right", "pan-down", "zoom-out", "pan-right", "drift"] },
+  { id: "slow-burn", label: "Slow burn", description: "Lingering push-ins and drifts for quiet or emotional pages.", motions: ["zoom-in", "drift", "pan-up", "zoom-in", "drift", "zoom-out"] },
+  { id: "action", label: "Action", description: "Punch in and out with lateral snaps for fights and chases.", motions: ["zoom-in", "pan-left", "zoom-out", "pan-right", "zoom-in", "drift"] },
+];
 
 export interface AiModelOption {
   id: string;
@@ -764,6 +846,7 @@ export const api = {
       lang?: string;
       cue_scene_id?: string;
       cue_start_sec?: number;
+      entity_id?: string;
     },
   ) =>
     req<AudioTake>(`/api/v1/projects/${projectId}/audio/synthesize`, {
@@ -828,6 +911,40 @@ export const api = {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(patch),
+    }),
+  createLayer: (frameId: string, body: {
+    name?: string; opacity?: number; visible?: boolean; locked?: boolean;
+    blend_mode?: string; layer_order?: number; data_url?: string | null;
+    kind?: string; vector_data?: string | null;
+  }) =>
+    req<DrawLayer>(`/api/v1/frames/${frameId}/layers`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }),
+  patchLayer: (frameId: string, layerId: string, patch: {
+    name?: string; opacity?: number; visible?: boolean; locked?: boolean;
+    blend_mode?: string; layer_order?: number; data_url?: string | null;
+    kind?: string; vector_data?: string | null;
+  }) =>
+    req<DrawLayer>(`/api/v1/frames/${frameId}/layers/${layerId}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(patch),
+    }),
+  /** Trace-import SVG path data as an editable vector layer. */
+  importSvgLayer: (frameId: string, body: { name?: string; paths?: VectorPath[]; svg?: string }) =>
+    req<DrawLayer>(`/api/v1/frames/${frameId}/layers/import-svg`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }),
+  /** Toggle the drawing-guides overlay / replace the guide list. */
+  putGuides: (frameId: string, body: { guides_visible?: boolean; guides?: Partial<Guide>[] }) =>
+    req<DrawFrame>(`/api/v1/frames/${frameId}/guides`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
     }),
   patchPage: (pageId: string, patch: { name?: string }) =>
     req<Page>(`/api/v1/pages/${pageId}`, {
@@ -1037,7 +1154,7 @@ export const api = {
     req<Entity[]>(`/api/v1/projects/${projectId}/entities`),
   createEntity: (
     projectId: string,
-    body: { kind: string; name: string; anchor?: string; frame_id?: string | null },
+    body: { kind: string; name: string; anchor?: string; frame_id?: string | null; voice?: string },
   ) =>
     req<Entity>(`/api/v1/projects/${projectId}/entities`, {
       method: "POST",
@@ -1046,6 +1163,32 @@ export const api = {
     }),
   deleteEntity: (entityId: string) =>
     req<void>(`/api/v1/entities/${entityId}`, { method: "DELETE" }),
+  patchEntity: (entityId: string, patch: { name?: string; anchor?: string; voice?: string | null; frame_id?: string | null }) =>
+    req<Entity>(`/api/v1/entities/${entityId}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(patch),
+    }),
+  synthesizeSfx: (
+    projectId: string,
+    body: { kind: string; cue_scene_id?: string; cue_start_sec?: number; lane?: number },
+  ) =>
+    req<AudioTake>(`/api/v1/projects/${projectId}/audio/sfx`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }),
+  captionsFromCues: (sceneId: string) =>
+    req<SubtitleTrack>(`/api/v1/scenes/${sceneId}/captions-from-cues`, { method: "POST" }),
+  /** Offline lip-sync timing for one take (take-local frames). */
+  getTakeLipsync: (audioId: string) =>
+    req<TakeLipsync>(`/api/v1/audio/${audioId}/lipsync`),
+  /** Recompute a take's timing (repairs takes stored before M2). */
+  recomputeTakeLipsync: (audioId: string) =>
+    req<TakeLipsync>(`/api/v1/audio/${audioId}/lipsync`, { method: "POST" }),
+  /** Every voiced cue on one scene, mapped to scene seconds. */
+  getSceneLipsync: (sceneId: string) =>
+    req<SceneLipsync>(`/api/v1/scenes/${sceneId}/lipsync`),
   getJob: (jobId: string) => req<Job>(`/api/v1/ai/jobs/${jobId}`),
   cancelJob: (jobId: string) =>
     req<Job>(`/api/v1/ai/jobs/${jobId}/cancel`, { method: "POST" }),
@@ -1142,13 +1285,28 @@ export const api = {
   },
   autoDirect: (
     projectId: string,
-    body?: { seconds?: number; motions?: string[]; scene_id?: string; new_scene?: boolean; page_id?: string },
+    body?: { seconds?: number; motions?: string[]; scene_id?: string; new_scene?: boolean; page_id?: string; preset?: string },
   ) =>
     req<Scene>(`/api/v1/projects/${projectId}/auto-direct`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body ?? {}),
     }),
+  cameraPresets: () =>
+    req<CameraPreset[]>("/api/v1/camera-presets").catch(() => PRESET_FALLBACK),
+  storyboardPreview: (
+    projectId: string,
+    opts?: { page_id?: string; preset?: string; seconds?: number },
+  ) => {
+    const q = new URLSearchParams();
+    if (opts?.page_id) q.set("page_id", opts.page_id);
+    if (opts?.preset) q.set("preset", opts.preset);
+    if (opts?.seconds !== undefined) q.set("seconds", String(opts.seconds));
+    const qs = q.toString();
+    return req<StoryboardShot[]>(
+      `/api/v1/projects/${projectId}/storyboard${qs ? `?${qs}` : ""}`,
+    );
+  },
   getBalance: () => req<Balance>("/api/v1/billing/me"),
   billingPortal: () => req<PortalOut>("/api/v1/billing/portal"),
   billingLedger: () => req<LedgerOut>("/api/v1/billing/ledger"),
@@ -1179,3 +1337,4 @@ export const api = {
       body: JSON.stringify({ amount, reason: "ui grant" }),
     }),
 };
+

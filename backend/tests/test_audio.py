@@ -13,7 +13,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 from starlette.datastructures import Headers
 
-from komaverse.api.ai import get_job
+from komaverse.api.ai import EntityCreate, create_entity, get_job
 from komaverse.api.animate import (
     ClipBatchCreate,
     ClipCreate,
@@ -27,13 +27,18 @@ from komaverse.api.animate import (
 from komaverse.api.audio import (
     CueCreate,
     CuePatch,
+    SfxCreate,
+    SynthCreate,
     TakePatch,
     add_cue,
+    captions_from_cues,
     delete_cue,
     delete_take,
     list_takes,
     patch_cue,
     patch_take,
+    synthesize_sfx,
+    synthesize_take,
     upload_take,
 )
 from komaverse.api.scans import (
@@ -45,7 +50,7 @@ from komaverse.api.scans import (
     upload_page,
 )
 from komaverse.config import settings
-from komaverse.db_models import AudioCueRow, Base, UserRow
+from komaverse.db_models import AudioCueRow, Base, SubtitleTrackRow, UserRow
 from komaverse.renderer import _atempo_chain
 
 
@@ -469,3 +474,152 @@ def test_legacy_cue_without_fades_serializes():
     assert cue.fade_in == 0.0
     assert cue.fade_out == 0.0
     assert cue.rate == 1.0
+
+
+def test_cue_speaker_text_roundtrip(factory, user):
+    project_id, scene_id = _panel_project(factory, user)
+    with factory() as s:
+        take = upload(s, user, project_id)
+    with factory() as s:
+        cue = add_cue(
+            scene_id,
+            CueCreate(audio_id=take.id, speaker="Mina", text="Look out!"),
+            s,
+            user,
+        )
+    assert (cue.speaker, cue.text) == ("Mina", "Look out!")
+    with factory() as s:
+        patched = patch_cue(cue.id, CuePatch(speaker="Jin"), s, user)
+    assert (patched.speaker, patched.text) == ("Jin", "Look out!")
+
+
+def test_synth_routes_entity_voice(factory, user, monkeypatch):
+    from komaverse.api import audio as audio_api
+
+    monkeypatch.setattr(settings, "voice_provider", "free-tts")
+    calls = {}
+
+    def fake_synth(text, *, engine=None, voice=None, lang="en"):
+        calls.update(voice=voice)
+        return b"ID3fake-mp3-bytes"
+
+    monkeypatch.setattr(audio_api, "synthesize_local", fake_synth)
+    monkeypatch.setattr(audio_api, "audio_has_stream", lambda path: True)
+    project_id, scene_id = _panel_project(factory, user)
+    with factory() as s:
+        ent = create_entity(
+            project_id,
+            EntityCreate(kind="character", name="Mina", voice="espeak:en+f3"),
+            s,
+            user,
+        )
+    with factory() as s:
+        synthesize_take(
+            project_id,
+            SynthCreate(
+                text="Run!",
+                entity_id=ent.id,
+                cue_scene_id=scene_id,
+                cue_start_sec=1.0,
+            ),
+            s,
+            user,
+        )
+    assert calls["voice"] == "espeak:en+f3"
+    with factory() as s:
+        cues = get_project(project_id, s, user).scenes[0].cues
+    assert [(c.speaker, c.text) for c in cues] == [("Mina", "Run!")]
+    with factory() as s, pytest.raises(HTTPException) as exc:
+        synthesize_take(
+            project_id, SynthCreate(text="Run!", entity_id="missing"), s, user
+        )
+    assert exc.value.status_code == 404
+
+
+def test_sfx_kinds_and_cue(factory, user):
+    from komaverse.sfx_synth import SFX_KINDS
+
+    assert set(SFX_KINDS) == {"impact", "whoosh", "pop", "sparkle", "roomtone"}
+    project_id, scene_id = _panel_project(factory, user)
+    with factory() as s:
+        take = synthesize_sfx(
+            project_id,
+            SfxCreate(kind="impact", cue_scene_id=scene_id, cue_start_sec=0.5),
+            s,
+            user,
+        )
+    assert take.duration_sec == pytest.approx(0.6)
+    with factory() as s:
+        cues = get_project(project_id, s, user).scenes[0].cues
+    assert len(cues) == 1
+    assert (cues[0].lane, cues[0].start_sec) == (1, 0.5)
+    with factory() as s, pytest.raises(HTTPException) as exc:
+        synthesize_sfx(project_id, SfxCreate(kind="nuke"), s, user)
+    assert exc.value.status_code == 400
+
+
+def test_captions_from_cues(factory, user):
+    from komaverse.subtitles import parse_srt
+
+    project_id, scene_id = _panel_project(factory, user)
+    with factory() as s:
+        take = upload(s, user, project_id, duration=4.0)
+    with factory() as s:
+        add_cue(
+            scene_id,
+            CueCreate(audio_id=take.id, start_sec=1.0, text="Hello there"),
+            s,
+            user,
+        )
+    with factory() as s:
+        track = captions_from_cues(scene_id, s, user)
+    assert track.scene_id == scene_id
+    with factory() as s:
+        stored = s.get(SubtitleTrackRow, track.id)
+        path = settings.media_dir / stored.file_path
+    segments = parse_srt(path.read_text(encoding="utf-8-sig"))
+    assert [seg.text for seg in segments] == ["Hello there"]
+    assert segments[0].start == pytest.approx(1.0)
+    with factory() as s:
+        for cue in get_project(project_id, s, user).scenes[0].cues:
+            delete_cue(cue.id, s, user)
+    with factory() as s, pytest.raises(HTTPException) as exc:
+        captions_from_cues(scene_id, s, user)
+    assert exc.value.status_code == 400
+
+
+def test_ducking_mix_ducks_bed_under_dialogue(factory, user, tmp_path):
+    import imageio_ffmpeg
+
+    from komaverse.renderer import mix_audio_tracks
+    from komaverse.sfx_synth import render_sfx
+
+    exe = imageio_ffmpeg.get_ffmpeg_exe()
+    silent = tmp_path / "silent.mp4"
+    subprocess.run(
+        [exe, "-y", "-f", "lavfi", "-i", "color=c=black:s=64x64:d=1",
+         "-pix_fmt", "yuv420p", str(silent)],
+        capture_output=True,
+        check=True,
+    )
+    dlg_wav = tmp_path / "dlg.wav"
+    bed_wav = tmp_path / "bed.wav"
+    dlg_wav.write_bytes(render_sfx("pop")[0])
+    bed_wav.write_bytes(render_sfx("roomtone")[0])
+    dialogue = {
+        "path": dlg_wav, "start_sec": 0.0, "offset_sec": 0.0, "volume": 1.0,
+        "fade_in": 0.0, "fade_out": 0.0, "rate": 1.0, "end_sec": 0.18, "lane": 0,
+    }
+    bed = {
+        "path": bed_wav, "start_sec": 0.0, "offset_sec": 0.0, "volume": 1.0,
+        "fade_in": 0.0, "fade_out": 0.0, "rate": 1.0, "end_sec": 1.0, "lane": 1,
+    }
+    dest = tmp_path / "ducked.mp4"
+    mix_audio_tracks(silent, [dialogue, bed], 1.0, dest)
+    assert dest.stat().st_size > 0
+    assert "Duration: 00:00:01" in ffmpeg_streams(dest)
+    # Bed-only mix keeps the legacy direct path.
+    solo = tmp_path / "solo.mp4"
+    mix_audio_tracks(silent, [bed], 1.0, solo)
+    assert solo.stat().st_size > 0
+

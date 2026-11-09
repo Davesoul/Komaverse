@@ -2029,3 +2029,68 @@ def test_agent_status_avoids_full_tree(factory, user, monkeypatch):
     with factory() as s:
         out = agent_mod.tool_status(s, user, pid)
     assert "'Agent'" in out and "pages" in out
+
+def test_camera_presets_cover_renderer_motions():
+    """Every preset cycles only motions the renderer understands."""
+    from komaverse.api.animate import CAMERA_PRESETS, MOTIONS
+
+    assert set(CAMERA_PRESETS) == {"manga-rtl", "manga-ltr", "slow-burn", "action"}
+    for pid, preset in CAMERA_PRESETS.items():
+        assert preset["label"], pid
+        assert len(preset["motions"]) > 0, pid
+        assert all(m in MOTIONS for m in preset["motions"]), pid
+
+
+def seed_panels(factory, user):
+    from komaverse.api.scans import DetectRequest, detect_panels, get_project
+
+    pid = seed_project(factory, user)
+    with factory() as s:
+        page = get_project(pid, s, user).pages[0]
+    with factory() as s:
+        detected = detect_panels(
+            page.id, DetectRequest(detector="heuristic", confirm=True), s, user
+        )
+    assert len(detected.panels) >= 2
+    return pid, detected.panels
+
+
+def test_auto_direct_preset_cycles_motions(factory, user):
+    from komaverse import agent as agent_mod
+    from komaverse.api.animate import CAMERA_PRESETS, list_scenes
+
+    pid, panels = seed_panels(factory, user)
+    with factory() as s:
+        scene, added = agent_mod.auto_direct_core(s, user, pid, preset="action")
+    assert added == len(panels)
+    cycle = CAMERA_PRESETS["action"]["motions"]
+    with factory() as s:
+        clips = sorted(list_scenes(pid, s, user)[0].clips, key=lambda c: c.order)
+    assert [c.motion for c in clips] == [cycle[i % len(cycle)] for i in range(len(panels))]
+
+
+def test_auto_direct_unknown_preset_rejected(factory, user):
+    from fastapi import HTTPException
+
+    from komaverse import agent as agent_mod
+
+    pid, _ = seed_panels(factory, user)
+    with factory() as s, pytest.raises(HTTPException):
+        agent_mod.auto_direct_core(s, user, pid, preset="nope")
+
+
+def test_storyboard_preview_matches_send(factory, user):
+    from fastapi import HTTPException
+
+    from komaverse import agent as agent_mod
+    from komaverse.api.animate import CAMERA_PRESETS
+
+    pid, panels = seed_panels(factory, user)
+    with factory() as s:
+        shots = agent_mod.storyboard_preview(s, user, pid, preset="manga-ltr")
+    cycle = CAMERA_PRESETS["manga-ltr"]["motions"]
+    assert [sh.panel_id for sh in shots] == [p.id for p in panels]
+    assert [sh.motion for sh in shots] == [cycle[i % len(cycle)] for i in range(len(panels))]
+    assert all(sh.duration == 2.0 for sh in shots)
+    with factory() as s, pytest.raises(HTTPException):
+        agent_mod.storyboard_preview(s, user, pid, preset="nope")

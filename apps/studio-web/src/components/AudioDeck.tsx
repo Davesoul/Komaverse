@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { api, mediaUrl, type AudioTake, type ClonedVoice, type Scene } from "../api";
+import { api, mediaUrl, type AudioTake, type ClonedVoice, type Entity, type Scene, type SubtitleTrack } from "../api";
 import { probeDuration } from "../lib/audio/peaks";
 import { VOICEOVER_COUNTDOWN_SECS, tickCountdown } from "../lib/audio/voiceover";
 import { Btn, BusyDots, IconBtn, SectionTitle, SelectInput, TextInput } from "./ui";
@@ -36,6 +36,8 @@ interface RecState {
 export function AudioDeck({
   projectId,
   scene,
+  entities = [],
+  onSubtitles,
   takes,
   playhead,
   onTakes,
@@ -44,6 +46,10 @@ export function AudioDeck({
   notify,
 }: {
   projectId: string;
+  /** Cast list for per-character voices. */
+  entities?: Entity[];
+  /** RenderPage owns subtitle state; generated captions land here. */
+  onSubtitles: (track: SubtitleTrack) => void;
   scene: Scene | null;
   takes: AudioTake[];
   /** Current preview position: quick-cues and voiceovers land here. */
@@ -68,6 +74,9 @@ export function AudioDeck({
   const [genText, setGenText] = useState("");
   const [genBusy, setGenBusy] = useState(false);
   const [genCue, setGenCue] = useState(true);
+  const [genSpeaker, setGenSpeaker] = useState("");
+  const [sfxBusy, setSfxBusy] = useState(false);
+  const [capBusy, setCapBusy] = useState(false);
   const [clones, setClones] = useState<ClonedVoice[]>([]);
   const [cloneName, setCloneName] = useState("");
   const [cloneBusy, setCloneBusy] = useState(false);
@@ -377,14 +386,53 @@ export function AudioDeck({
     if (fileRef.current) fileRef.current.value = "";
   };
 
+  const SFX_KINDS = ["impact", "whoosh", "pop", "sparkle", "roomtone"];
+
+  const synthSfx = async (kind: string) => {
+    if (!scene || sfxBusy) return;
+    setSfxBusy(true);
+    try {
+      const take = await api.synthesizeSfx(projectId, {
+        kind,
+        cue_scene_id: scene.id,
+        cue_start_sec: Math.max(playhead, 0),
+        lane: 1,
+      });
+      onTakes();
+      onScene();
+      scrollToLane();
+      notify(`“${take.name}” cued on lane 1 at ${Math.max(playhead, 0).toFixed(1)}s.`);
+    } catch (e) {
+      notify(`SFX failed: ${(e as Error).message}`);
+    } finally {
+      setSfxBusy(false);
+    }
+  };
+
+  const genCaptions = async () => {
+    if (!scene || capBusy) return;
+    setCapBusy(true);
+    try {
+      const track = await api.captionsFromCues(scene.id);
+      onSubtitles(track);
+      notify(`Captions written — ${track.segments.length} lines from cued dialogue.`);
+    } catch (e) {
+      notify(`Captions failed: ${(e as Error).message}`);
+    } finally {
+      setCapBusy(false);
+    }
+  };
+
   const generateVoice = async () => {
     const text = genText.trim();
     if (!text || genBusy) return;
     setGenBusy(true);
     try {
+      const speakerEntity = entities.find((e) => e.name === genSpeaker);
       const take = await api.synthesizeVoice(projectId, {
         text,
         cue_scene_id: genCue && scene ? scene.id : undefined,
+        entity_id: speakerEntity?.id,
         cue_start_sec: Math.max(playhead, 0),
       });
       setGenText("");
@@ -528,6 +576,20 @@ export function AudioDeck({
           style={{ width: "100%", resize: "vertical", marginBottom: 6 }}
         />
         <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          <SelectInput
+            value={genSpeaker}
+            onChange={(e) => setGenSpeaker(e.target.value)}
+            aria-label="Speaking character"
+            title="Speak as a cast member (uses their saved voice) or Narrator"
+            style={{ maxWidth: 150 }}
+          >
+            <option value="">Narrator</option>
+            {entities.map((e) => (
+              <option key={e.id} value={e.name}>
+                {e.name}
+              </option>
+            ))}
+          </SelectInput>
           <Btn small disabled={genBusy || !genText.trim()} onClick={() => void generateVoice()}>
             {genBusy ? (
               <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
@@ -549,6 +611,21 @@ export function AudioDeck({
             Cue at playhead{scene ? "" : " (pick a scene first)"}
           </label>
         </div>
+      <div style={{ marginBottom: 8, border: "1px solid var(--kv-border)", borderRadius: 6, padding: 8 }}>
+        <div style={{ fontSize: 12, color: "var(--kv-muted)", marginBottom: 6 }}>
+          Sound effects — tiny offline synth, no downloads. Cued on lane 1 at the playhead (ducks under dialogue).
+        </div>
+        <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 6 }}>
+          {SFX_KINDS.map((k) => (
+            <Btn key={k} small disabled={sfxBusy || !scene} onClick={() => void synthSfx(k)} title={`Synthesize ${k} and cue it at the playhead`}>
+              {sfxBusy ? '...' : k}
+            </Btn>
+          ))}
+        </div>
+        <Btn small disabled={capBusy || !scene || scene.cues.length === 0} onClick={() => void genCaptions()} title="Build a subtitle track from the cued dialogue lines">
+          {capBusy ? "Writing…" : "Captions from cues"}
+        </Btn>
+      </div>
       </div>
 
       <div style={{ marginBottom: 8, border: "1px solid var(--kv-border)", borderRadius: 6, padding: 8 }}>
@@ -769,6 +846,8 @@ export function AudioDeck({
                 <div key={c.id} style={{ display: "flex", gap: 6, alignItems: "center", fontSize: 13 }}>
                   <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis" }}>
                     {take?.name || "Missing take"}
+                    {c.speaker ? ` — ${c.speaker}` : ""}
+                    {c.text ? ` “${c.text}”` : ""}
                   </span>
                   <span className="kv-nums" style={{ color: "var(--kv-muted)" }}>
                     @{c.start_sec.toFixed(1)}s ×{c.volume.toFixed(1)}
@@ -869,3 +948,4 @@ export function AudioDeck({
     </div>
   );
 }
+

@@ -214,6 +214,15 @@ class EntityCreate(BaseModel):
     kind: str = "character"  # character | field | prop
     name: str = ""
     anchor: str = ""
+    voice: str = ""
+    frame_id: str | None = None
+
+
+class EntityPatch(BaseModel):
+    name: str | None = None
+    anchor: str | None = None
+    voice: str | None = None
+    frame_id: str | None = None
     frame_id: str | None = None
 
 
@@ -1167,11 +1176,42 @@ def create_entity(
         kind=body.kind,
         name=name[:80],
         anchor=body.anchor.strip(),
+        voice=body.voice.strip(),
         frame_id=body.frame_id,
     )
     session.add(row)
     session.commit()
     session.refresh(row)
+    return row.to_schema()
+
+
+@router.patch("/entities/{entity_id}", response_model=Entity)
+def patch_entity(
+    entity_id: str,
+    body: EntityPatch,
+    session: Session = Depends(get_session),
+    user: UserRow = Depends(get_current_user),
+):
+    """Rename, re-anchor, re-voice, or re-snapshot a cast member."""
+    row = session.get(EntityRow, entity_id)
+    if row is None or row.user_id != user.id:
+        raise HTTPException(404, "entity not found")
+    if body.name is not None:
+        name = body.name.strip()
+        if not name:
+            raise HTTPException(400, "entity name is required")
+        row.name = name[:80]
+    if body.anchor is not None:
+        row.anchor = body.anchor.strip()
+    if body.voice is not None:
+        row.voice = body.voice.strip()
+    if body.frame_id is not None:
+        if body.frame_id:
+            frame = session.get(FrameRow, body.frame_id)
+            if frame is None or frame.project_id != row.project_id:
+                raise HTTPException(400, f"unknown frame: {body.frame_id}")
+        row.frame_id = body.frame_id or None
+    session.commit()
     return row.to_schema()
 
 

@@ -21,8 +21,9 @@ from komaverse.api.usage import record_usage
 from komaverse.auth import ensure_owner, get_current_user, own_project
 from komaverse.config import settings
 from komaverse.db import get_session
-from komaverse.db_models import AudioCueRow, AudioTakeRow, SceneRow, UserRow
-from komaverse.models import AudioCue, AudioTake
+from komaverse.db_models import AudioCueRow, AudioTakeRow, EntityRow, SceneRow, UserRow
+from komaverse.lipsync import analyze_wav_bytes, procedural_visemes
+from komaverse.models import AudioCue, AudioTake, SubtitleTrack, VisemeFrame
 from komaverse.renderer import audio_has_stream, transcode_to_wav
 from komaverse.studio_settings import provider_for
 
@@ -32,6 +33,48 @@ AUDIO_EXTS = {
     ".wav", ".mp3", ".m4a", ".ogg", ".oga", ".opus",
     ".webm", ".mp4", ".aac", ".flac",
 }
+
+def _take_lipsync_json(data: bytes, duration_sec: float, text: str = "", suffix: str = ".bin") -> str:
+    """Offline lip-sync timing for take bytes (never raises, never bills)."""
+
+    import json
+
+    from komaverse.lipsync import FRAME_SEC
+
+    try:
+        frames = analyze_wav_bytes(transcode_to_wav(data, suffix))
+    except Exception:
+        frames = []
+    if not frames:
+        dur = duration_sec if duration_sec > 0 else 2.0
+        frames = procedural_visemes(dur, text, FRAME_SEC)
+    return json.dumps(frames)
+
+
+class LipsyncTrack(BaseModel):
+    """Take-local viseme timing for one take (10 frames/sec)."""
+
+    take_id: str
+    frames: list[VisemeFrame] = []
+
+
+class CueLipsync(BaseModel):
+    """Cue-mapped viseme timing on the scene timeline."""
+
+    cue_id: str
+    audio_id: str
+    start_sec: float = 0.0
+    frames: list[VisemeFrame] = []
+
+
+class SceneLipsync(BaseModel):
+    """Every voiced cue on one scene, mapped to scene time."""
+
+    scene_id: str
+    cues: list[CueLipsync] = []
+
+
+
 MAX_TAKE_SEC = 3600.0
 MAX_VOLUME = 2.0
 
@@ -50,6 +93,8 @@ class CueCreate(BaseModel):
     fade_in: float = 0.0
     fade_out: float = 0.0
     rate: float = 1.0
+    speaker: str = ""
+    text: str = ""
 
 
 class CuePatch(BaseModel):
@@ -61,6 +106,8 @@ class CuePatch(BaseModel):
     fade_in: float | None = None
     fade_out: float | None = None
     rate: float | None = None
+    speaker: str | None = None
+    text: str | None = None
 
 
 class TranscriptTurn(BaseModel):
@@ -83,7 +130,8 @@ class SynthCreate(BaseModel):
     voice is provider-shaped and optional (blank = Brain default):
     an ElevenLabs voice id, or free-tts "engine:voice". engine/lang
     override the free-tts call only. cue_scene_id cues the new take at
-    cue_start_sec in one round trip.
+    cue_start_sec in one round trip. entity_id speaks with a cast
+    member's saved voice and tags the cue with its name and text.
     """
 
     text: str = ""
@@ -92,6 +140,7 @@ class SynthCreate(BaseModel):
     lang: str = "en"
     cue_scene_id: str | None = None
     cue_start_sec: float = 0.0
+    entity_id: str | None = None
 
 
 MAX_SYNTH_CHARS = 2000
@@ -174,6 +223,9 @@ def upload_take(
         url=url,
         mime=file.content_type or "",
         duration_sec=min(max(duration_sec, 0.0), MAX_TAKE_SEC),
+        lipsync_json=_take_lipsync_json(
+            data, min(max(duration_sec, 0.0), MAX_TAKE_SEC), suffix=ext or ".bin"
+        ),
     )
     session.add(row)
     session.commit()
@@ -320,7 +372,17 @@ def synthesize_take(
     # Blank voice = the Brain voice row (the Generate box sends none): fall
     # back to the saved per-provider voice so "Use" on a clone actually
     # speaks with it instead of silently returning to the default voice.
-    voice = (body.voice or "").strip() or None
+    # Cast voice routing: an explicit voice wins, then the entity's
+    # saved voice, then the Brain default below.
+    if body.entity_id:
+        ent = session.get(EntityRow, body.entity_id)
+        if ent is None or ent.project_id != project.id or ent.user_id != user.id:
+            raise HTTPException(404, "voice entity not found in this project")
+        entity_voice = (ent.voice or "").strip() or None
+        entity_name = ent.name
+    else:
+        entity_voice, entity_name = None, ""
+    voice = (body.voice or "").strip() or entity_voice or None
     if voice is None:
         voice = (
             settings.elevenlabs_voice_model
@@ -377,6 +439,7 @@ def synthesize_take(
         url=url,
         mime="audio/mpeg",
         duration_sec=0.0,
+        lipsync_json=_take_lipsync_json(data, 0.0, text, suffix=".mp3"),
     )
     session.add(row)
     session.commit()
@@ -394,10 +457,118 @@ def synthesize_take(
                 scene_id=scene.id,
                 audio_id=row.id,
                 start_sec=body.cue_start_sec,
+                speaker=entity_name,
+                text=text,
             )
         )
         session.commit()
     return row.to_schema()
+
+
+class SfxCreate(BaseModel):
+    kind: str = "impact"
+    cue_scene_id: str | None = None
+    cue_start_sec: float = 0.0
+    lane: int = 1
+
+
+@router.post(
+    "/projects/{project_id}/audio/sfx",
+    response_model=AudioTake,
+    status_code=201,
+)
+def synthesize_sfx(
+    project_id: str,
+    body: SfxCreate,
+    session: Session = Depends(get_session),
+    user: UserRow = Depends(get_current_user),
+):
+    """Procedural SFX take (offline synth, no assets or licenses).
+
+    Kinds follow the anime mix: impact hits, whoosh risers, pop blips,
+    sparkle arpeggios, roomtone beds. cue_scene_id cues the new take
+    at cue_start_sec in one round trip (lane 1+ ducks under dialogue).
+    """
+    from komaverse.sfx_synth import SFX_KINDS, render_sfx
+
+    project = own_project(session, user, project_id)
+    kind = (body.kind or "").strip().lower()
+    if kind not in SFX_KINDS:
+        raise HTTPException(400, f"unknown sfx kind: {body.kind}")
+    lane = body.lane if isinstance(body.lane, int) else 1
+    data, duration = render_sfx(kind)
+    try:
+        storage.check_quota(project.id, len(data))
+    except storage.QuotaExceededError as exc:
+        raise HTTPException(413, str(exc)) from None
+    rel, url = storage.save_upload(project.id, f"sfx-{kind}.wav", data)
+    row = AudioTakeRow(
+        project_id=project.id,
+        name=f"SFX: {kind}",
+        file_path=rel,
+        url=url,
+        mime="audio/wav",
+        duration_sec=duration,
+        lipsync_json=_take_lipsync_json(data, duration, kind, suffix=".wav"),
+    )
+    session.add(row)
+    session.commit()
+    if body.cue_scene_id:
+        scene = session.get(SceneRow, body.cue_scene_id)
+        if scene is None or scene.project_id != project.id:
+            raise HTTPException(400, "cue scene belongs to another project")
+        ensure_owner(session, user, scene.project_id)
+        _check_cue_timing(
+            body.cue_start_sec, 0.0, None, lane, 1.0, 0.0, 0.0, duration,
+        )
+        session.add(
+            AudioCueRow(
+                scene_id=scene.id,
+                audio_id=row.id,
+                start_sec=body.cue_start_sec,
+                lane=lane,
+            )
+        )
+        session.commit()
+    return row.to_schema()
+
+
+@router.post("/scenes/{scene_id}/captions-from-cues", response_model=SubtitleTrack)
+def captions_from_cues(
+    scene_id: str,
+    session: Session = Depends(get_session),
+    user: UserRow = Depends(get_current_user),
+):
+    """Caption track from voiced dialogue cues (karaoke sync).
+
+    Each cue carrying text becomes one segment timed from its start;
+    the end uses the take duration when known, else a reading-speed
+    estimate, capped by the next cue. Replaces lane 0 of the scene.
+    """
+    from komaverse.api.subtitles import save_subtitles_track
+    from komaverse.subtitles import SubSegment, segments_to_srt
+
+    scene = session.get(SceneRow, scene_id)
+    if scene is None:
+        raise HTTPException(404, "scene not found")
+    ensure_owner(session, user, scene.project_id)
+    spoken = [
+        cue for cue in sorted(scene.cues, key=lambda c: c.start_sec)
+        if (cue.text or "").strip()
+    ]
+    if not spoken:
+        raise HTTPException(400, "no dialogue cues to caption")
+    segments: list[SubSegment] = []
+    for i, cue in enumerate(spoken):
+        text = (cue.text or "").strip()
+        known = cue.audio.duration_sec if cue.audio is not None else 0.0
+        guess = max(1.2, len(text) / 14.0)
+        end = cue.start_sec + (known if known > 0 else guess)
+        if i + 1 < len(spoken):
+            end = min(end, max(spoken[i + 1].start_sec, cue.start_sec + 0.5))
+        segments.append(SubSegment(start=cue.start_sec, end=end, text=text))
+    data = segments_to_srt(segments).encode("utf-8")
+    return save_subtitles_track(session, user, scene_id, data)
 
 
 @router.post("/scenes/{scene_id}/cues", response_model=AudioCue, status_code=201)
@@ -429,6 +600,8 @@ def add_cue(
         fade_in=body.fade_in,
         fade_out=body.fade_out,
         rate=body.rate,
+        speaker=body.speaker,
+        text=body.text,
     )
     session.add(row)
     session.commit()
@@ -463,6 +636,10 @@ def patch_cue(
     row.lane = lane
     row.volume, row.fade_in, row.fade_out = volume, fade_in, fade_out
     row.rate = rate
+    if body.speaker is not None:
+        row.speaker = body.speaker
+    if body.text is not None:
+        row.text = body.text
     session.commit()
     return row.to_schema()
 
@@ -479,3 +656,55 @@ def delete_cue(
     ensure_owner(session, user, row.scene.project_id)
     session.delete(row)
     session.commit()
+
+
+@router.get("/audio/{audio_id}/lipsync", response_model=LipsyncTrack)
+def get_take_lipsync(
+    audio_id: str,
+    session: Session = Depends(get_session),
+    user: UserRow = Depends(get_current_user),
+):
+    """Take-local viseme timing (10 frames/sec) for the renderer/frontend."""
+    row = _get_take(session, user, audio_id)
+    return LipsyncTrack(take_id=row.id, frames=row.to_schema().lipsync)
+
+
+@router.post("/audio/{audio_id}/lipsync", response_model=LipsyncTrack)
+def recompute_take_lipsync(
+    audio_id: str,
+    session: Session = Depends(get_session),
+    user: UserRow = Depends(get_current_user),
+):
+    """Re-derive timing from the stored file (repairs legacy takes)."""
+    row = _get_take(session, user, audio_id)
+    try:
+        data = storage.resolve(row.file_path).read_bytes()
+    except OSError as exc:
+        raise HTTPException(400, f"cannot read take audio: {exc}") from None
+    row.lipsync_json = _take_lipsync_json(
+        data, row.duration_sec or 0.0, suffix=Path(row.file_path).suffix or ".bin"
+    )
+    session.commit()
+    return LipsyncTrack(take_id=row.id, frames=row.to_schema().lipsync)
+
+
+@router.get("/scenes/{scene_id}/lipsync", response_model=SceneLipsync)
+def scene_lipsync(
+    scene_id: str,
+    session: Session = Depends(get_session),
+    user: UserRow = Depends(get_current_user),
+):
+    """Every cued take on one scene, mapped to scene time."""
+    scene = _get_scene(session, user, scene_id)
+    cues = []
+    for cue in sorted(scene.cues, key=lambda c: c.start_sec):
+        schema = cue.to_schema()
+        cues.append(
+            CueLipsync(
+                cue_id=cue.id,
+                audio_id=cue.audio_id,
+                start_sec=cue.start_sec,
+                frames=schema.lipsync,
+            )
+        )
+    return SceneLipsync(scene_id=scene.id, cues=cues)

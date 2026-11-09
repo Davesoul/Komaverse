@@ -139,7 +139,16 @@ def init_db() -> None:
         "ALTER TABLE chat_turns ADD COLUMN thread_id VARCHAR(12)",
         "ALTER TABLE jobs ADD COLUMN cost_credits INTEGER",
         "ALTER TABLE users ADD COLUMN stripe_customer_id VARCHAR(200)",
+        "ALTER TABLE audio_cues ADD COLUMN speaker VARCHAR(200) DEFAULT ''",
+        "ALTER TABLE audio_cues ADD COLUMN text TEXT DEFAULT ''",
+        "ALTER TABLE entities ADD COLUMN voice VARCHAR(200) DEFAULT ''",
         "ALTER TABLE jobs ADD COLUMN used_own_key BOOLEAN",
+        "ALTER TABLE audio_takes ADD COLUMN lipsync_json TEXT",
+        "ALTER TABLE export_reports ADD COLUMN lipsync_url VARCHAR(500)",
+        "ALTER TABLE layers ADD COLUMN kind VARCHAR(16)",
+        "ALTER TABLE layers ADD COLUMN vector_data TEXT",
+        "ALTER TABLE frames ADD COLUMN guides_visible BOOLEAN DEFAULT 0",
+        "ALTER TABLE frames ADD COLUMN guides_json TEXT DEFAULT '[]'",
     ):
         try:
             with engine.begin() as conn:

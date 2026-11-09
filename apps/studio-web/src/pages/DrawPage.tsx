@@ -393,6 +393,8 @@ export default function DrawPage() {
     height: m.height,
     layers: [],
     sequence_id: sequenceId,
+    guides_visible: false,
+    guides: [],
   });
   // Fetch full pixels for one frame unless this session already holds
   // them (or an unsaved stash does). Merges into `frames` so the engine
@@ -817,6 +819,7 @@ export default function DrawPage() {
     const layers = stashRef.current.get(frameId) ?? target.layers;
     engine
       .load(layers)
+      .then(() => engine.setGuides(target.guides_visible ?? false, target.guides ?? []))
       .catch((e) => setNotice(`Some layers failed to load: ${(e as Error).message}`))
       .finally(() => {
         engineRef.current = engine;
@@ -1598,7 +1601,15 @@ export default function DrawPage() {
         list.map(async (f) => {
           if (loadedFullRef.current.has(f.id)) return f;
           const stashed = stashRef.current.get(f.id);
-          if (stashed) return { ...f, layers: stashed };
+          if (stashed)
+            return {
+              ...f,
+              layers: stashed.map((s) => ({
+                ...s,
+                kind: s.kind ?? "raster",
+                vector_data: s.vector_data ?? null,
+              })),
+            };
           const full = await api.getFrame(f.id);
           return full;
         }),
@@ -1770,6 +1781,47 @@ export default function DrawPage() {
     refreshLayers();
   };
 
+  const [svgOpen, setSvgOpen] = useState(false);
+  const [svgText, setSvgText] = useState("");
+  const [guideKind, setGuideKind] = useState("thirds");
+
+  const doImportSvg = async () => {
+    const eng = engineRef.current;
+    const target = frames.find((f) => f.id === frameId);
+    if (!eng || !target || !svgText.trim()) return;
+    try {
+      await api.importSvgLayer(target.id, { name: "Trace", svg: svgText });
+      const full = await api.getFrame(target.id);
+      setFrames((prev) => prev.map((f) => (f.id === full.id ? full : f)));
+      await eng.load(full.layers);
+      eng.setGuides(full.guides_visible, full.guides);
+      setLayers(eng.getLayers());
+      setSvgText("");
+      setSvgOpen(false);
+      setNotice("SVG imported as a vector layer.");
+    } catch (e) {
+      setNotice(`SVG import failed: ${(e as Error).message}`);
+    }
+  };
+
+  const doToggleGuides = async (on: boolean, kind = guideKind) => {
+    const eng = engineRef.current;
+    const target = frames.find((f) => f.id === frameId);
+    if (!eng || !target) return;
+    try {
+      const res = await api.putGuides(target.id, {
+        guides_visible: on,
+        guides: on ? [{ kind }] : target.guides,
+      });
+      setFrames((prev) => prev.map((f) => (f.id === res.id ? res : f)));
+      eng.setGuides(res.guides_visible, res.guides);
+      if (kind !== guideKind) setGuideKind(kind);
+      setNotice(on ? "Drawing guides on." : "Drawing guides off.");
+    } catch (e) {
+      setNotice(`Guides failed: ${(e as Error).message}`);
+    }
+  };
+
   const frame = frames.find((f) => f.id === frameId);
   const activeLayer = layers.find((l) => l.id === engineRef.current?.activeId);
   const cursor = playing
@@ -1934,7 +1986,7 @@ export default function DrawPage() {
                         setRenameValue(l.name);
                       }}
                     >
-                      {l.visible ? "◉" : "○"} {l.locked ? "[locked] " : ""}{l.name}
+                      {l.visible ? "◉" : "○"} {l.locked ? "[locked] " : ""}{l.kind === "vector" ? "⬡ " : ""}{l.name}
                     </Btn>
                   )}
                   <IconBtn
@@ -1999,6 +2051,15 @@ export default function DrawPage() {
                 }}
               >
                 ＋
+              </IconBtn>
+              <IconBtn
+                label="Add vector layer"
+                onClick={() => {
+                  engineRef.current?.addVectorLayer(`Vector ${layers.length + 1}`);
+                  refreshLayers();
+                }}
+              >
+                ⬡
               </IconBtn>
               <IconBtn
                 disabled={!activeLayer}
@@ -2076,6 +2137,50 @@ export default function DrawPage() {
                 ×
               </IconBtn>
             </div>
+          </div>
+        )}
+
+        {frame && (
+          <div>
+            <SectionTitle>Vector &amp; guides</SectionTitle>
+            <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 8 }}>
+              <Btn small active={svgOpen} onClick={() => setSvgOpen(!svgOpen)} title="Trace-import SVG path data as an editable vector layer">
+                Import SVG…
+              </Btn>
+              <Btn small active={frame.guides_visible} onClick={() => void doToggleGuides(!frame.guides_visible)} title="Toggle the drawing-guides overlay">
+                Guides {frame.guides_visible ? "on" : "off"}
+              </Btn>
+              <SelectInput
+                value={frame.guides_visible && frame.guides.length > 0 ? frame.guides[0].kind : guideKind}
+                onChange={(e) => {
+                  setGuideKind(e.target.value);
+                  if (frame.guides_visible) void doToggleGuides(true, e.target.value);
+                }}
+                aria-label="Guide preset"
+                title="Guide preset"
+                style={{ flex: 1, minWidth: 0 }}
+              >
+                <option value="thirds">Thirds</option>
+                <option value="center">Center</option>
+                <option value="diagonal">Diagonal</option>
+                <option value="perspective">Perspective</option>
+              </SelectInput>
+            </div>
+            {svgOpen && (
+              <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 8 }}>
+                <textarea
+                  value={svgText}
+                  onChange={(e) => setSvgText(e.target.value)}
+                  placeholder='<svg><path d="M10 10 L90 90"/></svg>'
+                  rows={3}
+                  aria-label="SVG to import"
+                  style={{ width: "100%", boxSizing: "border-box", fontFamily: "monospace", fontSize: 12 }}
+                />
+                <Btn small disabled={!svgText.trim()} onClick={() => void doImportSvg()} title="Import as a vector layer">
+                  Import as vector layer
+                </Btn>
+              </div>
+            )}
           </div>
         )}
 

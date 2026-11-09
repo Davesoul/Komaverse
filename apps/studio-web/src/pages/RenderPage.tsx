@@ -2,8 +2,10 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   api,
   mediaUrl,
+  PRESET_FALLBACK,
   type AiModelCatalog,
   type AudioTake,
+  type CameraPreset,
   type Clip,
   type DrawFrame,
   type Entity,
@@ -14,6 +16,7 @@ import {
   type ProjectView,
   type Scene,
   type Sequence,
+  type SceneLipsync,
   type SubtitleTrack,
 } from "../api";
 import {
@@ -39,8 +42,28 @@ import {
 import { AudioDeck } from "../components/AudioDeck";
 import { Magnet } from "../components/Magnet";
 import { PreviewPlayer, type PreviewClip, type PreviewOverlay } from "../components/PreviewPlayer";
+import { LipsyncMouth } from "../components/LipsyncMouth";
+import { activeLipsyncCue } from "../components/lipsync";
 import { Timeline, fmtTC, type TimelineCueInfo } from "../components/Timeline";
 import { getCurrentProject, getCurrentScene, getCurrentSequence, gotoTab, setCurrentProject, setCurrentScene, setCurrentSequence, setDrawFrame } from "../lib/studio";
+
+const lockedKey = (projectId: string) => `komaverse.lockedEntities.${projectId}`;
+function loadLockedEntities(projectId: string): string[] {
+  try {
+    const raw = localStorage.getItem(lockedKey(projectId));
+    const arr = raw ? JSON.parse(raw) : [];
+    return Array.isArray(arr) ? arr.filter((x) => typeof x === "string") : [];
+  } catch {
+    return [];
+  }
+}
+function saveLockedEntities(projectId: string, ids: string[]) {
+  try {
+    localStorage.setItem(lockedKey(projectId), JSON.stringify(ids));
+  } catch {
+    /* private mode: locks stay session-local */
+  }
+}
 
 const MOTIONS = ["none", "zoom-in", "zoom-out", "pan-left", "pan-right", "pan-up", "pan-down", "drift"];
 const TRANSITIONS = ["none", "crossfade", "fade-black", "fade-white", "wipe-left", "wipe-right", "push-left", "impact"];
@@ -352,6 +375,7 @@ export default function RenderPage() {
   const [newEntName, setNewEntName] = useState("");
   const [newEntKind, setNewEntKind] = useState("character");
   const [newEntAnchor, setNewEntAnchor] = useState("");
+  const [newEntVoice, setNewEntVoice] = useState("");
   const [newEntFrame, setNewEntFrame] = useState("");
   const [showNewEnt, setShowNewEnt] = useState(false);
   const [playhead, setPlayhead] = useState(0);
@@ -360,6 +384,8 @@ export default function RenderPage() {
   const [subtitles, setSubtitles] = useState<SubtitleTrack | null>(null);
   /** Second subtitle lane (S2, top captions). */
   const [subtitles2, setSubtitles2] = useState<SubtitleTrack | null>(null);
+  /** Lip-sync timing for the active scene (scene-mapped cue frames). */
+  const [sceneLipsync, setSceneLipsync] = useState<SceneLipsync | null>(null);
   /** Which lane the subtitle uploader targets next. */
   const [subLane, setSubLane] = useState(0);
   const [subBusy, setSubBusy] = useState(false);
@@ -476,6 +502,8 @@ export default function RenderPage() {
           height: m.height,
           layers: [],
           sequence_id: s.id,
+          guides_visible: false,
+          guides: [],
         })),
       ),
     );
@@ -491,7 +519,15 @@ export default function RenderPage() {
       .listEntities(projectId)
       .then((ents) => {
         setEntities(ents);
-        setEntityIds((ids) => ids.filter((id) => ents.some((e) => e.id === id)));
+        // Locked cast survives reloads: stored ids first, then the rest.
+        setEntityIds((ids) => {
+          const valid = new Set(ents.map((e) => e.id));
+          const locked = loadLockedEntities(projectId).filter((id) => valid.has(id));
+          const rest = ids.filter((id) => valid.has(id) && !locked.includes(id));
+          const next = [...locked, ...rest];
+          saveLockedEntities(projectId, next);
+          return next;
+        });
       })
       .catch(() => {});
     const stored = getCurrentScene(projectId);
@@ -750,10 +786,30 @@ export default function RenderPage() {
     api.getSubtitles(sceneId, 1).then(setSubtitles2).catch(() => setSubtitles2(null));
   }, [sceneId]);
 
+  // Lip-sync timing follows the active scene; missing tracks (older
+  // backends, silent scenes) fail open to no mouth indicator.
+  useEffect(() => {
+    if (!sceneId) {
+      setSceneLipsync(null);
+      return;
+    }
+    api.getSceneLipsync(sceneId).then(setSceneLipsync).catch(() => setSceneLipsync(null));
+  }, [sceneId]);
+
   const caption =
     subtitles?.segments.find((s) => playhead >= s.start_sec && playhead < s.end_sec)?.text ?? "";
   const caption2 =
     subtitles2?.segments.find((s) => playhead >= s.start_sec && playhead < s.end_sec)?.text ?? "";
+
+  // Viseme under the playhead: scene-mapped cue frames make this a
+  // direct time lookup; the speaker name comes from the timeline cue.
+  const lipActive = useMemo(
+    () => activeLipsyncCue(sceneLipsync?.cues ?? [], playhead),
+    [sceneLipsync, playhead],
+  );
+  const lipSpeaker = lipActive
+    ? (scene?.cues.find((c) => c.id === lipActive.cue.cue_id)?.speaker || null)
+    : null;
 
   const startVoiceover = useCallback(
     (atTime: number) => {
@@ -948,6 +1004,12 @@ export default function RenderPage() {
 
   // Auto-direct asks for its destination: current timeline or a fresh one.
   const [autoDirectOpen, setAutoDirectOpen] = useState(false);
+  const [autoPreset, setAutoPreset] = useState("manga-rtl");
+  const [autoPresets, setAutoPresets] = useState<CameraPreset[] | null>(null);
+  const openAutoDirect = () => {
+    setAutoDirectOpen(true);
+    if (!autoPresets) api.cameraPresets().then(setAutoPresets).catch(() => {});
+  };
   const addAllPanels = async (dest: string | "new") => {
     if (!project || !scene || busy) return;
     setAutoDirectOpen(false);
@@ -959,7 +1021,7 @@ export default function RenderPage() {
       const beforeCount = scene.clips.length;
       const target = await api.autoDirect(
         project.id,
-        dest === "new" ? { seconds: 2, new_scene: true } : { seconds: 2, scene_id: dest },
+        dest === "new" ? { seconds: 2, preset: autoPreset, new_scene: true } : { seconds: 2, preset: autoPreset, scene_id: dest },
       );
       await refresh(project.id, target.id);
       const added =
@@ -1136,10 +1198,14 @@ export default function RenderPage() {
     }
   };
 
-  const toggleEntity = (id: string) =>
-    setEntityIds((ids) =>
-      ids.includes(id) ? ids.filter((x) => x !== id) : [...ids, id],
-    );
+  const toggleEntity = (id: string) => {
+    if (!project) return;
+    setEntityIds((ids) => {
+      const next = ids.includes(id) ? ids.filter((x) => x !== id) : [...ids, id];
+      saveLockedEntities(project.id, next);
+      return next;
+    });
+  };
 
   const saveEntity = async () => {
     if (!project || !newEntName.trim() || busy) return;
@@ -1149,12 +1215,18 @@ export default function RenderPage() {
         kind: newEntKind,
         name: newEntName.trim(),
         anchor: newEntAnchor.trim(),
+        voice: newEntVoice.trim() || undefined,
         frame_id: newEntFrame || null,
       });
       setEntities((ents) => [...ents, ent]);
-      setEntityIds((ids) => [...ids, ent.id]);
+      setEntityIds((ids) => {
+        const next = [...ids, ent.id];
+        saveLockedEntities(project.id, next);
+        return next;
+      });
       setNewEntName("");
       setNewEntAnchor("");
+      setNewEntVoice("");
       setNewEntFrame("");
       setShowNewEnt(false);
     } catch (e) {
@@ -1172,7 +1244,11 @@ export default function RenderPage() {
     try {
       await api.deleteEntity(id);
       setEntities((ents) => ents.filter((e) => e.id !== id));
-      setEntityIds((ids) => ids.filter((x) => x !== id));
+      setEntityIds((ids) => {
+        const next = ids.filter((x) => x !== id);
+        if (project) saveLockedEntities(project.id, next);
+        return next;
+      });
     } catch (e) {
       setNotice(`Delete entity failed: ${(e as Error).message}`);
     } finally {
@@ -1368,9 +1444,20 @@ export default function RenderPage() {
           <div>
             <SectionTitle>Add to timeline</SectionTitle>
             <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-              <PrimaryBtn disabled={!!busy} onClick={() => setAutoDirectOpen(true)}>
+              <PrimaryBtn disabled={!!busy} onClick={openAutoDirect}>
                 {busy === "add-all" ? "Adding…" : "Auto-direct timeline"}
               </PrimaryBtn>
+              <SelectInput
+                value={autoPreset}
+                onChange={(e) => setAutoPreset(e.target.value)}
+                title="Camera preset: motion cycle applied per panel in reading order"
+                aria-label="Camera preset"
+                disabled={!!busy}
+              >
+                {(autoPresets ?? PRESET_FALLBACK).map((p) => (
+                  <option key={p.id} value={p.id}>{p.label}</option>
+                ))}
+              </SelectInput>
               {autoDirectOpen && scene ? (
                 <DestinationDialog
                   title="Auto-direct where?"
@@ -1958,6 +2045,14 @@ export default function RenderPage() {
                         style={{ width: "100%" }}
                         disabled={!!busy}
                       />
+                      <TextInput
+                        placeholder="Voice — e.g. en-US-AriaNeural, or blank for default"
+                        value={newEntVoice}
+                        onChange={(e) => setNewEntVoice(e.target.value)}
+                        aria-label="Entity voice"
+                        style={{ width: "100%" }}
+                        disabled={!!busy}
+                      />
                       <div style={{ display: "flex", gap: 6 }}>
                         <SelectInput
                           value={newEntFrame}
@@ -2240,6 +2335,21 @@ export default function RenderPage() {
                         }}
                       >
                         {caption}
+                      </div>
+                    )}
+                    {lipActive && (
+                      <div
+                        style={{
+                          position: "absolute",
+                          right: 8,
+                          bottom: 6,
+                        }}
+                      >
+                        <LipsyncMouth
+                          viseme={lipActive.frame.viseme}
+                          speaker={lipSpeaker}
+                          openness={lipActive.frame.openness}
+                        />
                       </div>
                     )}
                   </div>
@@ -2850,6 +2960,8 @@ export default function RenderPage() {
                   onScene={() => refresh(project.id, scene?.id).catch((e) => setNotice(`Refresh failed: ${(e as Error).message}`))}
                   onVoiceoverStart={startVoiceover}
                   notify={setNotice}
+                  entities={entities}
+                  onSubtitles={(t) => setSubtitles(t)}
                 />
               </div>
             )}
@@ -3072,3 +3184,4 @@ function ExportDoneDialog({
     </div>
   );
 }
+
