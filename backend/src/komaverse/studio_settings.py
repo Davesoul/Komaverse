@@ -62,6 +62,7 @@ PROVIDER_PREFIX = {
     "openrouter": "openrouter_",
     "baseten": "baseten_",
     "cloud": "ai_",
+    "portal": "ai_",
     "local": "local_",
     "elevenlabs": "elevenlabs_",
     "free-tts": "freetts_",
@@ -70,9 +71,9 @@ PROVIDER_PREFIX = {
 # Honest per-kind provider menus (mirrors backend capabilities: chat and
 # vision run on LLM providers, image on all image-capable ones, video is
 # OpenRouter-only end to end).
-CHAT_PROVIDERS = ("meta", "openrouter", "baseten", "cloud", "local")
-VISION_PROVIDERS = ("meta", "openrouter", "cloud", "local")
-IMAGE_PROVIDERS = ("meta", "openrouter", "cloud", "local", "comfyui")
+CHAT_PROVIDERS = ("meta", "openrouter", "baseten", "cloud", "portal", "local")
+VISION_PROVIDERS = ("meta", "openrouter", "cloud", "portal", "local")
+IMAGE_PROVIDERS = ("meta", "openrouter", "cloud", "portal", "local", "comfyui")
 VOICE_PROVIDERS = ("elevenlabs", "free-tts")
 KIND_PROVIDERS = {
     "chat": CHAT_PROVIDERS,

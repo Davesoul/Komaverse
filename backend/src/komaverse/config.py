@@ -57,6 +57,13 @@ class Settings(BaseSettings):
     own_key_freemium_daily_limit: int = Field(
         default=20, validation_alias="OWN_KEY_FREEMIUM_DAILY_LIMIT"
     )
+    # Shared demo/trial accounts that must never spend studio keys or
+    # studio credits: these emails generate on their own vault keys
+    # only (comma-separated, case-insensitive). Default covers the
+    # seeded demo login.
+    own_keys_only_emails: str = Field(
+        default="demo@komaverse.local", validation_alias="OWN_KEYS_ONLY_EMAILS"
+    )
 
     mcp_user_email: str = Field(default="", validation_alias="KOMAVERSE_MCP_USER")
 

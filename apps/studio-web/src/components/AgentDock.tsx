@@ -1795,9 +1795,9 @@ export default function AgentDock() {
   // Blank model fields are left untouched; Reset clears all overrides.
   // Video is OpenRouter-only end to end, so it takes a model but no provider.
   const KIND_PROVIDERS: Record<string, string[]> = {
-    chat: ["meta", "openrouter", "baseten", "cloud", "local"],
-    vision: ["meta", "openrouter", "cloud", "local"],
-    image: ["meta", "openrouter", "cloud", "local", "comfyui"],
+    chat: ["meta", "openrouter", "baseten", "cloud", "portal", "local"],
+    vision: ["meta", "openrouter", "cloud", "portal", "local"],
+    image: ["meta", "openrouter", "cloud", "portal", "local", "comfyui"],
     transcribe: ["meta"],
     voice: ["elevenlabs", "free-tts"],
   };
@@ -1814,6 +1814,7 @@ export default function AgentDock() {
     openrouter: "via OpenRouter",
     baseten: "Baseten open weights",
     cloud: "custom endpoint",
+    portal: "Koma Portal · our models, credits",
     local: "local server",
     comfyui: "ComfyUI",
     elevenlabs: "ElevenLabs cloud",
@@ -1824,6 +1825,7 @@ export default function AgentDock() {
     openrouter: "openrouter_",
     baseten: "baseten_",
     cloud: "ai_",
+    portal: "ai_",
     local: "local_",
     elevenlabs: "elevenlabs_",
     "free-tts": "freetts_",

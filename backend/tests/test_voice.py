@@ -495,3 +495,20 @@ def test_voice_local_falls_back_when_default_engine_missing(monkeypatch):
     monkeypatch.setattr(local, "_run_pyttsx3", fake_pyttsx3)
     assert local.synthesize_local("hello village") == b"ID3x"
     assert seen["engine"] == "pyttsx3"
+
+
+def test_synthesize_demo_user_blocked_from_cloud_voice(factory, saved_settings, monkeypatch):
+    """Demo login cannot spend the studio ElevenLabs key; free voices still work."""
+    from komaverse.api.scans import ProjectCreate, create_project
+
+    monkeypatch.setattr(settings, "own_keys_only_emails", "demo@komaverse.local")
+    monkeypatch.setattr(settings, "voice_provider", "elevenlabs")
+    with factory() as s:
+        demo = create_user(s, email="demo@komaverse.local")
+        project = create_project(ProjectCreate(name="Voice"), s, demo)
+        pid = project.id
+    with factory() as s, pytest.raises(HTTPException) as exc:
+        synthesize_take(pid, SynthCreate(text="hi"), s, demo)
+    assert exc.value.status_code == 402
+    assert "free local voice" in exc.value.detail
+

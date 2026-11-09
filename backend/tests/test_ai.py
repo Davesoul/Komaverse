@@ -434,3 +434,80 @@ def test_legacy_job_without_enhance_serializes():
     )
     job = row.to_schema()
     assert job.enhance is False
+
+
+def test_demo_account_needs_own_key(factory, monkeypatch):
+    """Shared demo login cannot fall back to studio keys/credits."""
+
+    monkeypatch.setattr(settings, "own_keys_only_emails", "demo@komaverse.local")
+    with factory() as s:
+        demo = create_user(s, email="demo@komaverse.local")
+    with factory() as s:
+        with pytest.raises(HTTPException) as exc:
+            generate(
+                GenerateRequest(kind="image", prompt="a robot", provider="openrouter"),
+                BackgroundTasks(),
+                s,
+                demo,
+            )
+    assert exc.value.status_code == 402
+    assert "own provider key" in exc.value.detail
+
+
+def test_demo_account_with_own_key_proceeds(factory, monkeypatch):
+    """Demo login + saved vault key generates with zero studio spend."""
+    from conftest import create_user
+
+    monkeypatch.setattr(settings, "own_keys_only_emails", "demo@komaverse.local")
+    monkeypatch.setattr(
+        "komaverse.api.ai.get_user_key", lambda session, user_id, provider: "sk-own"
+    )
+    with factory() as s:
+        demo = create_user(s, email="demo@komaverse.local")
+    with factory() as s:
+        job = generate(
+            GenerateRequest(kind="image", prompt="a robot", provider="openrouter"),
+            BackgroundTasks(),
+            s,
+            demo,
+        )
+    assert job.status == "queued"
+
+
+def test_regular_user_without_key_uses_credits(factory, user):
+    """The gate is scoped: normal logins still fall back to credits."""
+    with factory() as s:
+        job = generate(
+            GenerateRequest(kind="image", prompt="a robot", provider="openrouter"),
+            BackgroundTasks(),
+            s,
+            user,
+        )
+    assert job.status == "queued"
+def test_portal_generate_uses_credits(factory, user):
+    """Koma Portal = our models on studio credits, never vault keys."""
+    with factory() as s:
+        job = generate(
+            GenerateRequest(kind="image", prompt="a robot", provider="portal"),
+            BackgroundTasks(),
+            s,
+            user,
+        )
+    assert job.status == "queued"
+
+
+def test_demo_account_portal_blocked(factory, monkeypatch):
+    """Demo login cannot spend studio credits, even via Koma Portal."""
+    monkeypatch.setattr(settings, "own_keys_only_emails", "demo@komaverse.local")
+    with factory() as s:
+        demo = create_user(s, email="demo@komaverse.local")
+    with factory() as s:
+        with pytest.raises(HTTPException) as exc:
+            generate(
+                GenerateRequest(kind="image", prompt="a robot", provider="portal"),
+                BackgroundTasks(),
+                s,
+                demo,
+            )
+    assert exc.value.status_code == 402
+    assert "Koma Portal" in exc.value.detail

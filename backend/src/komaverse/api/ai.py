@@ -76,6 +76,7 @@ from komaverse.user_keys import (
     UnreadableKey,
     VaultUnavailable,
     get_user_key,
+    requires_own_key,
 )
 
 router = APIRouter(prefix="/api/v1")
@@ -91,7 +92,7 @@ CREDIT_PACKS: tuple[dict[str, str | int], ...] = (
     {"id": "topup-10", "usd_cents": 1000, "credits": 1100},
     {"id": "topup-25", "usd_cents": 2500, "credits": 3000},
 )
-PROVIDERS = ("cloud", "comfyui", "fake", "local", "meta", "openrouter")
+PROVIDERS = ("cloud", "comfyui", "fake", "local", "meta", "openrouter", "portal")
 #: Providers that cost the studio nothing: never debited, always allowed.
 LOCAL_FREE_PROVIDERS = frozenset({"local", "fake", "comfyui"})
 
@@ -750,6 +751,16 @@ def generate(
             raise HTTPException(503, str(exc)) from None
         except UnreadableKey as exc:
             raise HTTPException(400, str(exc)) from None
+    if requires_own_key(user.email) and (
+        body.provider == "portal"
+        or (body.provider in BYOK_PROVIDERS and own_key is None)
+    ):
+        raise HTTPException(
+            402,
+            "This shared demo account runs on your own provider keys only — "
+            "select a keyed provider and paste its key in the Brain panel. "
+            "Koma Portal (studio credits) is disabled here.",
+        )
     if own_key is not None and settings.paywall_enabled:
         # Own-key generations bill the user's provider account, not studio
         # credits — but freemium stays rate-limited; paid tiers are unlimited.

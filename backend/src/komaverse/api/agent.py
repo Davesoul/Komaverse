@@ -471,18 +471,21 @@ def agent_status(
             "openrouter": settings.openrouter_chat_model,
             "baseten": settings.baseten_chat_model,
             "cloud": settings.ai_chat_model,
+            "portal": settings.ai_chat_model,
             "local": settings.local_chat_model or None,
         }.get(providers["chat"])
     images = {
         "openrouter": settings.openrouter_image_model,
         "meta": settings.meta_image_model,
         "cloud": settings.ai_image_model,
+        "portal": settings.ai_image_model,
         "local": settings.local_image_model or None,
     }
     visions = {
         "openrouter": settings.openrouter_vision_model,
         "meta": settings.meta_vision_model,
         "cloud": settings.ai_vision_model,
+        "portal": settings.ai_vision_model,
         "local": settings.local_vision_model or None,
     }
     videos = {"openrouter": settings.openrouter_video_model}

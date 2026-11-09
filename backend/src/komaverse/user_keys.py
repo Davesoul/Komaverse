@@ -25,6 +25,20 @@ MIN_KEY_LEN = 8
 MAX_KEY_LEN = 500
 
 
+def requires_own_key(email: str | None) -> bool:
+    """True when this login may only generate on its own vault keys.
+
+    Shared demo/trial accounts (see OWN_KEYS_ONLY_EMAILS) never fall
+    back to studio keys or studio credits.
+    """
+    allowed = {
+        e.strip().lower()
+        for e in (settings.own_keys_only_emails or "").split(",")
+        if e.strip()
+    }
+    return (email or "").strip().lower() in allowed
+
+
 class VaultUnavailable(Exception):
     """KEY_VAULT_SECRET is not configured (endpoints answer 503)."""
 

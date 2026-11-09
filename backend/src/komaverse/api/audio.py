@@ -26,6 +26,7 @@ from komaverse.lipsync import analyze_wav_bytes, procedural_visemes
 from komaverse.models import AudioCue, AudioTake, SubtitleTrack, VisemeFrame
 from komaverse.renderer import audio_has_stream, transcode_to_wav
 from komaverse.studio_settings import provider_for
+from komaverse.user_keys import requires_own_key
 
 router = APIRouter(prefix="/api/v1")
 
@@ -390,6 +391,12 @@ def synthesize_take(
             else settings.freetts_voice_model
         ) or None
     if provider == "elevenlabs" and not (voice or "").startswith("xtts:"):
+        if requires_own_key(user.email):
+            raise HTTPException(
+                402,
+                "This shared demo account holds no cloud-voice key — "
+                "pick a free local voice (free-tts or a clone) instead.",
+            )
         if not spend_credits(session, user.id, COSTS["voice"], "voice synthesis"):
             raise HTTPException(402, f"insufficient credits (need {COSTS['voice']})")
     try:

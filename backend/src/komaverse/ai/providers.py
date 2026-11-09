@@ -687,6 +687,10 @@ def get_provider(name: str, api_key: str | None = None) -> AIProvider:
     """Provider instance; api_key is a BYOK override for this chain only."""
     if name == "cloud":
         return CloudProvider(api_key=api_key)
+    if name == "portal":
+        # Koma Portal: our hosted models on studio credits. Vault
+        # keys never apply here, so any override is ignored.
+        return CloudProvider()
     if name == "comfyui":
         return ComfyUIProvider()
     if name == "local":
@@ -845,6 +849,12 @@ def get_chat_config(*, vision: bool = False) -> tuple[str, str, str]:
         if not settings.ai_api_key or not settings.ai_base_url:
             raise ProviderError("cloud chat needs AI_BASE_URL and AI_API_KEY")
         model = settings.ai_chat_model
+    if name == "portal":
+        # Same studio endpoint/models as cloud: the Portal choice
+        # is how users explicitly pick our models on credits.
+        if not settings.ai_api_key or not settings.ai_base_url:
+            raise ProviderError("portal chat needs AI_BASE_URL and AI_API_KEY")
+        model = settings.ai_chat_model
         if vision and settings.ai_vision_model:
             model = settings.ai_vision_model
         return settings.ai_base_url, settings.ai_api_key, model
@@ -865,7 +875,7 @@ def get_chat_config(*, vision: bool = False) -> tuple[str, str, str]:
         )
     raise ProviderError(
         f'unknown AI_PROVIDER "{name}" (want meta, openrouter, baseten, '
-        "cloud, local, comfyui, fake)"
+        "cloud, portal, local, comfyui, fake)"
     )
 
 

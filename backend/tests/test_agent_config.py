@@ -448,3 +448,17 @@ def test_agent_config_keys_write_masked_clear(factory, user, saved_settings):
             AgentConfigBody(meta_api_key=""), session=s, user=user
         )
         assert "meta_api_key" not in get_ai_overrides(s)
+def test_agent_config_accepts_portal_chat(factory, user, saved_settings):
+    """Brain Chat row: Koma Portal maps to the studio ai_* models."""
+    with factory() as s:
+        out = agent_config(
+            AgentConfigBody(chat_provider="portal", chat_model="koma-chat-1"),
+            session=s,
+            user=user,
+        )
+    assert out.providers["chat"] == "portal"
+    assert out.chat_model == "koma-chat-1"
+    assert settings.chat_provider == "portal"
+    assert settings.ai_chat_model == "koma-chat-1"
+    assert "chat_provider" in out.overrides
+    assert "ai_chat_model" in out.overrides
